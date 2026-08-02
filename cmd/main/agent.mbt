@@ -82,7 +82,12 @@ async fn run_llm_agent(
   let mut step = 0
   let mut total_tool_calls = 0
   let mut package_docs_calls = 0
-  while step < 6 {
+  let mut budget_exhausted = false
+  while step < 6 && !budget_exhausted {
+    if total_tool_calls >= 12 {
+      budget_exhausted = true
+      break
+    }
     let result = stream_chat_completion(
       api_key,
       base_url,
@@ -104,10 +109,19 @@ async fn run_llm_agent(
       assistant_message_with_tool_calls(result.content, result.tool_calls),
     )
     for call in result.tool_calls {
-      total_tool_calls += 1
-      guard total_tool_calls <= 12 else {
-        fail("agent exceeded the 12-call tool budget")
+      if total_tool_calls >= 12 {
+        budget_exhausted = true
+        // Keep the message history well-formed: every assistant tool call
+        // must have a matching tool result, even if we skip executing it.
+        messages.push(
+          tool_result_message(
+            call.id,
+            error_json("tool call skipped: agent budget exhausted"),
+          ),
+        )
+        continue
       }
+      total_tool_calls += 1
       trace.push("[tool] \{call.name}")
       let call_result = match call.name {
         "search_modules" =>
@@ -141,7 +155,34 @@ async fn run_llm_agent(
     }
     step += 1
   }
-  fail("agent exceeded the 6-step tool-call limit")
+  if !budget_exhausted && step >= 6 {
+    budget_exhausted = true
+  }
+  if budget_exhausted {
+    trace.push(
+      "[observation] Agent budget exhausted; requesting a final answer from collected evidence",
+    )
+    messages.push(
+      chat_message(
+        "user", "(System: no more tool calls are allowed. Answer the user's question now using the evidence already collected.)",
+      ),
+    )
+    let result = stream_chat_completion(
+      api_key,
+      base_url,
+      model,
+      messages,
+      tools_json,
+      max_tokens=1200,
+      on_delta=_ => (),
+    )
+    if result.tool_calls.is_empty() && result.content != "" {
+      trace.push("[final] Model answered from collected evidence")
+      return { text: result.content, trace }
+    }
+    fail("model could not answer after exhausting the agent budget")
+  }
+  fail("agent loop terminated without an answer")
 }
 
 ///|
@@ -156,5 +197,9 @@ fn system_prompt() -> String {
     #|Do not claim a backend is supported unless the evidence explicitly
     #|shows it. Never invent package facts or API usage. Cite each package with
     #|https://mooncakes.io/docs/<owner>/<module>. Answer in the user's language.
+    #|Conserve tool calls: never repeat a tool with the same arguments, and
+    #|stop calling tools as soon as you have enough evidence to answer. You
+    #|have a budget of 12 tool calls total; the final answer must be written
+    #|from the evidence already collected.
   )
 }
