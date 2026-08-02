@@ -19,5 +19,5 @@ import {
 } for "wbtest"
 
 options(
-  "native-stub": [ "windows_argv.c" ],
+  "native-stub": [ "windows_argv.c", "console_utf8.c" ],
 )
