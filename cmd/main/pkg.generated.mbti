@@ -1,12 +1,32 @@
 // Generated using `moon info`, DON'T EDIT IT
 package "moonsage/moonsage/cmd/main"
 
+import {
+  "moonbitlang/core/debug",
+}
+
 // Values
 
 // Errors
 
 // Types and methods
+type ChatToolCall derive(Eq, @debug.Debug)
+
 type LlmAgentAnswer
+
+type SseEvent derive(Eq, @debug.Debug)
+
+type StreamChunk derive(Eq, @debug.Debug)
+
+type StreamResult
+
+type ToolCallAccumulator
+
+type ToolCallBuilder
+
+type ToolCallDelta derive(Eq, @debug.Debug)
+
+type ToolSchema
 
 // Type aliases
 

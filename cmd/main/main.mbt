@@ -47,8 +47,7 @@ async fn run_ask(question : String) -> Unit {
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
   let modules = fetch_modules()
-  let client = @llm.Client::new(key, base_url~)
-  let answer = run_llm_agent(client, model, modules, question)
+  let answer = run_llm_agent(key, base_url, model, modules, question)
   println("MoonSage\n")
   for event in answer.trace {
     println(event)
