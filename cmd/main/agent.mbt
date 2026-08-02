@@ -71,6 +71,7 @@ async fn run_llm_agent(
   model : String,
   modules : Array[@moonsage.ModuleSummary],
   question : String,
+  on_delta? : async (String) -> Unit = ignore_delta,
 ) -> LlmAgentAnswer {
   let messages : Array[Json] = [
     chat_message("system", system_prompt()),
@@ -95,7 +96,7 @@ async fn run_llm_agent(
       messages,
       tools_json,
       max_tokens=1200,
-      on_delta=_ => (),
+      on_delta~,
     )
     if result.finish_reason is Some("length") {
       trace.push("[observation] Model hit max_tokens; answer may be truncated")
@@ -174,7 +175,7 @@ async fn run_llm_agent(
       messages,
       tools_json,
       max_tokens=1200,
-      on_delta=_ => (),
+      on_delta~,
     )
     if result.tool_calls.is_empty() && result.content != "" {
       trace.push("[final] Model answered from collected evidence")
