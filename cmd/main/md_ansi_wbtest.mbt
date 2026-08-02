@@ -14,6 +14,26 @@ test "render_heading_bold_and_code" {
 }
 
 ///|
+test "render_cjk_bold_with_spaces_fallback" {
+  // Upstream cmark fails to parse emphasis around CJK+space text; the
+  // renderer falls back to fixing the leftover markers itself.
+  let out = render_checked("**API 用法** 和 **了解 API 用法**")
+  assert_true(out.contains("\u001B[1mAPI 用法\u001B[22m"))
+  assert_true(out.contains("\u001B[1m了解 API 用法\u001B[22m"))
+  assert_false(out.contains("**"))
+}
+
+///|
+test "render_cjk_italic_and_list_item" {
+  let out = render_checked(
+    "- **了解 API 用法** — 查询签名\n\n*中文 斜体*",
+  )
+  assert_true(out.contains("\u001B[1m了解 API 用法\u001B[22m"))
+  assert_true(out.contains("\u001B[3m中文 斜体\u001B[23m"))
+  assert_false(out.contains("**"))
+}
+
+///|
 test "render_link_shows_destination" {
   let out = render_checked("[docs](https://mooncakes.io)")
   assert_true(out.contains("docs"))
