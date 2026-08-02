@@ -10,6 +10,8 @@ import {
   "moonsage/moonsage",
   "moonbitlang/async",
   "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/stdio",
   "moonbitlang/core/json",
   "moonbitlang/x/sys",
 }

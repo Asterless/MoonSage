@@ -164,7 +164,10 @@ async test "stream_chat_completion receives text deltas incrementally" {
       [chat_message("user", "hi")],
       [],
       max_tokens=64,
-      on_delta=text => deltas.write_string(text),
+      on_delta=async fn(text) {
+        deltas.write_string(text)
+        @async.sleep(0)
+      },
     )
     assert_eq(result.content, "Hello world")
     assert_eq(deltas.to_string(), "Hello world")
@@ -189,7 +192,7 @@ async test "stream_chat_completion assembles tool calls from fragments" {
       [chat_message("user", "hi")],
       [agent_tools()[0].to_json()],
       max_tokens=64,
-      on_delta=_ => (),
+      on_delta=async fn(_ : String) { @async.sleep(0) },
     )
     assert_eq(result.content, "")
     assert_eq(result.finish_reason, Some("tool_calls"))

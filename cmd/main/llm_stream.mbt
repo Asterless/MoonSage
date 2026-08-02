@@ -198,6 +198,11 @@ struct StreamResult {
 }
 
 ///|
+async fn ignore_delta(_ : String) -> Unit {
+  @async.sleep(0)
+}
+
+///|
 /// Stream a chat completion over HTTP using SSE, invoking `on_delta` with each
 /// incremental text fragment as it arrives. Returns the fully assembled result.
 async fn stream_chat_completion(
@@ -207,7 +212,7 @@ async fn stream_chat_completion(
   messages : Array[Json],
   tools : Array[Json],
   max_tokens? : Int = 1200,
-  on_delta? : (String) -> Unit = _ => (),
+  on_delta? : async (String) -> Unit = ignore_delta,
 ) -> StreamResult {
   let endpoint = base_url.trim_end(chars="/").to_owned() + "/chat/completions"
   let request = Json::object({
