@@ -56,7 +56,25 @@ async fn run_ask(question : String) -> Unit {
 }
 
 ///|
+// Make the Windows console interpret output as UTF-8. No-op elsewhere.
+#cfg(platform="windows")
+extern "C" fn set_console_output_cp_utf8() = "moonsage_set_console_utf8"
+
+///|
+#cfg(platform="windows")
+fn enable_utf8_console() -> Unit {
+  set_console_output_cp_utf8()
+}
+
+///|
+#cfg(not(platform="windows"))
+fn enable_utf8_console() -> Unit {
+  ()
+}
+
+///|
 async fn main {
+  enable_utf8_console()
   let args = cli_args()
   if args.length() < 3 || args[1] == "--help" || args[1] == "-h" {
     println(usage())
