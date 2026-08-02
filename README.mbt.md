@@ -11,23 +11,30 @@ research, inspect live manifests, and return cited recommendations.
 moon run cmd/main -- search "json parser"
 ```
 
-`search` does not require an LLM key. To use the agent, configure an API key in
-the current shell and run `ask`:
+`search` does not require an LLM key. To use the agent, configure an API key
+and run `ask`:
 
 ```powershell
-$env:MOONSAGE_API_KEY="your-key"
 moon run cmd/main -- ask "帮我找一个适合 native 后端的 HTTP 客户端"
 ```
 
-Optional configuration:
+## Configuration
+
+MoonSage reads credentials from the process environment, falling back to a
+`.env` file in the project root when the variable is not set. Copy the example
+and fill in your own values:
 
 ```powershell
-$env:MOONSAGE_BASE_URL="https://api.deepseek.com"
-$env:MOONSAGE_MODEL="deepseek-chat"
+Copy-Item .env.example .env
 ```
 
-MoonSage reads credentials from the process environment. Do not commit API
-keys to source files or `.env` files.
+`.env` is git-ignored — never commit API keys to source files or `.env`.
+
+| Variable | Required | Default |
+| --- | --- | --- |
+| `MOONSAGE_API_KEY` | for `ask` | — |
+| `MOONSAGE_BASE_URL` | no | `https://api.deepseek.com` |
+| `MOONSAGE_MODEL` | no | `deepseek-chat` |
 
 ## Agent loop
 
