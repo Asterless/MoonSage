@@ -1,0 +1,77 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/moonsage"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub fn compact_module_index(String) -> String raise
+
+pub fn compact_package_docs(String) -> String raise
+
+pub fn package_url(String) -> String
+
+pub fn parse_modules(String) -> Array[ModuleSummary] raise
+
+pub fn render_answer(AgentAnswer) -> String
+
+pub fn run_agent(Array[ModuleSummary], String, limit? : Int) -> AgentAnswer
+
+pub fn search_modules(Array[ModuleSummary], String, limit? : Int) -> Array[SearchResult]
+
+// Errors
+
+// Types and methods
+pub(all) struct AgentAnswer {
+  query : String
+  events : Array[AgentEvent]
+  results : Array[SearchResult]
+} derive(Eq, @debug.Debug)
+
+pub(all) enum AgentEvent {
+  Plan(String)
+  ToolCall(String)
+  Observation(String)
+} derive(Eq, @debug.Debug)
+
+pub(all) struct ModuleSummary {
+  name : String
+  version : String
+  license : String
+  repository : String
+  keywords : Array[String]
+  description : String
+  created_at : String
+} derive(Eq, ToJson, @debug.Debug)
+
+pub(all) struct PackageApiEntry {
+  kind : String
+  name : String
+  signature : String
+  docstring : String
+} derive(Eq, ToJson, @debug.Debug)
+
+pub(all) struct PackageDocsSummary {
+  name : String
+  entries : Array[PackageApiEntry]
+  truncated : Bool
+} derive(Eq, ToJson, @debug.Debug)
+
+pub(all) struct PackageIndexSummary {
+  path : String
+  traits : Array[String]
+  errors : Array[String]
+  types : Array[String]
+  values : Array[String]
+} derive(Eq, ToJson, @debug.Debug)
+
+pub(all) struct SearchResult {
+  item : ModuleSummary
+  score : Int
+} derive(Eq, ToJson, @debug.Debug)
+
+// Type aliases
+
+// Traits
+

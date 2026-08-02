@@ -1,0 +1,20 @@
+// import {
+//   "moonsage/moonsage" @lib,
+// }
+
+pkgtype(kind: "executable")
+
+supported_targets = "+native"
+
+import {
+  "DC-Z-lab/moonllm" @llm,
+  "moonsage/moonsage",
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/core/json",
+  "moonbitlang/x/sys",
+}
+
+options(
+  "native-stub": [ "windows_argv.c" ],
+)
