@@ -26,5 +26,4 @@ description = "A MoonBit-native agent for exploring the Mooncakes package ecosys
 import {
   "moonbitlang/x@0.4.47",
   "moonbitlang/async@0.20.3",
-  "DC-Z-lab/moonllm@0.1.0",
 }

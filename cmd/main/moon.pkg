@@ -7,13 +7,16 @@ pkgtype(kind: "executable")
 supported_targets = "+native"
 
 import {
-  "DC-Z-lab/moonllm" @llm,
   "moonsage/moonsage",
   "moonbitlang/async",
   "moonbitlang/async/http",
   "moonbitlang/core/json",
   "moonbitlang/x/sys",
 }
+
+import {
+  "moonbitlang/async/socket",
+} for "wbtest"
 
 options(
   "native-stub": [ "windows_argv.c" ],

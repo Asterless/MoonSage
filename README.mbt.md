@@ -42,9 +42,12 @@ rounds, twelve total tool calls, and four package-document reads:
 6. Feed tool observations back to the model.
 7. Return an answer in the user's language with Mooncakes documentation URLs.
 
-Mooncakes requests use `moonbitlang/async/http`. Model requests use
-`DC-Z-lab/moonllm`, an OpenAI-compatible MoonBit SDK. Runtime execution does
-not depend on curl or another external program.
+Mooncakes requests use `moonbitlang/async/http`. The `ask` command streams
+chat completions directly from any OpenAI-compatible API (e.g. DeepSeek) over
+SSE (`text/event-stream`): it reads the response body incrementally, parses
+each `data:` delta, and assembles text and tool calls as they arrive. No
+third-party LLM SDK is required, and runtime execution does not depend on curl
+or another external program.
 
 ## Development
 

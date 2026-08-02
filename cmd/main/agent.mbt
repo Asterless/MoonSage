@@ -66,66 +66,60 @@ fn error_json(message : String) -> String {
 
 ///|
 async fn run_llm_agent(
-  client : @llm.Client,
+  api_key : String,
+  base_url : String,
   model : String,
   modules : Array[@moonsage.ModuleSummary],
   question : String,
 ) -> LlmAgentAnswer {
-  let conversation = @llm.Conversation::new(
-    system=(
-      #|You are MoonSage, an agent for the MoonBit package ecosystem.
-      #|Use search_modules before recommending packages. Translate user intent
-      #|into concise English search keywords. Inspect manifests for the most
-      #|relevant candidates before making claims about downloads, versions or
-      #|build status. Use get_module_index and get_package_docs before making
-      #|claims about APIs, functions, types, examples, or backend suitability.
-      #|Do not claim a backend is supported unless the evidence explicitly
-      #|shows it. Never invent package facts or API usage. Cite each package with
-      #|https://mooncakes.io/docs/<owner>/<module>. Answer in the user's language.
-    ),
-  )
-  conversation.user(question)
+  let messages : Array[Json] = [
+    chat_message("system", system_prompt()),
+    chat_message("user", question),
+  ]
   let tools = agent_tools()
+  let tools_json = tools.map(fn(t) { t.to_json() })
   let trace : Array[String] = ["[plan] Delegate package research to the model"]
   let mut step = 0
   let mut total_tool_calls = 0
   let mut package_docs_calls = 0
   while step < 6 {
-    let request = conversation.to_request(model).tools(tools).max_tokens(1200)
-    let response = client.chat_with_retry(
-      request,
-      max_retries=2,
-      base_delay_ms=500,
+    let result = stream_chat_completion(
+      api_key,
+      base_url,
+      model,
+      messages,
+      tools_json,
+      max_tokens=1200,
+      on_delta=_ => (),
     )
-    guard response.first() is Some(choice) else {
-      fail("model returned no choices")
+    if result.finish_reason is Some("length") {
+      trace.push("[observation] Model hit max_tokens; answer may be truncated")
     }
-    let calls = response.tool_calls()
-    if calls.is_empty() {
-      let text = response.text()
-      guard text != "" else { fail("model returned an empty answer") }
+    if result.tool_calls.is_empty() {
+      guard result.content != "" else { fail("model returned an empty answer") }
       trace.push("[final] Model returned a grounded answer")
-      return { text, trace }
+      return { text: result.content, trace }
     }
-    conversation.push(choice.message)
-    for call in calls {
-      let name = call.function.name
+    messages.push(
+      assistant_message_with_tool_calls(result.content, result.tool_calls),
+    )
+    for call in result.tool_calls {
       total_tool_calls += 1
       guard total_tool_calls <= 12 else {
         fail("agent exceeded the 12-call tool budget")
       }
-      trace.push("[tool] \{name}")
-      let result = match name {
+      trace.push("[tool] \{call.name}")
+      let call_result = match call.name {
         "search_modules" =>
-          search_result_json(modules, call.function.arguments) catch {
+          search_result_json(modules, call.arguments) catch {
             error => error_json(error.to_string())
           }
         "get_module_manifest" =>
-          fetch_manifest(call.function.arguments) catch {
+          fetch_manifest(call.arguments) catch {
             error => error_json(error.to_string())
           }
         "get_module_index" =>
-          fetch_module_index(call.function.arguments) catch {
+          fetch_module_index(call.arguments) catch {
             error => error_json(error.to_string())
           }
         "get_package_docs" => {
@@ -135,17 +129,32 @@ async fn run_llm_agent(
               "package docs budget reached; answer using evidence already collected",
             )
           } else {
-            fetch_package_docs(call.function.arguments) catch {
+            fetch_package_docs(call.arguments) catch {
               error => error_json(error.to_string())
             }
           }
         }
-        _ => error_json("unknown tool: \{name}")
+        _ => error_json("unknown tool: \{call.name}")
       }
-      conversation.tool_result(call.id, result)
-      trace.push("[observation] \{name} completed")
+      messages.push(tool_result_message(call.id, call_result))
+      trace.push("[observation] \{call.name} completed")
     }
     step += 1
   }
   fail("agent exceeded the 6-step tool-call limit")
+}
+
+///|
+fn system_prompt() -> String {
+  (
+    #|You are MoonSage, an agent for the MoonBit package ecosystem.
+    #|Use search_modules before recommending packages. Translate user intent
+    #|into concise English search keywords. Inspect manifests for the most
+    #|relevant candidates before making claims about downloads, versions or
+    #|build status. Use get_module_index and get_package_docs before making
+    #|claims about APIs, functions, types, examples, or backend suitability.
+    #|Do not claim a backend is supported unless the evidence explicitly
+    #|shows it. Never invent package facts or API usage. Cite each package with
+    #|https://mooncakes.io/docs/<owner>/<module>. Answer in the user's language.
+  )
 }
