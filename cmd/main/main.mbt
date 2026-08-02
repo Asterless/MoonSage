@@ -80,6 +80,7 @@ fn enable_utf8_console() -> Unit {
 ///|
 async fn main {
   enable_utf8_console()
+  load_dotenv(".env")
   let args = cli_args()
   if args.length() < 3 || args[1] == "--help" || args[1] == "-h" {
     println(usage())
