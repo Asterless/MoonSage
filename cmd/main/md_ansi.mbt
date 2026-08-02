@@ -40,6 +40,115 @@ let ansi_dim = "\u001B[2m"
 let ansi_cyan = "\u001B[36m"
 
 ///|
+fn is_cjk_char(c : Char) -> Bool {
+  let code = c.to_int()
+  (code >= 0x3400 && code <= 0x4DBF) || // CJK 扩展 A
+  (code >= 0x4E00 && code <= 0x9FFF) || // CJK 统一表意文字
+  (code >= 0xF900 && code <= 0xFAFF) || // CJK 兼容表意文字
+  (code >= 0x3000 && code <= 0x303F) || // CJK 标点
+  (code >= 0xFF00 && code <= 0xFFEF) || // 全角形式
+  (code >= 0x3040 && code <= 0x30FF) || // 日文假名
+  (code >= 0xAC00 && code <= 0xD7AF) // 韩文音节
+}
+
+///|
+fn contains_cjk(s : String) -> Bool {
+  for c in s {
+    if is_cjk_char(c) {
+      return true
+    }
+  }
+  false
+}
+
+///|
+// Fallback for upstream cmark failing to parse emphasis around text that
+// mixes CJK characters with spaces (e.g. `**API 用法**` is left as literal
+// text). Only runs on leftover markers inside Text nodes, so code spans,
+// code blocks and already-parsed emphasis are untouched.
+fn fix_emphasis_pass(
+  text : String,
+  delim : Char,
+  double~ : Bool,
+  cjk_only~ : Bool,
+) -> String {
+  let out = StringBuilder::new()
+  let len = text.length()
+  let mut i = 0
+  while i < len {
+    if text[i].unsafe_to_char() == delim {
+      let mut run = 1
+      while i + run < len && text[i + run].unsafe_to_char() == delim {
+        run += 1
+      }
+      if (run >= 2) != double {
+        for k = 0; k < run; k = k + 1 {
+          out.write_char(delim)
+        }
+        i = i + run
+        continue
+      }
+      let min_close = if double { 2 } else { 1 }
+      let mut j = i + run
+      let mut close = -1
+      let mut close_run = 0
+      while j < len {
+        if text[j].unsafe_to_char() == delim {
+          let mut r2 = 1
+          while j + r2 < len && text[j + r2].unsafe_to_char() == delim {
+            r2 += 1
+          }
+          if r2 >= min_close {
+            let x = text[i + run:j].to_owned()
+            let valid = !x.is_empty() &&
+              !x.contains_char(delim) &&
+              !x.contains("\n") &&
+              (!cjk_only || contains_cjk(x))
+            if valid {
+              close = j
+              close_run = r2
+              break
+            }
+          }
+          j += r2
+        } else {
+          j += 1
+        }
+      }
+      if close >= 0 {
+        if double {
+          out.write_string(ansi_bold)
+          out.write_string(text[i + run:close].to_owned())
+          out.write_string(ansi_bold_off)
+        } else {
+          out.write_string(ansi_italic)
+          out.write_string(text[i + run:close].to_owned())
+          out.write_string(ansi_italic_off)
+        }
+        i = close + close_run
+        continue
+      }
+      for k = 0; k < run; k = k + 1 {
+        out.write_char(delim)
+      }
+      i = i + run
+    } else {
+      out.write_char(text[i].unsafe_to_char())
+      i += 1
+    }
+  }
+  out.to_string()
+}
+
+///|
+fn fix_emphasis(text : String) -> String {
+  let s1 = fix_emphasis_pass(text, '*', double=true, cjk_only=false)
+  let s2 = fix_emphasis_pass(s1, '_', double=true, cjk_only=false)
+  let s3 = fix_emphasis_pass(s2, '*', double=false, cjk_only=true)
+  fix_emphasis_pass(s3, '_', double=false, cjk_only=true)
+}
+
+///|
 // State threaded through the renderer callbacks: the collected link
 // definitions of the current document, used to resolve link destinations.
 priv struct AnsiRenderState {
@@ -159,7 +268,7 @@ fn render_ansi_inline(
   i : @cmark.Inline,
 ) -> Unit raise {
   match i {
-    @cmark.Text(t) => c.string(t.v)
+    @cmark.Text(t) => c.string(fix_emphasis(t.v))
     @cmark.Inlines(inlines) =>
       for sub in inlines.v {
         c.inline(sub)
