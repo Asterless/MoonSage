@@ -47,13 +47,20 @@ async fn run_ask(question : String) -> Unit {
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
   let modules = fetch_modules()
-  println("MoonSage\n")
+  @stdio.stdout.write("MoonSage\n")
+  let printer = MdStreamPrinter::new()
   let answer = run_llm_agent(key, base_url, model, modules, question, on_delta=async fn(
     text,
   ) {
-    @stdio.stdout.write(text)
+    printer.feed(text)
+    let out = printer.take_output()
+    if out != "" {
+      @stdio.stdout.write(out)
+    }
   })
-  println("\n")
+  printer.finish()
+  @stdio.stdout.write(printer.take_output())
+  @stdio.stdout.write("\n")
   for event in answer.trace {
     println(event)
   }

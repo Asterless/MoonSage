@@ -13,6 +13,9 @@ import {
   "moonbitlang/async/http",
   "moonbitlang/async/io",
   "moonbitlang/async/stdio",
+  "moonbit-community/cmark/cmark",
+  "moonbit-community/cmark/cmark_base",
+  "moonbit-community/cmark/cmark_renderer",
   "moonbitlang/core/json",
   "moonbitlang/x/sys",
 }
