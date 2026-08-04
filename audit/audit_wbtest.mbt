@@ -114,6 +114,13 @@ test "safe_project_path allows relative files and blocks traversal" {
     _ => true
   }
   assert_true(win_abs)
+  let drive = try {
+    ignore(safe_project_path(ctx, "C:/evil"))
+    false
+  } catch {
+    _ => true
+  }
+  assert_true(drive)
   let empty = try {
     ignore(safe_project_path(ctx, ""))
     false

@@ -104,11 +104,11 @@ test "stream_matches_whole_document_render" {
 ///|
 test "render_cjk_fallback_edge_cases" {
   // underscore variants of the CJK+space fallback
-  let out = render_checked("__?? ??__ ? _?? ??_")
-  assert_true(out.contains("\u001B[1m?? ??\u001B[22m"))
-  assert_true(out.contains("\u001B[3m?? ??\u001B[23m"))
+  let out = render_checked("__中文 测试__ 和 _中文 测试_")
+  assert_true(out.contains("\u001B[1m中文 测试\u001B[22m"))
+  assert_true(out.contains("\u001B[3m中文 测试\u001B[23m"))
   assert_false(out.contains("__"))
-  assert_false(out.contains("_??"))
+  assert_false(out.contains("_中文"))
 }
 
 ///|
@@ -128,7 +128,7 @@ test "render_fallback_leaves_cross_code_span_emphasis_alone" {
   // cmark parses the code span but not the surrounding **; the fallback
   // runs per Text node and cannot wrap across nodes, so the surrounding
   // text must not be turned into bold.
-  let out = render_checked("**`code` ??**")
+  let out = render_checked("**`code` 中文**")
   assert_true(out.contains("\u001B[7mcode\u001B[27m"))
   assert_false(out.contains("\u001B[1mcode"))
 }

@@ -95,7 +95,7 @@ pub async fn Agent::run(
         "user", "(System: no more tool calls are allowed. Answer the user's question now using the evidence already collected.)",
       ),
     )
-    // ?????????????????????
+    // Budget exhausted: force a final answer with no tools exposed.
     let result = @llm.stream_chat_completion(
       api_key,
       base_url,

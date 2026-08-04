@@ -56,8 +56,6 @@ pub fn error_json(message : String) -> String {
 }
 
 ///|
-
-///|
 pub(all) struct Tool {
   schema : ToolSchema
   execute : async (String) -> String

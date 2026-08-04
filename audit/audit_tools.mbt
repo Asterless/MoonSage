@@ -1,16 +1,16 @@
 ///|
-// ???????
+// 修复模式下的写入确认方式。
 priv enum ConfirmMode {
-  // ?????????????? stdin?
+  // 每次写文件前在 stdin 询问
   ConfirmPrompt
-  // ????????????? diff ?????
+  // 直接应用修改，结束时展示累计 diff
   ConfirmDiff
-  // ????????
+  // 不确认直接应用
   ConfirmYes
 }
 
 ///|
-// ???????????????? + ??/?????
+// 审计上下文：项目目录、是否修复模式、确认方式。
 priv struct AuditContext {
   project_dir : String
   fix : Bool
@@ -30,11 +30,12 @@ fn audit_tool_arg(document : Json, key : String) -> String {
 }
 
 ///|
-// ?????????????????????
+// 将项目相对路径解析为绝对路径，拒绝穿越、绝对路径与反斜杠。
 fn safe_project_path(ctx : AuditContext, rel : String) -> String raise {
   guard rel != "" &&
     !rel.contains("..") &&
     !rel.contains("\\") &&
+    !rel.contains(":") &&
     !rel.has_prefix("/") &&
     !rel.has_prefix("\\") else {
     fail("invalid path: \{rel}")
@@ -150,7 +151,12 @@ async fn run_moon_tool(ctx : AuditContext, arguments : String) -> String {
 async fn git_diff_tool(ctx : AuditContext, arguments : String) -> String {
   let document = @json.parse(arguments) catch { _ => Json::object({}) }
   let path = audit_tool_arg(document, "path")
-  let limited = if path != "" { Some(path) } else { None }
+  let limited = if path != "" {
+    ignore(safe_project_path(ctx, path))
+    Some(path)
+  } else {
+    None
+  }
   git_diff(ctx.project_dir, limited)
 }
 
@@ -162,9 +168,7 @@ async fn write_file_tool(ctx : AuditContext, arguments : String) -> String {
   let document = @json.parse(arguments)
   let rel = audit_tool_arg(document, "path")
   let content = audit_tool_arg(document, "content")
-  guard rel != "" && content != "" else {
-    fail("path and content are required")
-  }
+  guard rel != "" else { fail("path is required") }
   let path = safe_project_path(ctx, rel)
   match ctx.confirm {
     ConfirmPrompt => {
@@ -183,7 +187,7 @@ async fn write_file_tool(ctx : AuditContext, arguments : String) -> String {
 }
 
 ///|
-// ??????schema + execute?execute ?????????
+// 组装审计工具集：只读工具始终存在，write_file 仅在修复模式加入。
 fn audit_tools(ctx : AuditContext) -> Array[@tools.Tool] {
   let base : Array[@tools.Tool] = [
     {

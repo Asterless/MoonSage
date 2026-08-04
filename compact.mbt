@@ -1,4 +1,10 @@
 ///|
+let max_module_index_packages = 80
+
+///|
+let max_package_docs_entries = 100
+
+///|
 fn json_string(value : Json, key : String) -> String {
   match value {
     Object(fields) =>

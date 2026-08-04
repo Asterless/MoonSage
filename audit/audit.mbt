@@ -22,8 +22,6 @@ fn audit_default_options() -> AuditOptions {
 }
 
 ///|
-
-///|
 fn parse_audit_options(args : ArrayView[String]) -> AuditOptions raise {
   let opts = audit_default_options()
   guard args.length() >= 1 else {
@@ -104,7 +102,7 @@ fn audit_system_prompt() -> String {
 // 独立的审计 agent 循环：使用审计工具集与更高预算，复用 LLM 流式调用。
 
 ///|
-// ?? agent????????????? + ???? audit ???
+// 复用通用 Agent 循环：装配审计工具集，并使用更高的调用/轮次预算。
 async fn run_audit_agent(
   api_key : String,
   base_url : String,

@@ -215,13 +215,16 @@ pub async fn stream_chat_completion(
   on_delta? : async (String) -> Unit = ignore_delta,
 ) -> StreamResult {
   let endpoint = base_url.trim_end(chars="/").to_owned() + "/chat/completions"
-  let request = Json::object({
+  let payload : Map[String, Json] = {
     "model": Json::string(model),
     "messages": Json::array(messages),
     "stream": Json::boolean(true),
     "max_tokens": Json::number(max_tokens.to_double()),
-    "tools": Json::array(tools),
-  })
+  }
+  if tools.length() > 0 {
+    payload["tools"] = Json::array(tools)
+  }
+  let request = Json::object(payload)
   let headers = {
     "Authorization": "Bearer " + api_key,
     "Content-Type": "application/json",
