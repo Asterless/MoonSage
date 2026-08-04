@@ -32,6 +32,9 @@ moon run cmd/main -- audit moonbit-community/cmark --fix --confirm diff
 
 # fix mode: apply without confirmation
 moon run cmd/main -- audit moonbit-community/cmark --fix --yes
+
+# remove temporary workspaces left by previous audits
+moon run cmd/main -- audit --clean
 ```
 
 ## Remote audit
@@ -48,7 +51,11 @@ configurable confirmation mode (`prompt` per-file, `diff` for a final review,
 or `yes` to skip). Changes are confined to the cloned workspace and never
 touch the user's own files. The audit agent has its own budget
 (`--max-calls`, default 30 tool calls) independent of `ask`. The MoonBit
-toolchain (`moon`) and `git` must be available on `PATH`.
+toolchain (`moon`) and `git` must be available on `PATH`. Each run without
+`--workspace` creates a temporary workspace under the system temp directory;
+run `audit --clean` to remove all leftover `moonsage-audit-*` workspaces, or
+pass `--clean` to an audit run to delete that run's temporary workspace
+afterwards (`--clean` and `--workspace` cannot be combined).
 
 ### How it works
 

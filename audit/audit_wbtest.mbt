@@ -192,6 +192,42 @@ test "parse_audit_options defaults and flags" {
 }
 
 ///|
+test "parse_audit_options supports standalone --clean" {
+  let clean_only = parse_audit_options(["--clean"]) catch {
+    _ => audit_default_options()
+  }
+  assert_eq(clean_only.name, "")
+  assert_true(clean_only.clean)
+  let combined = parse_audit_options(["owner/mod", "--clean"]) catch {
+    _ => audit_default_options()
+  }
+  assert_eq(combined.name, "owner/mod")
+  assert_true(combined.clean)
+  let flags_first = parse_audit_options([
+    "--clean", "owner/mod", "--max-calls", "10",
+  ]) catch {
+    _ => audit_default_options()
+  }
+  assert_eq(flags_first.name, "owner/mod")
+  assert_true(flags_first.clean)
+  assert_eq(flags_first.max_calls, 10)
+}
+
+///|
+async test "clean_audit_temp_dirs removes leftover audit workspaces" {
+  let dir1 = @fs.tmpdir(prefix="moonsage-audit-test-")
+  let dir2 = @fs.tmpdir(prefix="moonsage-audit-test-")
+  let kind1 = @fs.kind(dir1) catch { _ => @fs.FileKind::Unknown }
+  assert_true(kind1 is @fs.FileKind::Directory)
+  let removed = clean_audit_temp_dirs()
+  assert_true(removed >= 2)
+  let kind1_after = @fs.kind(dir1) catch { _ => @fs.FileKind::Unknown }
+  let kind2_after = @fs.kind(dir2) catch { _ => @fs.FileKind::Unknown }
+  assert_true(!(kind1_after is @fs.FileKind::Directory))
+  assert_true(!(kind2_after is @fs.FileKind::Directory))
+}
+
+///|
 test "parse_audit_options rejects bad input" {
   let raised = try {
     ignore(parse_audit_options([]))

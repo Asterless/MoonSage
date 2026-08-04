@@ -137,3 +137,71 @@ async fn git_diff(project_dir : String, path : String?) -> String {
     }
   }
 }
+
+///|
+// 定位系统临时目录根：与 async/fs 内部实现一致，依次使用
+// TEMP / TMP / TMPDIR，最后回退到 Windows 用户临时目录或 /tmp。
+fn audit_temp_root() -> String {
+  match @sys.get_env_var("TEMP") {
+    Some(path) => path
+    None =>
+      match @sys.get_env_var("TMP") {
+        Some(path) => path
+        None =>
+          match @sys.get_env_var("TMPDIR") {
+            Some(path) => path
+            None =>
+              match @sys.get_env_var("USERPROFILE") {
+                Some(home) => home + "/AppData/Local/Temp"
+                None => "/tmp"
+              }
+          }
+      }
+  }
+}
+
+///|
+// 删除临时目录下所有 moonsage-audit-* 目录，返回删除数量。
+async fn clean_audit_temp_dirs() -> Int {
+  let root = audit_temp_root().trim_end(chars="\\/").to_owned()
+  let entries = @fs.readdir(root, sort=true) catch { _ => return 0 }
+  let mut removed = 0
+  for entry in entries {
+    if entry.has_prefix("moonsage-audit-") {
+      let path = root + "/" + entry
+      if @fs.kind(path) is @fs.FileKind::Directory {
+        remove_workspace_dir(path)
+        let still = @fs.kind(path) catch { _ => @fs.FileKind::Unknown }
+        if !(still is @fs.FileKind::Directory) {
+          removed += 1
+        }
+      }
+    }
+  }
+  removed
+}
+
+///|
+// 递归删除审计工作区目录。git clone 会在 .git/objects/pack 下生成只读文件，
+// Windows 上 @fs.rmdir 无法删除它们（@fs.chmod 在 Windows 也不受支持），
+// 因此改用平台原生的强制删除命令：PowerShell 会先清除只读属性。
+#cfg(platform="windows")
+async fn remove_workspace_dir(path : String) -> Unit {
+  // Windows 文件名不可能包含 `"`，因此可以安全地内嵌到命令字符串中。
+  let cmd = "Remove-Item -LiteralPath \"" + path + "\" -Recurse -Force"
+  ignore(
+    @process.collect_output(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", cmd],
+      no_console_window=true,
+    ),
+  )
+}
+
+///|
+#cfg(not(platform="windows"))
+async fn remove_workspace_dir(path : String) -> Unit {
+  ignore(
+    @process.collect_output("rm", ["-rf", "--", path], no_console_window=true),
+  )
+}

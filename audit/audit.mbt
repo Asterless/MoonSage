@@ -7,6 +7,7 @@ priv struct AuditOptions {
   mut workspace : String
   mut max_calls : Int
   max_rounds : Int
+  mut clean : Bool
 }
 
 ///|
@@ -18,21 +19,17 @@ fn audit_default_options() -> AuditOptions {
     workspace: "",
     max_calls: 30,
     max_rounds: 8,
+    clean: false,
   }
 }
 
 ///|
 fn parse_audit_options(args : ArrayView[String]) -> AuditOptions raise {
   let opts = audit_default_options()
-  guard args.length() >= 1 else {
-    fail(
-      "usage: audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]",
-    )
-  }
-  opts.name = args[0]
-  let mut i = 1
+  let mut i = 0
   while i < args.length() {
     match args[i] {
+      "--clean" => opts.clean = true
       "--fix" => opts.fix = true
       "--confirm" => {
         guard i + 1 < args.length() else { fail("--confirm requires a mode") }
@@ -58,9 +55,17 @@ fn parse_audit_options(args : ArrayView[String]) -> AuditOptions raise {
         opts.max_calls = parse_int_or(args[i + 1], 30)
         i += 1
       }
-      _ => fail("unknown audit flag: \{args[i]}")
+      _ => {
+        guard opts.name == "" else { fail("unexpected argument: \{args[i]}") }
+        opts.name = args[i]
+      }
     }
     i += 1
+  }
+  guard opts.name != "" || opts.clean else {
+    fail(
+      "usage: audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>] [--clean]",
+    )
   }
   opts
 }
@@ -153,6 +158,20 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       return
     }
   }
+  if opts.clean && opts.name == "" {
+    let root = audit_temp_root()
+    let removed = clean_audit_temp_dirs()
+    if removed == 0 {
+      println("no leftover audit workspaces in \{root}")
+    } else {
+      println("removed \{removed} audit workspace(s) from \{root}")
+    }
+    return
+  }
+  guard !(opts.clean && opts.workspace != "") else {
+    println("error: --clean cannot be combined with --workspace")
+    return
+  }
   let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
   guard key != "" else {
     println("error: set MOONSAGE_API_KEY before using audit")
@@ -207,6 +226,9 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
   @stdio.stdout.write("Downloading \{owner}/\{repo}...\n")
   let project_dir = fetch_repo_source(owner, repo, workspace) catch {
     e => {
+      if opts.clean {
+        remove_workspace_dir(workspace)
+      }
       println("error: \{e.to_string()}")
       return
     }
@@ -231,6 +253,9 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     max_rounds=opts.max_rounds,
   ) catch {
     e => {
+      if opts.clean {
+        remove_workspace_dir(workspace)
+      }
       println("error: audit failed: \{e.to_string()}")
       return
     }
@@ -247,5 +272,8 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
   @stdio.stdout.write("\n")
   for event in answer.trace {
     @stdio.stdout.write(event + "\n")
+  }
+  if opts.clean {
+    remove_workspace_dir(workspace)
   }
 }
