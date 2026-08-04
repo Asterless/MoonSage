@@ -7,6 +7,7 @@ fn usage() -> String {
     #|  moon run cmd/main -- search <keywords>
     #|  moon run cmd/main -- ask <question>
     #|  moon run cmd/main -- audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
+    #|  moon run cmd/main -- audit --clean
     #|
     #|The ask command reads:
     #|  MOONSAGE_API_KEY    required

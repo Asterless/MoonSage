@@ -10,3 +10,7 @@ import {
   "moonbitlang/core/string",
   "moonbitlang/x/sys",
 }
+
+import {
+  "moonbitlang/async",
+} for "wbtest"
