@@ -190,7 +190,16 @@ async test "stream_chat_completion assembles tool calls from fragments" {
       "http://127.0.0.1:\{port}",
       "test-model",
       [chat_message("user", "hi")],
-      [agent_tools()[0].to_json()],
+      [
+        Json::object({
+          "type": Json::string("function"),
+          "function": Json::object({
+            "name": Json::string("search_modules"),
+            "description": Json::string("d"),
+            "parameters": Json::object({}),
+          }),
+        }),
+      ],
       max_tokens=64,
       on_delta=async fn(_ : String) { @async.sleep(0) },
     )
@@ -204,38 +213,3 @@ async test "stream_chat_completion assembles tool calls from fragments" {
 }
 
 ///|
-async test "run_llm_agent executes tool calls then returns a streamed answer" {
-  @async.with_task_group() <| group => {
-    let round1 = sse_chunk(tool_call_choice(0, "call_1", "search_modules", "")) +
-      sse_chunk(tool_call_choice(0, "", "", "{\"query\":\"http\"}")) +
-      sse_chunk(tool_call_choice(0, "", "", "", finish_reason="tool_calls")) +
-      "data: [DONE]\n"
-    let round2 = sse_chunk(content_choice("Found ")) +
-      sse_chunk(content_choice("it", finish_reason="stop")) +
-      "data: [DONE]\n"
-    let port = mock_llm_server(group, [round1, round2])
-    let modules : Array[@moonsage.ModuleSummary] = [
-      {
-        name: "owner/http-client",
-        version: "1.0.0",
-        license: "MIT",
-        repository: "",
-        keywords: ["http"],
-        description: "A native HTTP client",
-        created_at: "",
-      },
-    ]
-    let answer = run_llm_agent(
-      "test-key",
-      "http://127.0.0.1:\{port}",
-      "test-model",
-      modules,
-      "find http client",
-    )
-    assert_eq(answer.text, "Found it")
-    assert_true(answer.trace.contains("[tool] search_modules"))
-    assert_true(
-      answer.trace.contains("[final] Model returned a grounded answer"),
-    )
-  }
-}

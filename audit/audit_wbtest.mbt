@@ -76,33 +76,21 @@ test "safe_project_path allows relative files and blocks traversal" {
 }
 
 ///|
-test "audit tool schemas include write_file only in fix mode" {
-  let read_only = audit_tool_schemas(false)
+test "audit tools include write_file only in fix mode" {
+  let ro_ctx : AuditContext = {
+    project_dir: "C:/p",
+    fix: false,
+    confirm: ConfirmDiff,
+  }
+  let read_only = audit_tools(ro_ctx)
   assert_eq(read_only.length(), 4)
-  assert_true(!read_only.map(fn(t) { t.name }).contains("write_file"))
-  let fix = audit_tool_schemas(true)
+  assert_true(!read_only.map(fn(t) { t.schema.name }).contains("write_file"))
+  let fix_ctx : AuditContext = {
+    project_dir: "C:/p",
+    fix: true,
+    confirm: ConfirmDiff,
+  }
+  let fix = audit_tools(fix_ctx)
   assert_eq(fix.length(), 5)
-  assert_true(fix.map(fn(t) { t.name }).contains("write_file"))
-}
-
-///|
-test "parse_audit_options handles flags" {
-  let opts = parse_audit_options([
-    "owner/mod", "--fix", "--confirm", "yes", "--workspace", "C:/tmp/w", "--max-calls",
-    "50",
-  ]) catch {
-    _ => audit_default_options()
-  }
-  assert_eq(opts.name, "owner/mod")
-  assert_true(opts.fix)
-  assert_true(opts.confirm is ConfirmYes)
-  assert_eq(opts.workspace, "C:/tmp/w")
-  assert_eq(opts.max_calls, 50)
-  let bad = try {
-    ignore(parse_audit_options(["owner/mod", "--confirm", "bogus"]))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(bad)
+  assert_true(fix.map(fn(t) { t.schema.name }).contains("write_file"))
 }

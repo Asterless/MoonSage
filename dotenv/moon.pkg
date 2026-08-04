@@ -1,0 +1,8 @@
+import {
+  "moonbitlang/async/fs",
+  "moonbitlang/x/sys",
+}
+
+import {
+  "moonbitlang/async",
+} for "wbtest"

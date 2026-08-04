@@ -31,7 +31,7 @@ fn join_query(args : Array[String], start : Int) -> String {
 
 ///|
 async fn run_search(query : String) -> Unit {
-  let modules = fetch_modules()
+  let modules = @mooncakes.fetch_modules()
   let answer = @moonsage.run_agent(modules, query)
   println(@moonsage.render_answer(answer))
 }
@@ -47,10 +47,10 @@ async fn run_ask(question : String) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
-  let modules = fetch_modules()
+  let modules = @mooncakes.fetch_modules()
   @stdio.stdout.write("MoonSage\n")
-  let printer = MdStreamPrinter::new()
-  let answer = run_llm_agent(key, base_url, model, modules, question, on_delta=async fn(
+  let printer = @md_ansi.MdStreamPrinter::new()
+  let answer = @agent.run_llm_agent(key, base_url, model, modules, question, on_delta=async fn(
     text,
   ) {
     printer.feed(text)
@@ -88,7 +88,7 @@ fn enable_utf8_console() -> Unit {
 ///|
 async fn main {
   enable_utf8_console()
-  load_dotenv(".env")
+  @dotenv.load_dotenv(".env")
   let args = cli_args()
   if args.length() < 3 || args[1] == "--help" || args[1] == "-h" {
     println(usage())
@@ -99,7 +99,7 @@ async fn main {
   match command {
     "search" => run_search(query)
     "ask" => run_ask(query)
-    "audit" => run_audit(args[2:])
+    "audit" => @audit.run_audit(args[2:])
     _ => println("Unknown command: \{command}\n\n\{usage()}")
   }
 }

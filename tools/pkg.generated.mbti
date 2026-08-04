@@ -1,0 +1,34 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/tools"
+
+// Values
+pub fn argument_string(String, String) -> String raise
+
+pub fn error_json(String) -> String
+
+pub fn find_tool(Array[Tool], String) -> Tool?
+
+pub fn object_schema(Map[String, Json], Array[String]) -> Json
+
+pub fn string_field(String) -> Json
+
+// Errors
+
+// Types and methods
+pub(all) struct Tool {
+  schema : ToolSchema
+  execute : async (String) -> String
+}
+pub async fn Tool::run(Self, String) -> String
+
+pub(all) struct ToolSchema {
+  name : String
+  description : String
+  parameters : Json
+}
+pub fn ToolSchema::to_json(Self) -> Json
+
+// Type aliases
+
+// Traits
+

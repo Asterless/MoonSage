@@ -1,7 +1,8 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "moonsage/cmd/main"
+package "moonsage/dotenv"
 
 // Values
+pub async fn load_dotenv(String) -> Unit
 
 // Errors
 
