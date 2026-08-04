@@ -55,7 +55,7 @@ async fn read_text_file(path : String) -> String? {
 ///|
 /// Load a `.env` file into the process environment. Values already present
 /// in the real environment take precedence and are never overwritten.
-async fn load_dotenv(path : String) -> Unit {
+pub async fn load_dotenv(path : String) -> Unit {
   let content = match read_text_file(path) {
     Some(content) => content
     None => return

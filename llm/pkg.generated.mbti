@@ -1,0 +1,43 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/llm"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub fn assistant_message_with_tool_calls(String, Array[ChatToolCall]) -> Json
+
+pub fn chat_message(String, String) -> Json
+
+pub async fn ignore_delta(String) -> Unit
+
+pub async fn stream_chat_completion(String, String, String, Array[Json], Array[Json], max_tokens? : Int, on_delta? : async (String) -> Unit) -> StreamResult
+
+pub fn tool_result_message(String, String) -> Json
+
+// Errors
+
+// Types and methods
+pub(all) struct ChatToolCall {
+  id : String
+  name : String
+  arguments : String
+} derive(Eq, @debug.Debug)
+
+type SseEvent derive(Eq, @debug.Debug)
+
+type StreamChunk derive(Eq, @debug.Debug)
+
+pub(all) struct StreamResult {
+  content : String
+  tool_calls : Array[ChatToolCall]
+  finish_reason : String?
+}
+
+type ToolCallDelta derive(Eq, @debug.Debug)
+
+// Type aliases
+
+// Traits
+

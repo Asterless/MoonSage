@@ -9,7 +9,7 @@
 //   "moonbitlang/x@0.4.6",
 // }
 
-name = "moonsage/moonsage"
+name = "moonsage"
 
 version = "0.1.0"
 

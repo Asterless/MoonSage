@@ -1,6 +1,6 @@
 ///|
 // audit 命令的解析结果。
-struct AuditOptions {
+priv struct AuditOptions {
   mut name : String
   mut fix : Bool
   mut confirm : ConfirmMode
@@ -102,6 +102,9 @@ fn audit_system_prompt() -> String {
 
 ///|
 // 独立的审计 agent 循环：使用审计工具集与更高预算，复用 LLM 流式调用。
+
+///|
+// ?? agent????????????? + ???? audit ???
 async fn run_audit_agent(
   api_key : String,
   base_url : String,
@@ -110,104 +113,15 @@ async fn run_audit_agent(
   question : String,
   max_tool_calls~ : Int,
   max_rounds~ : Int,
-) -> LlmAgentAnswer {
-  let messages : Array[Json] = [
-    chat_message("system", audit_system_prompt()),
-    chat_message("user", question),
-  ]
-  let tools_json = audit_tool_schemas(ctx.fix).map(fn(t) { t.to_json() })
-  let trace : Array[String] = ["[plan] Start remote audit"]
-  let mut step = 0
-  let mut total_tool_calls = 0
-  let mut budget_exhausted = false
-  while step < max_rounds && !budget_exhausted {
-    if total_tool_calls >= max_tool_calls {
-      budget_exhausted = true
-      break
-    }
-    let result = stream_chat_completion(
-      api_key,
-      base_url,
-      model,
-      messages,
-      tools_json,
-      max_tokens=2000,
-      on_delta=ignore_delta,
-    )
-    if result.tool_calls.is_empty() {
-      guard result.content != "" else { fail("model returned an empty answer") }
-      trace.push("[final] Audit finished")
-      return { text: result.content, trace }
-    }
-    messages.push(
-      assistant_message_with_tool_calls(result.content, result.tool_calls),
-    )
-    for call in result.tool_calls {
-      if total_tool_calls >= max_tool_calls {
-        budget_exhausted = true
-        messages.push(
-          tool_result_message(
-            call.id,
-            error_json("tool call skipped: agent budget exhausted"),
-          ),
-        )
-        continue
-      }
-      total_tool_calls += 1
-      trace.push("[tool] \{call.name}")
-      let call_result = run_audit_tool(ctx, call.name, call.arguments)
-      messages.push(tool_result_message(call.id, call_result))
-      trace.push("[observation] \{call.name} completed")
-    }
-    step += 1
+) -> @agent.AgentAnswer {
+  let agent : @agent.Agent = {
+    system_prompt: audit_system_prompt(),
+    tools: audit_tools(ctx),
+    max_tool_calls,
+    max_rounds,
+    max_tokens: 2000,
   }
-  if !budget_exhausted && step >= max_rounds {
-    budget_exhausted = true
-  }
-  if budget_exhausted {
-    trace.push(
-      "[observation] Audit budget exhausted; requesting a final report from collected evidence",
-    )
-    messages.push(
-      chat_message(
-        "user", "(System: no more tool calls are allowed. Write the audit report now using the evidence already collected. 用简体中文输出完整报告。)",
-      ),
-    )
-    // 不再暴露任何工具，模型只能输出纯文本报告。
-    let result = stream_chat_completion(
-      api_key,
-      base_url,
-      model,
-      messages,
-      [],
-      max_tokens=2000,
-      on_delta=ignore_delta,
-    )
-    if result.content != "" {
-      trace.push("[final] Audit report from collected evidence")
-      return { text: result.content, trace }
-    }
-    messages.push(
-      chat_message(
-        "user", "(System: your previous reply was empty. Output the audit report as plain text now. 用简体中文输出。)",
-      ),
-    )
-    let retry = stream_chat_completion(
-      api_key,
-      base_url,
-      model,
-      messages,
-      [],
-      max_tokens=2000,
-      on_delta=ignore_delta,
-    )
-    if retry.content != "" {
-      trace.push("[final] Audit report (retried)")
-      return { text: retry.content, trace }
-    }
-    fail("model could not produce an audit report")
-  }
-  fail("audit loop terminated without an answer")
+  agent.run(api_key, base_url, model, question)
 }
 
 ///|
@@ -221,7 +135,7 @@ fn audit_question_text() -> String {
 }
 
 ///|
-async fn run_audit(args : ArrayView[String]) -> Unit {
+pub async fn run_audit(args : ArrayView[String]) -> Unit {
   let opts = parse_audit_options(args) catch {
     e => {
       println("error: \{e.to_string()}")
@@ -240,11 +154,11 @@ async fn run_audit(args : ArrayView[String]) -> Unit {
 
   @stdio.stdout.write("MoonSage audit\n")
   @stdio.stdout.write("Fetching manifest for \{opts.name}...\n")
-  guard valid_module_name(opts.name) else {
+  guard @mooncakes.valid_module_name(opts.name) else {
     println("error: invalid module name: \{opts.name}")
     return
   }
-  let manifest = fetch_asset(
+  let manifest = @mooncakes.fetch_asset(
     "https://mooncakes.io/api/v0/manifest/\{opts.name}",
     "Mooncakes manifest API",
   ) catch {
@@ -311,8 +225,10 @@ async fn run_audit(args : ArrayView[String]) -> Unit {
     }
   }
   @stdio.stdout.write("\n")
-  let rendered = render_md_to_ansi(answer.text) catch { _ => answer.text }
-  @stdio.stdout.write(rendered + ansi_reset + "\n")
+  let rendered = @md_ansi.render_md_to_ansi(answer.text) catch {
+    _ => answer.text
+  }
+  @stdio.stdout.write(rendered + "\u001B[0m" + "\n")
   if opts.fix {
     @stdio.stdout.write("\n=== changes ===\n")
     @stdio.stdout.write(git_diff(project_dir, None))

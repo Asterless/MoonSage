@@ -120,14 +120,14 @@ fn parse_tool_call_deltas(delta : Map[String, Json]) -> Array[ToolCallDelta] {
 
 ///|
 /// A complete tool call assembled from streamed fragments.
-struct ChatToolCall {
+pub(all) struct ChatToolCall {
   id : String
   name : String
   arguments : String
 } derive(Eq, Debug)
 
 ///|
-struct ToolCallBuilder {
+priv struct ToolCallBuilder {
   mut id : String
   mut name : String
   arguments : StringBuilder
@@ -135,7 +135,7 @@ struct ToolCallBuilder {
 
 ///|
 /// Accumulates streaming tool-call fragments into complete calls.
-struct ToolCallAccumulator {
+priv struct ToolCallAccumulator {
   by_index : Map[Int, ToolCallBuilder]
   order : Array[Int]
 }
@@ -191,21 +191,21 @@ fn ToolCallAccumulator::finish(
 
 ///|
 /// The complete result of a streaming chat completion.
-struct StreamResult {
+pub(all) struct StreamResult {
   content : String
   tool_calls : Array[ChatToolCall]
   finish_reason : String?
 }
 
 ///|
-async fn ignore_delta(_ : String) -> Unit {
+pub async fn ignore_delta(_ : String) -> Unit {
   @async.sleep(0)
 }
 
 ///|
 /// Stream a chat completion over HTTP using SSE, invoking `on_delta` with each
 /// incremental text fragment as it arrives. Returns the fully assembled result.
-async fn stream_chat_completion(
+pub async fn stream_chat_completion(
   api_key : String,
   base_url : String,
   model : String,
@@ -268,12 +268,12 @@ async fn stream_chat_completion(
 }
 
 ///|
-fn chat_message(role : String, content : String) -> Json {
+pub fn chat_message(role : String, content : String) -> Json {
   Json::object({ "role": Json::string(role), "content": Json::string(content) })
 }
 
 ///|
-fn assistant_message_with_tool_calls(
+pub fn assistant_message_with_tool_calls(
   content : String,
   calls : Array[ChatToolCall],
 ) -> Json {
@@ -298,7 +298,7 @@ fn assistant_message_with_tool_calls(
 }
 
 ///|
-fn tool_result_message(tool_call_id : String, result : String) -> Json {
+pub fn tool_result_message(tool_call_id : String, result : String) -> Json {
   Json::object({
     "role": Json::string("tool"),
     "tool_call_id": Json::string(tool_call_id),

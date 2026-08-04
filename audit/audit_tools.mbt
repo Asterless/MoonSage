@@ -1,93 +1,20 @@
 ///|
-// 修复确认模式。
-enum ConfirmMode {
-  // 每个写文件动作前交互询问（读 stdin）
+// ???????
+priv enum ConfirmMode {
+  // ?????????????? stdin?
   ConfirmPrompt
-  // 不阻塞，写后由最终报告汇总 diff 供用户审查
+  // ????????????? diff ?????
   ConfirmDiff
-  // 跳过确认直接修复
+  // ????????
   ConfirmYes
 }
 
 ///|
-// 一次远程审计的上下文：项目根目录 + 修复/确认策略。
-struct AuditContext {
+// ???????????????? + ??/?????
+priv struct AuditContext {
   project_dir : String
   fix : Bool
   confirm : ConfirmMode
-}
-
-///|
-fn audit_tool_schemas(fix : Bool) -> Array[ToolSchema] {
-  let base : Array[ToolSchema] = [
-    {
-      name: "list_project_files",
-      description: "List files in the audited project (relative paths), excluding build caches and .git.",
-      parameters: object_schema(
-        {
-          "path": string_field(
-            "Optional subdirectory to list instead of the project root",
-          ),
-        },
-        [],
-      ),
-    },
-    {
-      name: "read_file",
-      description: "Read a project file with line numbers. Optionally restrict to a line range.",
-      parameters: object_schema(
-        {
-          "path": string_field("Relative file path"),
-          "start": string_field("Optional 1-based first line to show"),
-          "end": string_field("Optional 1-based last line to show"),
-        },
-        ["path"],
-      ),
-    },
-    {
-      name: "run_moon",
-      description: "Run a moon command inside the project (e.g. 'build' or 'test'). Returns exit code, stdout and stderr.",
-      parameters: object_schema(
-        {
-          "args": string_field(
-            "Space-separated moon arguments, for example 'build' or 'test'",
-          ),
-        },
-        ["args"],
-      ),
-    },
-    {
-      name: "git_diff",
-      description: "Show the current uncommitted changes as a unified diff.",
-      parameters: object_schema(
-        { "path": string_field("Optional relative path to limit the diff") },
-        [],
-      ),
-    },
-  ]
-  if fix {
-    base +
-    [
-      {
-        name: "write_file",
-        description: "Overwrite a project file with the given full content (only available in fix mode).",
-        parameters: object_schema(
-          {
-            "path": string_field("Relative file path"),
-            "content": string_field("Complete new file content"),
-          },
-          ["path", "content"],
-        ),
-      },
-    ]
-  } else {
-    base
-  }
-}
-
-///|
-fn audit_error(message : String) -> String {
-  Json::object({ "error": Json::string(message) }).stringify()
 }
 
 ///|
@@ -103,7 +30,7 @@ fn audit_tool_arg(document : Json, key : String) -> String {
 }
 
 ///|
-// 把相对路径解析到项目根内，并阻止目录穿越。
+// ?????????????????????
 fn safe_project_path(ctx : AuditContext, rel : String) -> String raise {
   guard rel != "" &&
     !rel.contains("..") &&
@@ -255,29 +182,105 @@ async fn write_file_tool(ctx : AuditContext, arguments : String) -> String {
 }
 
 ///|
-async fn run_audit_tool(
-  ctx : AuditContext,
-  name : String,
-  arguments : String,
-) -> String {
-  match name {
-    "list_project_files" =>
-      list_project_files_tool(ctx, arguments) catch {
-        e => audit_error(e.to_string())
-      }
-    "read_file" =>
-      read_file_tool(ctx, arguments) catch {
-        e => audit_error(e.to_string())
-      }
-    "run_moon" =>
-      run_moon_tool(ctx, arguments) catch {
-        e => audit_error(e.to_string())
-      }
-    "git_diff" => git_diff_tool(ctx, arguments)
-    "write_file" =>
-      write_file_tool(ctx, arguments) catch {
-        e => audit_error(e.to_string())
-      }
-    _ => audit_error("unknown tool: \{name}")
+// ??????schema + execute?execute ?????????
+fn audit_tools(ctx : AuditContext) -> Array[@tools.Tool] {
+  let base : Array[@tools.Tool] = [
+    {
+      schema: {
+        name: "list_project_files",
+        description: "List files in the audited project (relative paths), excluding build caches and .git.",
+        parameters: @tools.object_schema(
+          {
+            "path": @tools.string_field(
+              "Optional subdirectory to list instead of the project root",
+            ),
+          },
+          [],
+        ),
+      },
+      execute: async fn(arguments) {
+        list_project_files_tool(ctx, arguments) catch {
+          e => @tools.error_json(e.to_string())
+        }
+      },
+    },
+    {
+      schema: {
+        name: "read_file",
+        description: "Read a project file with line numbers. Optionally restrict to a line range.",
+        parameters: @tools.object_schema(
+          {
+            "path": @tools.string_field("Relative file path"),
+            "start": @tools.string_field("Optional 1-based first line to show"),
+            "end": @tools.string_field("Optional 1-based last line to show"),
+          },
+          ["path"],
+        ),
+      },
+      execute: async fn(arguments) {
+        read_file_tool(ctx, arguments) catch {
+          e => @tools.error_json(e.to_string())
+        }
+      },
+    },
+    {
+      schema: {
+        name: "run_moon",
+        description: "Run a moon command inside the project (e.g. 'build' or 'test'). Returns exit code, stdout and stderr.",
+        parameters: @tools.object_schema(
+          {
+            "args": @tools.string_field(
+              "Space-separated moon arguments, for example 'build' or 'test'",
+            ),
+          },
+          ["args"],
+        ),
+      },
+      execute: async fn(arguments) {
+        run_moon_tool(ctx, arguments) catch {
+          e => @tools.error_json(e.to_string())
+        }
+      },
+    },
+    {
+      schema: {
+        name: "git_diff",
+        description: "Show the current uncommitted changes as a unified diff.",
+        parameters: @tools.object_schema(
+          {
+            "path": @tools.string_field(
+              "Optional relative path to limit the diff",
+            ),
+          },
+          [],
+        ),
+      },
+      execute: async fn(arguments) { git_diff_tool(ctx, arguments) },
+    },
+  ]
+  if ctx.fix {
+    base +
+    [
+      {
+        schema: {
+          name: "write_file",
+          description: "Overwrite a project file with the given full content (only available in fix mode).",
+          parameters: @tools.object_schema(
+            {
+              "path": @tools.string_field("Relative file path"),
+              "content": @tools.string_field("Complete new file content"),
+            },
+            ["path", "content"],
+          ),
+        },
+        execute: async fn(arguments) {
+          write_file_tool(ctx, arguments) catch {
+            e => @tools.error_json(e.to_string())
+          }
+        },
+      },
+    ]
+  } else {
+    base
   }
 }

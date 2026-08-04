@@ -1,0 +1,13 @@
+import {
+  "moonsage",
+  "moonsage/tools",
+  "moonsage/llm",
+  "moonsage/mooncakes",
+  "moonbitlang/async",
+  "moonbitlang/core/json",
+}
+
+import {
+  "moonbitlang/async/http",
+  "moonbitlang/async/socket",
+} for "wbtest"

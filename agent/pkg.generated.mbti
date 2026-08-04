@@ -1,0 +1,33 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/agent"
+
+import {
+  "moonsage/tools",
+}
+
+// Values
+pub fn ask_agent(Array[@moonsage.ModuleSummary]) -> Agent
+
+pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit) -> AgentAnswer
+
+// Errors
+
+// Types and methods
+pub(all) struct Agent {
+  system_prompt : String
+  tools : Array[@tools.Tool]
+  max_tool_calls : Int
+  max_rounds : Int
+  max_tokens : Int
+}
+pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit) -> AgentAnswer
+
+pub struct AgentAnswer {
+  text : String
+  trace : Array[String]
+}
+
+// Type aliases
+
+// Traits
+
