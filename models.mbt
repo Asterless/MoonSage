@@ -22,16 +22,16 @@ let max_module_index_packages = 80
 let max_package_docs_entries = 100
 
 ///|
-pub(all) enum AgentEvent {
+pub(all) enum SearchEvent {
   Plan(String)
   ToolCall(String)
   Observation(String)
 } derive(Eq, Debug)
 
 ///|
-pub(all) struct AgentAnswer {
+pub(all) struct SearchAnswer {
   query : String
-  events : Array[AgentEvent]
+  events : Array[SearchEvent]
   results : Array[SearchResult]
 } derive(Eq, Debug)
 

@@ -1,9 +1,9 @@
 ///|
-pub fn run_agent(
+pub fn run_search_agent(
   modules : Array[ModuleSummary],
   query : String,
   limit? : Int = 5,
-) -> AgentAnswer {
+) -> SearchAnswer {
   let events = [
     Plan("Search Mooncakes metadata, rank candidates, then cite package pages"),
     ToolCall("search_modules(query=\"\{query}\", limit=\{limit})"),
@@ -19,7 +19,7 @@ pub fn package_url(name : String) -> String {
 }
 
 ///|
-pub fn render_answer(answer : AgentAnswer) -> String {
+pub fn render_search_answer(answer : SearchAnswer) -> String {
   let out = StringBuilder::new()
   out.write_string("MoonSage\n\n")
   for event in answer.events {

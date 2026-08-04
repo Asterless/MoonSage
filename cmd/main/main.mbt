@@ -32,8 +32,8 @@ fn join_query(args : Array[String], start : Int) -> String {
 ///|
 async fn run_search(query : String) -> Unit {
   let modules = @mooncakes.fetch_modules()
-  let answer = @moonsage.run_agent(modules, query)
-  println(@moonsage.render_answer(answer))
+  let answer = @moonsage.run_search_agent(modules, query)
+  println(@moonsage.render_search_answer(answer))
 }
 
 ///|

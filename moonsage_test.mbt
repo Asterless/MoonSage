@@ -41,7 +41,7 @@ test "rank exact module name above description matches" {
 ///|
 test "agent records its plan and tool observation" {
   let modules = @moonsage.parse_modules(fixture)
-  let answer = @moonsage.run_agent(modules, "json parser")
+  let answer = @moonsage.run_search_agent(modules, "json parser")
   assert_eq(answer.results[0].item.name, "example/json")
   assert_eq(answer.events.length(), 3)
   assert_true(answer.events[0] is Plan(_))
@@ -127,8 +127,8 @@ test "package_url points at Mooncakes docs" {
 ///|
 test "render_answer formats events and ranked modules" {
   let modules = @moonsage.parse_modules(fixture)
-  let answer = @moonsage.run_agent(modules, "json parser", limit=1)
-  let rendered = @moonsage.render_answer(answer)
+  let answer = @moonsage.run_search_agent(modules, "json parser", limit=1)
+  let rendered = @moonsage.render_search_answer(answer)
   assert_true(rendered.contains("MoonSage"))
   assert_true(rendered.contains("[plan]"))
   assert_true(rendered.contains("[tool]"))
@@ -139,8 +139,8 @@ test "render_answer formats events and ranked modules" {
 
 ///|
 test "render_answer handles empty results" {
-  let answer = @moonsage.AgentAnswer::{ query: "zzz", events: [], results: [] }
-  let rendered = @moonsage.render_answer(answer)
+  let answer = @moonsage.SearchAnswer::{ query: "zzz", events: [], results: [] }
+  let rendered = @moonsage.render_search_answer(answer)
   assert_true(rendered.contains("No matching modules found"))
 }
 
