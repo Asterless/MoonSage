@@ -6,6 +6,7 @@ import {
 }
 
 // Values
+pub fn render_md_to_ansi(String) -> String raise
 
 // Errors
 
@@ -13,6 +14,17 @@ import {
 type ChatToolCall derive(Eq, @debug.Debug)
 
 type LlmAgentAnswer
+
+pub struct MdStreamPrinter {
+  buffer : StringBuilder
+  line : StringBuilder
+  out : StringBuilder
+  mut in_code_block : Bool
+}
+pub fn MdStreamPrinter::feed(Self, String) -> Unit
+pub fn MdStreamPrinter::finish(Self) -> Unit
+pub fn MdStreamPrinter::new() -> Self
+pub fn MdStreamPrinter::take_output(Self) -> String
 
 type SseEvent derive(Eq, @debug.Debug)
 

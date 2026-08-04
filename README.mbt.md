@@ -56,6 +56,16 @@ each `data:` delta, and assembles text and tool calls as they arrive. No
 third-party LLM SDK is required, and runtime execution does not depend on curl
 or another external program.
 
+## Terminal rendering
+
+The model answers in standard Markdown. When streaming to a terminal, `ask`
+renders the Markdown into ANSI styles (bold, headings, inline code, code
+blocks, links) using the `moonbit-community/cmark` parser and a small custom
+renderer, so raw `**` / `` ` `` markers never reach the screen. Completed
+blocks are flushed on blank-line boundaries for a smooth stream, and fenced
+code blocks pass through verbatim in reverse video. Output degrades gracefully
+to plain text if a chunk cannot be parsed.
+
 ## Development
 
 ```shell
