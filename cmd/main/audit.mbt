@@ -87,7 +87,7 @@ fn audit_system_prompt() -> String {
     #|2. Inspect the relevant source and test files to find root causes.
     #|3. In fix mode, apply minimal fixes with write_file, then re-run the
     #|   relevant moon command to confirm each fix.
-    #|4. Finish with a report in the user's language listing issues found
+    #|4. Finish with a report written in Simplified Chinese (简体中文) listing
     #|   (file and line), what was fixed, test results before/after, and any
     #|   problems that remain.
     #|
@@ -170,7 +170,7 @@ async fn run_audit_agent(
     )
     messages.push(
       chat_message(
-        "user", "(System: no more tool calls are allowed. Write the audit report now using the evidence already collected.)",
+        "user", "(System: no more tool calls are allowed. Write the audit report now using the evidence already collected. 用简体中文输出完整报告。)",
       ),
     )
     // 不再暴露任何工具，模型只能输出纯文本报告。
@@ -189,7 +189,7 @@ async fn run_audit_agent(
     }
     messages.push(
       chat_message(
-        "user", "(System: your previous reply was empty. Output the audit report as plain text now.)",
+        "user", "(System: your previous reply was empty. Output the audit report as plain text now. 用简体中文输出。)",
       ),
     )
     let retry = stream_chat_completion(
@@ -215,7 +215,8 @@ fn audit_question_text() -> String {
   (
     #|Audit this MoonBit project for bugs: build failures, test failures,
     #|logic errors, and unsafe or incorrect code. In fix mode, apply and
-    #|verify fixes. Write the final report in Chinese.
+    #|verify fixes. Write the final report in Simplified Chinese (简体中文),
+    #|using Markdown headings, lists and code blocks.
   )
 }
 
@@ -309,7 +310,9 @@ async fn run_audit(args : ArrayView[String]) -> Unit {
       return
     }
   }
-  @stdio.stdout.write("\n" + answer.text + "\n")
+  @stdio.stdout.write("\n")
+  let rendered = render_md_to_ansi(answer.text) catch { _ => answer.text }
+  @stdio.stdout.write(rendered + ansi_reset + "\n")
   if opts.fix {
     @stdio.stdout.write("\n=== changes ===\n")
     @stdio.stdout.write(git_diff(project_dir, None))
