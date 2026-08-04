@@ -173,18 +173,37 @@ async fn run_audit_agent(
         "user", "(System: no more tool calls are allowed. Write the audit report now using the evidence already collected.)",
       ),
     )
+    // 不再暴露任何工具，模型只能输出纯文本报告。
     let result = stream_chat_completion(
       api_key,
       base_url,
       model,
       messages,
-      tools_json,
+      [],
       max_tokens=2000,
       on_delta=ignore_delta,
     )
-    if result.tool_calls.is_empty() && result.content != "" {
+    if result.content != "" {
       trace.push("[final] Audit report from collected evidence")
       return { text: result.content, trace }
+    }
+    messages.push(
+      chat_message(
+        "user", "(System: your previous reply was empty. Output the audit report as plain text now.)",
+      ),
+    )
+    let retry = stream_chat_completion(
+      api_key,
+      base_url,
+      model,
+      messages,
+      [],
+      max_tokens=2000,
+      on_delta=ignore_delta,
+    )
+    if retry.content != "" {
+      trace.push("[final] Audit report (retried)")
+      return { text: retry.content, trace }
     }
     fail("model could not produce an audit report")
   }
@@ -284,7 +303,12 @@ async fn run_audit(args : ArrayView[String]) -> Unit {
     audit_question_text(),
     max_tool_calls=opts.max_calls,
     max_rounds=opts.max_rounds,
-  )
+  ) catch {
+    e => {
+      println("error: audit failed: \{e.to_string()}")
+      return
+    }
+  }
   @stdio.stdout.write("\n" + answer.text + "\n")
   if opts.fix {
     @stdio.stdout.write("\n=== changes ===\n")
