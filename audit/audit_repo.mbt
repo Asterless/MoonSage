@@ -92,10 +92,14 @@ async fn fetch_repo_source(
   dest_dir : String,
 ) -> String {
   let url = "https://github.com/\{owner}/\{repo}.git"
+  let target = dest_dir + "/repo"
+  let target_kind = @fs.kind(target) catch { _ => @fs.FileKind::Unknown }
+  if target_kind is @fs.FileKind::Directory {
+    fail("target directory already exists, refusing to delete it: \{target}")
+  }
   // 先试 main，再试 master；网络波动时对同一分支重试几次。
   let mut last_err = "git clone failed"
   for branch in ["main", "master"] {
-    let target = dest_dir + "/repo"
     for retry = 0; retry < 3; retry = retry + 1 {
       let (exit, _, err) = @process.collect_output(
         "git",

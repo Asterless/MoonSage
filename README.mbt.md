@@ -50,6 +50,66 @@ touch the user's own files. The audit agent has its own budget
 (`--max-calls`, default 30 tool calls) independent of `ask`. The MoonBit
 toolchain (`moon`) and `git` must be available on `PATH`.
 
+### How it works
+
+1. Resolve the package's GitHub repository from its Mooncakes manifest.
+2. `git clone --depth 1` into a temporary workspace (or `--workspace <dir>`),
+   trying `main` then `master` with retries.
+3. Locate the project root (`moon.mod` / `moon.mod.json`, including
+   multi-module `moon.work` layouts).
+4. Run a dedicated agent (its own budget, default 30 tool calls) with these
+   tools: `list_project_files`, `read_file` (with line ranges), `run_moon`
+   (build/test inside the workspace), `git_diff`; `write_file` appears only
+   in `--fix` mode and is guarded against path traversal.
+5. The agent establishes a `moon build` / `moon test` baseline, inspects the
+   source, and in fix mode rewrites files and re-runs tests to verify each
+   change. When the tool budget runs out, the final request exposes no tools
+   so the model must answer with a plain-text report.
+6. The final report is rendered as ANSI in the user's language; in fix mode a
+   `git diff` of every change is printed, and `--workspace` keeps the tree
+   for inspection.
+
+## Architecture
+
+The module is split into focused sub-packages, each with a single
+responsibility and its own tests:
+
+```
+moonsage/            domain: models, search, deterministic search agent, response compaction
+moonsage/mooncakes   network: fetch modules / manifests / docs from Mooncakes
+moonsage/llm         LLM streaming protocol (SSE + stream_chat_completion)
+moonsage/tools       tool contract (ToolSchema / Tool / registry), zero project deps
+moonsage/agent       generic LLM agent runtime (loop + budgets + plain-text final answer)
+moonsage/audit       remote audit: audit tools, source clone, report rendering
+moonsage/md_ansi     Markdown -> ANSI terminal renderer
+moonsage/dotenv      .env loading
+moonsage/cmd/main    thin CLI shell
+```
+
+Dependencies point one way only (no cycles):
+
+```mermaid
+graph LR
+  main[cmd/main] --> moonsage
+  main --> mooncakes
+  main --> md_ansi
+  main --> agent
+  main --> audit
+  main --> dotenv
+  audit --> agent
+  audit --> tools
+  audit --> md_ansi
+  audit --> mooncakes
+  agent --> tools
+  agent --> llm
+  agent --> moonsage
+  agent --> mooncakes
+  mooncakes --> moonsage
+```
+
+Both `ask` and `audit` run through the same `@agent.Agent` loop; each command
+only supplies its tool set, prompt and budget.
+
 ## Configuration
 
 MoonSage reads credentials from the process environment, falling back to a

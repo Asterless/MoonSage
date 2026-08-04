@@ -16,12 +16,6 @@ pub(all) struct SearchResult {
 } derive(Eq, Debug, ToJson)
 
 ///|
-let max_module_index_packages = 80
-
-///|
-let max_package_docs_entries = 100
-
-///|
 pub(all) enum SearchEvent {
   Plan(String)
   ToolCall(String)
