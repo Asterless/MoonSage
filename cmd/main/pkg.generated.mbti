@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "moonsage/moonsage/cmd/main"
+package "moonsage/cmd/main"
 
 import {
   "moonbitlang/core/debug",
