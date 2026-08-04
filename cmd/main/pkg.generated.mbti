@@ -11,7 +11,13 @@ pub fn render_md_to_ansi(String) -> String raise
 // Errors
 
 // Types and methods
+type AuditContext
+
+type AuditOptions
+
 type ChatToolCall derive(Eq, @debug.Debug)
+
+type ConfirmMode
 
 type LlmAgentAnswer
 

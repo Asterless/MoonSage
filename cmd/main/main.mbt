@@ -6,6 +6,7 @@ fn usage() -> String {
     #|Usage:
     #|  moon run cmd/main -- search <keywords>
     #|  moon run cmd/main -- ask <question>
+    #|  moon run cmd/main -- audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
     #|
     #|The ask command reads:
     #|  MOONSAGE_API_KEY    required
@@ -98,6 +99,7 @@ async fn main {
   match command {
     "search" => run_search(query)
     "ask" => run_ask(query)
+    "audit" => run_audit(args[2:])
     _ => println("Unknown command: \{command}\n\n\{usage()}")
   }
 }

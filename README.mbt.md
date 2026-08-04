@@ -18,6 +18,38 @@ and run `ask`:
 moon run cmd/main -- ask "帮我找一个适合 native 后端的 HTTP 客户端"
 ```
 
+To audit a remote Mooncakes package and (optionally) fix issues it finds:
+
+```powershell
+# read-only audit
+moon run cmd/main -- audit moonbit-community/cmark
+
+# fix mode: ask before each file change
+moon run cmd/main -- audit moonbit-community/cmark --fix --confirm prompt
+
+# fix mode: show the accumulated diff at the end (default)
+moon run cmd/main -- audit moonbit-community/cmark --fix --confirm diff
+
+# fix mode: apply without confirmation
+moon run cmd/main -- audit moonbit-community/cmark --fix --yes
+```
+
+## Remote audit
+
+The `audit` command audits a remote package by cloning its GitHub repository
+into a temporary directory (or the `--workspace <dir>` you provide). It
+establishes a `moon build` / `moon test` baseline, then runs a dedicated agent
+that lists/reads files, runs moon commands, and - in fix mode - overwrites
+files and re-runs tests to verify each fix. It finishes with a report in the
+user's language plus a `git diff` of every change.
+
+Audit mode is read-only by default; `--fix` enables file writes with a
+configurable confirmation mode (`prompt` per-file, `diff` for a final review,
+or `yes` to skip). Changes are confined to the cloned workspace and never
+touch the user's own files. The audit agent has its own budget
+(`--max-calls`, default 30 tool calls) independent of `ask`. The MoonBit
+toolchain (`moon`) and `git` must be available on `PATH`.
+
 ## Configuration
 
 MoonSage reads credentials from the process environment, falling back to a
