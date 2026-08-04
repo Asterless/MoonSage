@@ -8,6 +8,19 @@ pub(all) struct Agent {
 }
 
 ///|
+// Intermediate rounds (those that end in tool calls) usually carry the
+// model's reasoning narrative, which adds little for later decisions but
+// inflates the context. Trim it; the final report round is not affected.
+fn trim_intermediate_content(content : String) -> String {
+  let max = 2000
+  if content.length() > max {
+    content[:max].to_owned() + "\n... [intermediate analysis truncated]"
+  } else {
+    content
+  }
+}
+
+///|
 pub struct AgentAnswer {
   text : String
   trace : Array[String]
@@ -53,11 +66,43 @@ pub async fn Agent::run(
     }
     if result.tool_calls.is_empty() {
       guard result.content != "" else { fail("model returned an empty answer") }
+      // A truncated final answer is continued once: feed it back as context
+      // and ask the model to complete it with no tools available.
+      if result.finish_reason is Some("length") {
+        trace.push(
+          "[observation] Final answer hit max_tokens; requesting continuation",
+        )
+        messages.push(@llm.chat_message("assistant", result.content))
+        messages.push(
+          @llm.chat_message(
+            "user", "(System: continue and complete the answer exactly from where it stopped, keeping the same language and format. No tools are available now: output ONLY the plain Markdown answer, never tool calls or XML.)",
+          ),
+        )
+        let cont = @llm.stream_chat_completion(
+          api_key,
+          base_url,
+          model,
+          messages,
+          [],
+          max_tokens=self.max_tokens,
+          on_delta~,
+        )
+        let text = if cont.content != "" {
+          result.content + "\n" + cont.content
+        } else {
+          result.content
+        }
+        trace.push("[final] Model returned an answer (continued)")
+        return { text, trace }
+      }
       trace.push("[final] Model returned an answer")
       return { text: result.content, trace }
     }
     messages.push(
-      @llm.assistant_message_with_tool_calls(result.content, result.tool_calls),
+      @llm.assistant_message_with_tool_calls(
+        trim_intermediate_content(result.content),
+        result.tool_calls,
+      ),
     )
     for call in result.tool_calls {
       if total_tool_calls >= self.max_tool_calls {
@@ -92,7 +137,7 @@ pub async fn Agent::run(
     )
     messages.push(
       @llm.chat_message(
-        "user", "(System: no more tool calls are allowed. Answer the user's question now using the evidence already collected.)",
+        "user", "(System: no more tool calls are allowed. Answer the user's question now using the evidence already collected. No tools are available: output ONLY the plain Markdown answer, never tool calls or XML.)",
       ),
     )
     // Budget exhausted: force a final answer with no tools exposed.

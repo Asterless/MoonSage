@@ -95,6 +95,17 @@ fn audit_system_prompt() -> String {
     #|- If the project already builds and tests pass, say so instead of
     #|  inventing problems.
     #|- Be honest about anything you could not fix within the budget.
+    #|- Your final reply must BE the report itself, starting directly with
+    #|  "## 审计报告". Never include reasoning, planning, "Let me...", or any
+    #|  analysis narrative in the final reply - the report is all that is
+    #|  shown to the user.
+    #|- In fix mode, analyzing without writing counts as failure: you MUST
+    #|  actually call write_file to apply each fix, then re-run the relevant
+    #|  moon command to verify it, before writing the report.
+    #|- In fix mode, fix issues one at a time as you find them: apply the fix
+    #|  and verify it immediately, instead of reading every file first.
+    #|- A fix ONLY counts when you actually call the write_file tool. Never
+    #|  write code patches, tool invocations or XML into the report text.
   )
 }
 
@@ -117,7 +128,7 @@ async fn run_audit_agent(
     tools: audit_tools(ctx),
     max_tool_calls,
     max_rounds,
-    max_tokens: 2000,
+    max_tokens: 6000,
   }
   agent.run(api_key, base_url, model, question)
 }
@@ -128,7 +139,9 @@ fn audit_question_text() -> String {
     #|Audit this MoonBit project for bugs: build failures, test failures,
     #|logic errors, and unsafe or incorrect code. In fix mode, apply and
     #|verify fixes. Write the final report in Simplified Chinese (简体中文),
-    #|using Markdown headings, lists and code blocks.
+    #|using Markdown headings, lists and code blocks. The final reply must be
+    #|the report itself starting with "## 审计报告" - do not output any
+    #|reasoning or analysis narrative in it.
   )
 }
 
