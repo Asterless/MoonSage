@@ -34,6 +34,7 @@ fn audit_tool_arg(document : Json, key : String) -> String {
 fn safe_project_path(ctx : AuditContext, rel : String) -> String raise {
   guard rel != "" &&
     !rel.contains("..") &&
+    !rel.contains("\\") &&
     !rel.has_prefix("/") &&
     !rel.has_prefix("\\") else {
     fail("invalid path: \{rel}")

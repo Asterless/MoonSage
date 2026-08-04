@@ -100,3 +100,35 @@ test "stream_matches_whole_document_render" {
   p.finish()
   assert_eq(p.take_output(), expected)
 }
+
+///|
+test "render_cjk_fallback_edge_cases" {
+  // underscore variants of the CJK+space fallback
+  let out = render_checked("__?? ??__ ? _?? ??_")
+  assert_true(out.contains("\u001B[1m?? ??\u001B[22m"))
+  assert_true(out.contains("\u001B[3m?? ??\u001B[23m"))
+  assert_false(out.contains("__"))
+  assert_false(out.contains("_??"))
+}
+
+///|
+test "render_fallback_does_not_touch_ascii_math_or_nested_stars" {
+  // Space-separated multiplication is not emphasis to cmark, and the
+  // fallback must not style it either (its content has no CJK).
+  let mult = render_checked("2 * 3 * 4")
+  assert_false(mult.contains("\u001B[3m"))
+  assert_true(mult.contains("*"))
+  // content containing a star is not wrapped by the fallback
+  let nested = render_checked("**a*b**")
+  assert_false(nested.contains("\u001B[1ma*b\u001B[22m"))
+}
+
+///|
+test "render_fallback_leaves_cross_code_span_emphasis_alone" {
+  // cmark parses the code span but not the surrounding **; the fallback
+  // runs per Text node and cannot wrap across nodes, so the surrounding
+  // text must not be turned into bold.
+  let out = render_checked("**`code` ??**")
+  assert_true(out.contains("\u001B[7mcode\u001B[27m"))
+  assert_false(out.contains("\u001B[1mcode"))
+}

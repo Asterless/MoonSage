@@ -114,3 +114,16 @@ async test "run_llm_agent executes tool calls then returns a streamed answer" {
     assert_true(answer.trace.contains("[final] Model returned an answer"))
   }
 }
+
+///|
+test "ask_agent exposes the four research tools with ask budget" {
+  let agent = ask_agent([])
+  let names = agent.tools.map(fn(t) { t.schema.name })
+  assert_eq(names, [
+    "search_modules", "get_module_manifest", "get_module_index", "get_package_docs",
+  ])
+  assert_true(!names.contains("write_file"))
+  assert_eq(agent.max_tool_calls, 12)
+  assert_eq(agent.max_rounds, 6)
+  assert_true(agent.max_tokens > 0)
+}
