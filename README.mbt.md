@@ -49,8 +49,11 @@ user's language plus a `git diff` of every change.
 Audit mode is read-only by default; `--fix` enables file writes with a
 configurable confirmation mode (`prompt` per-file, `diff` for a final review,
 or `yes` to skip). Changes are confined to the cloned workspace and never
-touch the user's own files. The audit agent has its own budget
-(`--max-calls`, default 30 tool calls) independent of `ask`. The MoonBit
+touch the user's own files. Fix mode runs in two phases: a read-only
+analysis phase (bounded budget) that lists root causes and concrete fixes,
+then a fix phase that applies them one at a time with `write_file` and
+re-runs `moon build` / `moon test` to verify each change before writing the
+report. `--max-calls` (default 30) applies to the fix phase. The MoonBit
 toolchain (`moon`) and `git` must be available on `PATH`. Each run without
 `--workspace` creates a temporary workspace under the system temp directory;
 run `audit --clean` to remove all leftover `moonsage-audit-*` workspaces, or

@@ -269,7 +269,7 @@ fn audit_tools(ctx : AuditContext) -> Array[@tools.Tool] {
       {
         schema: {
           name: "write_file",
-          description: "Overwrite a project file with the given full content (only available in fix mode).",
+          description: "Overwrite a project file with its full new content (available only in fix mode). This is the ONLY way to modify the project: call it as soon as a root cause is identified, then verify with run_moon.",
           parameters: @tools.object_schema(
             {
               "path": @tools.string_field("Relative file path"),

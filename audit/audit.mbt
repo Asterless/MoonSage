@@ -115,6 +115,84 @@ fn audit_system_prompt() -> String {
 }
 
 ///|
+fn audit_analysis_prompt() -> String {
+  (
+    #|You are MoonSage's audit analysis agent. A MoonBit project has been
+    #|downloaded to a working directory. Your ONLY job is to find root causes
+    #|and list concrete minimal fixes. You must NOT modify any file.
+    #|
+    #|Workflow:
+    #|1. Run `moon build` and `moon test` first to record the baseline.
+    #|2. Inspect only the relevant source and test files to find root causes.
+    #|   Stop reading once the causes are clear - do not read the whole
+    #|   project.
+    #|3. For each issue, give the file path, the root cause, and a concrete
+    #|   minimal fix (either the exact replacement content or the exact edit).
+    #|
+    #|Rules:
+    #|- Never claim a fix works without running moon build/test.
+    #|- If the project already builds and tests pass, say so instead of
+    #|  inventing problems.
+    #|- Be honest about anything you could not determine within the budget.
+    #|- Your final reply must BE the analysis, in Simplified Chinese,
+    #|  starting with "## 分析结果". Do not include reasoning, planning or
+    #|  "Let me..." narrative - the analysis is all that is shown.
+  )
+}
+
+///|
+fn audit_fix_prompt() -> String {
+  (
+    #|You are MoonSage's fix agent. A MoonBit project has been downloaded and
+    #|analyzed; the analysis with concrete fixes is in the user's question.
+    #|Your ONLY job is to APPLY those fixes with write_file, one issue at a
+    #|time, and verify each with `moon build` / `moon test`.
+    #|
+    #|Workflow:
+    #|1. Take the first issue from the analysis.
+    #|2. Call write_file immediately to apply its fix - do not re-read the
+    #|   whole project or re-diagnose.
+    #|3. Re-run the relevant moon command to confirm the fix.
+    #|4. Move to the next issue and repeat.
+    #|5. Finish with a report in Simplified Chinese starting with
+    #|   "## 审计报告": what was fixed, before/after test results, and any
+    #|   problems that remain.
+    #|
+    #|Rules:
+    #|- write_file is available and is the ONLY way to modify files. You MUST
+    #|  call it for every fix; analyzing or recommending without writing
+    #|  counts as failure.
+    #|- Fix one issue at a time and verify it immediately.
+    #|- Never claim a fix works without running moon build/test afterwards.
+    #|- Never write code patches, tool invocations or XML into the report
+    #|  text.
+    #|- Be honest about anything you could not fix within the budget.
+  )
+}
+
+///|
+fn audit_analysis_question() -> String {
+  (
+    #|Find the root causes of build failures, test failures, logic errors,
+    #|and unsafe or incorrect code. Do not modify any file. Write a concise
+    #|analysis in Simplified Chinese starting with "## 分析结果".
+  )
+}
+
+///|
+fn audit_fix_question(findings : String) -> String {
+  (
+    #|The analysis below lists the issues and concrete fixes. Apply them now
+    #|with write_file, verifying each with moon build/test, then write the
+    #|final report in Simplified Chinese starting with "## 审计报告".
+    #|
+    #|## 分析结果
+    #|
+  ) +
+  findings
+}
+
+///|
 // 独立的审计 agent 循环：使用审计工具集与更高预算，复用 LLM 流式调用。
 
 ///|
@@ -136,6 +214,57 @@ async fn run_audit_agent(
     max_tokens: 6000,
   }
   agent.run(api_key, base_url, model, question)
+}
+
+///|
+// 第一阶段：只读分析，小预算，输出根因与具体修复方案。
+async fn run_analysis_agent(
+  api_key : String,
+  base_url : String,
+  model : String,
+  ctx : AuditContext,
+) -> @agent.AgentAnswer {
+  let ro_ctx : AuditContext = {
+    project_dir: ctx.project_dir,
+    fix: false,
+    confirm: ctx.confirm,
+  }
+  let agent : @agent.Agent = {
+    system_prompt: audit_analysis_prompt(),
+    tools: audit_tools(ro_ctx),
+    max_tool_calls: 12,
+    max_rounds: 4,
+    max_tokens: 4000,
+  }
+  agent.run(api_key, base_url, model, audit_analysis_question())
+}
+
+///|
+// 第二阶段（仅 --fix）：携带分析结果，强制先写文件再验证。
+async fn run_fix_agent(
+  api_key : String,
+  base_url : String,
+  model : String,
+  ctx : AuditContext,
+  findings : String,
+  max_tool_calls~ : Int,
+  max_rounds~ : Int,
+) -> @agent.AgentAnswer {
+  let agent : @agent.Agent = {
+    system_prompt: audit_fix_prompt(),
+    tools: audit_tools(ctx),
+    max_tool_calls,
+    max_rounds,
+    max_tokens: 6000,
+  }
+  agent.run(api_key, base_url, model, audit_fix_question(findings))
+}
+
+///|
+async fn print_agent_report(text : String) -> Unit {
+  @stdio.stdout.write("\n")
+  let rendered = @md_ansi.render_md_to_ansi(text) catch { _ => text }
+  @stdio.stdout.write(rendered + "\u001B[0m" + "\n")
 }
 
 ///|
@@ -234,6 +363,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     }
   }
   @stdio.stdout.write("Project ready at \{project_dir}\n")
+  let ctx : AuditContext = { project_dir, fix: opts.fix, confirm: opts.confirm }
   if opts.fix {
     let mode = match opts.confirm {
       ConfirmPrompt => "prompt"
@@ -241,37 +371,68 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       ConfirmYes => "yes"
     }
     @stdio.stdout.write("Fix mode enabled (confirm: \{mode})\n")
-  }
-  let ctx : AuditContext = { project_dir, fix: opts.fix, confirm: opts.confirm }
-  let answer = run_audit_agent(
-    key,
-    base_url,
-    model,
-    ctx,
-    audit_question_text(),
-    max_tool_calls=opts.max_calls,
-    max_rounds=opts.max_rounds,
-  ) catch {
-    e => {
-      if opts.clean {
-        remove_workspace_dir(workspace)
+    @stdio.stdout.write("Phase 1/2: analyzing the project...\n")
+    let analysis = run_analysis_agent(key, base_url, model, ctx) catch {
+      e => {
+        if opts.clean {
+          remove_workspace_dir(workspace)
+        }
+        println("error: analysis phase failed: \{e.to_string()}")
+        return
       }
-      println("error: audit failed: \{e.to_string()}")
-      return
     }
-  }
-  @stdio.stdout.write("\n")
-  let rendered = @md_ansi.render_md_to_ansi(answer.text) catch {
-    _ => answer.text
-  }
-  @stdio.stdout.write(rendered + "\u001B[0m" + "\n")
-  if opts.fix {
+    @stdio.stdout.write("Phase 2/2: applying fixes...\n")
+    let answer = run_fix_agent(
+      key,
+      base_url,
+      model,
+      ctx,
+      analysis.text,
+      max_tool_calls=opts.max_calls,
+      max_rounds=opts.max_rounds,
+    ) catch {
+      e => {
+        if opts.clean {
+          remove_workspace_dir(workspace)
+        }
+        println("error: fix phase failed: \{e.to_string()}")
+        return
+      }
+    }
+    print_agent_report(answer.text)
     @stdio.stdout.write("\n=== changes ===\n")
     @stdio.stdout.write(git_diff(project_dir, None))
-  }
-  @stdio.stdout.write("\n")
-  for event in answer.trace {
-    @stdio.stdout.write(event + "\n")
+    @stdio.stdout.write("\n--- analysis trace ---\n")
+    for event in analysis.trace {
+      @stdio.stdout.write(event + "\n")
+    }
+    @stdio.stdout.write("\n--- fix trace ---\n")
+    for event in answer.trace {
+      @stdio.stdout.write(event + "\n")
+    }
+  } else {
+    let answer = run_audit_agent(
+      key,
+      base_url,
+      model,
+      ctx,
+      audit_question_text(),
+      max_tool_calls=opts.max_calls,
+      max_rounds=opts.max_rounds,
+    ) catch {
+      e => {
+        if opts.clean {
+          remove_workspace_dir(workspace)
+        }
+        println("error: audit failed: \{e.to_string()}")
+        return
+      }
+    }
+    print_agent_report(answer.text)
+    @stdio.stdout.write("\n")
+    for event in answer.trace {
+      @stdio.stdout.write(event + "\n")
+    }
   }
   if opts.clean {
     remove_workspace_dir(workspace)
