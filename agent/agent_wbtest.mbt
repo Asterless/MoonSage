@@ -127,3 +127,44 @@ test "ask_agent exposes the four research tools with ask budget" {
   assert_eq(agent.max_rounds, 6)
   assert_true(agent.max_tokens > 0)
 }
+
+///|
+async test "Agent::turn carries conversation history across turns" {
+  @async.with_task_group() <| group => {
+    let round1 = sse_chunk(content_choice("first", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let round2 = sse_chunk(content_choice("second", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [round1, round2])
+    let agent : Agent = {
+      system_prompt: "you are a test assistant",
+      tools: [],
+      max_tool_calls: 5,
+      max_rounds: 3,
+      max_tokens: 64,
+    }
+    let session = agent.new_session()
+    let first = agent.turn(
+      session,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      "hello",
+    )
+    assert_eq(first.text, "first")
+    // 回合 1 结束后，会话应包含 system、user、assistant 三条消息。
+    assert_eq(session.messages.length(), 3)
+    assert_true(session.messages[2].stringify().contains("first"))
+    let second = agent.turn(
+      session,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      "follow up",
+    )
+    assert_eq(second.text, "second")
+    // 回合 2 结束后继续追加 user + assistant 两条消息。
+    assert_eq(session.messages.length(), 5)
+    assert_true(session.messages[4].stringify().contains("second"))
+  }
+}

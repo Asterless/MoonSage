@@ -8,15 +8,22 @@ research, inspect live manifests, and return cited recommendations.
 ## Run
 
 ```shell
-moon run cmd/main -- search "json parser"
+moon run cmd/main -- search "json parser"        # via moon run
+moonsage search "json parser"                    # built binary (moon build)
 ```
 
 `search` does not require an LLM key. To use the agent, configure an API key
-and run `ask`:
+and run `ask` for a one-shot question, or `chat` for an interactive streaming
+conversation that keeps its history until you leave with `/exit` or `/quit`:
 
 ```powershell
 moon run cmd/main -- ask "帮我找一个适合 native 后端的 HTTP 客户端"
+moon run cmd/main -- chat
 ```
+
+In `chat` mode the agent can also inspect the local project read-only
+(`list_project_files`, `read_file`, `run_moon`, `git_diff`), so you can ask
+questions about the current codebase as well as Mooncakes packages.
 
 To audit a remote Mooncakes package and (optionally) fix issues it finds:
 

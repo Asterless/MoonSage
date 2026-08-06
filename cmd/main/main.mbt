@@ -4,13 +4,16 @@ fn usage() -> String {
     #|MoonSage - an agent for the MoonBit package ecosystem
     #|
     #|Usage:
-    #|  moon run cmd/main -- search <keywords>
-    #|  moon run cmd/main -- ask <question>
-    #|  moon run cmd/main -- audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
-    #|  moon run cmd/main -- audit --clean
+    #|  moonsage chat
+    #|  moonsage search <keywords>
+    #|  moonsage ask <question>
+    #|  moonsage audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
+    #|  moonsage audit --clean
     #|
-    #|The ask command reads:
-    #|  MOONSAGE_API_KEY    required
+    #|Run `moonsage --help` for the full option reference.
+    #|
+    #|Environment:
+    #|  MOONSAGE_API_KEY    required for chat/ask/audit
     #|  MOONSAGE_BASE_URL   default: https://api.deepseek.com
     #|  MOONSAGE_MODEL      default: deepseek-chat
   )
@@ -70,6 +73,21 @@ async fn run_ask(question : String) -> Unit {
 }
 
 ///|
+async fn run_chat_cmd() -> Unit {
+  let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
+  guard key != "" else {
+    println("error: set MOONSAGE_API_KEY before using chat")
+    return
+  }
+  let base_url = @sys.get_env_var("MOONSAGE_BASE_URL").unwrap_or(
+    "https://api.deepseek.com",
+  )
+  let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
+  let cwd = @env.current_dir().unwrap_or(".")
+  @chat.run_chat(key, base_url, model, cwd)
+}
+
+///|
 // Make the Windows console interpret output as UTF-8. No-op elsewhere.
 #cfg(platform="windows")
 extern "C" fn set_console_output_cp_utf8() = "moonsage_set_console_utf8"
@@ -91,16 +109,19 @@ async fn main {
   enable_utf8_console()
   @dotenv.load_dotenv(".env")
   let args = cli_args()
-  if args.length() < 3 || args[1] == "--help" || args[1] == "-h" {
-    println(usage())
-    return
+  let matches = root_command().parse(argv=args[1:]) catch {
+    error => {
+      @stdio.stderr.write("error: \{error.to_string()}\n") catch {
+        _ => ()
+      }
+      return
+    }
   }
-  let command = args[1]
-  let query = join_query(args, 2)
-  match command {
-    "search" => run_search(query)
-    "ask" => run_ask(query)
-    "audit" => @audit.run_audit(args[2:])
-    _ => println("Unknown command: \{command}\n\n\{usage()}")
+  match matches.subcommand {
+    Some(("chat", _)) => run_chat_cmd()
+    Some(("search", m)) => run_search(join_values(m, "keywords"))
+    Some(("ask", m)) => run_ask(join_values(m, "question"))
+    Some(("audit", m)) => @audit.run_audit(audit_args(m))
+    _ => println(usage())
   }
 }

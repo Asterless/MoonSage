@@ -267,7 +267,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
   @stdio.stdout.write(rendered + "\u001B[0m" + "\n")
   if opts.fix {
     @stdio.stdout.write("\n=== changes ===\n")
-    @stdio.stdout.write(git_diff(project_dir, None))
+    @stdio.stdout.write(@local.git_diff(project_dir, None))
   }
   @stdio.stdout.write("\n")
   for event in answer.trace {

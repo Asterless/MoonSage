@@ -4,6 +4,7 @@ supported_targets = "+native"
 
 import {
   "moonsage",
+  "moonsage/chat",
   "moonsage/mooncakes",
   "moonsage/md_ansi",
   "moonsage/agent",
@@ -11,6 +12,8 @@ import {
   "moonsage/dotenv",
   "moonbitlang/async",
   "moonbitlang/async/stdio",
+  "moonbitlang/core/argparse",
+  "moonbitlang/core/env",
   "moonbitlang/core/json",
   "moonbitlang/x/sys",
 }

@@ -121,24 +121,6 @@ async fn fetch_repo_source(
 }
 
 ///|
-async fn git_diff(project_dir : String, path : String?) -> String {
-  let args = if path is Some(p) { ["diff", "--", p] } else { ["diff"] }
-  let (exit, out, _) = @process.collect_output(
-    "git",
-    args,
-    cwd=project_dir,
-    no_console_window=true,
-  )
-  if exit != 0 {
-    "(git diff failed)"
-  } else {
-    out.text() catch {
-      _ => ""
-    }
-  }
-}
-
-///|
 // 定位系统临时目录根：与 async/fs 内部实现一致，依次使用
 // TEMP / TMP / TMPDIR，最后回退到 Windows 用户临时目录或 /tmp。
 fn audit_temp_root() -> String {

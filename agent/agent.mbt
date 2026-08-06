@@ -21,6 +21,17 @@ fn trim_intermediate_content(content : String) -> String {
 }
 
 ///|
+// 一次会话的持久状态：完整消息历史跨回合保留，供交互式对话复用。
+pub(all) struct Session {
+  messages : Array[Json]
+}
+
+///|
+pub fn Agent::new_session(self : Agent) -> Session {
+  { messages: [@llm.chat_message("system", self.system_prompt)] }
+}
+
+///|
 pub struct AgentAnswer {
   text : String
   trace : Array[String]
@@ -38,10 +49,23 @@ pub async fn Agent::run(
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
 ) -> AgentAnswer {
-  let messages : Array[Json] = [
-    @llm.chat_message("system", self.system_prompt),
-    @llm.chat_message("user", question),
-  ]
+  let session = self.new_session()
+  self.turn(session, api_key, base_url, model, question, on_delta~)
+}
+
+///|
+// 单回合：在既有会话上追加用户消息并执行工具循环，把 assistant 回复与
+// 工具结果写回会话历史，返回本回合的最终回答。
+pub async fn Agent::turn(
+  self : Agent,
+  session : Session,
+  api_key : String,
+  base_url : String,
+  model : String,
+  question : String,
+  on_delta? : async (String) -> Unit = @llm.ignore_delta,
+) -> AgentAnswer {
+  session.messages.push(@llm.chat_message("user", question))
   let tools_json = self.tools.map(fn(t) { t.schema.to_json() })
   let trace : Array[String] = ["[plan] Delegate the task to the model"]
   let mut step = 0
@@ -56,7 +80,7 @@ pub async fn Agent::run(
       api_key,
       base_url,
       model,
-      messages,
+      session.messages,
       tools_json,
       max_tokens=self.max_tokens,
       on_delta~,
@@ -72,8 +96,8 @@ pub async fn Agent::run(
         trace.push(
           "[observation] Final answer hit max_tokens; requesting continuation",
         )
-        messages.push(@llm.chat_message("assistant", result.content))
-        messages.push(
+        session.messages.push(@llm.chat_message("assistant", result.content))
+        session.messages.push(
           @llm.chat_message(
             "user", "(System: continue and complete the answer exactly from where it stopped, keeping the same language and format. No tools are available now: output ONLY the plain Markdown answer, never tool calls or XML.)",
           ),
@@ -82,7 +106,7 @@ pub async fn Agent::run(
           api_key,
           base_url,
           model,
-          messages,
+          session.messages,
           [],
           max_tokens=self.max_tokens,
           on_delta~,
@@ -92,13 +116,15 @@ pub async fn Agent::run(
         } else {
           result.content
         }
+        session.messages.push(@llm.chat_message("assistant", text))
         trace.push("[final] Model returned an answer (continued)")
         return { text, trace }
       }
+      session.messages.push(@llm.chat_message("assistant", result.content))
       trace.push("[final] Model returned an answer")
       return { text: result.content, trace }
     }
-    messages.push(
+    session.messages.push(
       @llm.assistant_message_with_tool_calls(
         trim_intermediate_content(result.content),
         result.tool_calls,
@@ -109,7 +135,7 @@ pub async fn Agent::run(
         budget_exhausted = true
         // Keep the message history well-formed: every assistant tool call
         // must have a matching tool result, even if we skip executing it.
-        messages.push(
+        session.messages.push(
           @llm.tool_result_message(
             call.id,
             @tools.error_json("tool call skipped: agent budget exhausted"),
@@ -123,7 +149,7 @@ pub async fn Agent::run(
         Some(tool) => tool.run(call.arguments)
         None => @tools.error_json("unknown tool: \{call.name}")
       }
-      messages.push(@llm.tool_result_message(call.id, call_result))
+      session.messages.push(@llm.tool_result_message(call.id, call_result))
       trace.push("[observation] \{call.name} completed")
     }
     step += 1
@@ -135,7 +161,7 @@ pub async fn Agent::run(
     trace.push(
       "[observation] Agent budget exhausted; requesting a final answer from collected evidence",
     )
-    messages.push(
+    session.messages.push(
       @llm.chat_message(
         "user", "(System: no more tool calls are allowed. Answer the user's question now using the evidence already collected. No tools are available: output ONLY the plain Markdown answer, never tool calls or XML.)",
       ),
@@ -145,12 +171,13 @@ pub async fn Agent::run(
       api_key,
       base_url,
       model,
-      messages,
+      session.messages,
       [],
       max_tokens=self.max_tokens,
       on_delta~,
     )
     if result.content != "" {
+      session.messages.push(@llm.chat_message("assistant", result.content))
       trace.push("[final] Model answered from collected evidence")
       return { text: result.content, trace }
     }
@@ -188,99 +215,107 @@ fn ask_system_prompt() -> String {
 }
 
 ///|
+// `ask`/`chat` 共用的 Mooncakes 研究工具集。
+pub fn ask_tools(
+  modules : Array[@moonsage.ModuleSummary],
+) -> Array[@tools.Tool] {
+  let mut package_docs_calls = 0
+  [
+    {
+      schema: {
+        name: "search_modules",
+        description: "Search all Mooncakes modules. Use concise English technical keywords.",
+        parameters: @tools.object_schema(
+          {
+            "query": @tools.string_field(
+              "English package search keywords, for example: http client",
+            ),
+          },
+          ["query"],
+        ),
+      },
+      execute: async fn(arguments) {
+        let result = search_result_json(modules, arguments) catch {
+          e => @tools.error_json(e.to_string())
+        }
+        @async.sleep(0)
+        result
+      },
+    },
+    {
+      schema: {
+        name: "get_module_manifest",
+        description: "Get live metadata for one exact module, including downloads, versions, build status and license.",
+        parameters: @tools.object_schema(
+          {
+            "name": @tools.string_field(
+              "Exact owner/module name returned by search_modules",
+            ),
+          },
+          ["name"],
+        ),
+      },
+      execute: async fn(arguments) {
+        @mooncakes.fetch_manifest(arguments) catch {
+          e => @tools.error_json(e.to_string())
+        }
+      },
+    },
+    {
+      schema: {
+        name: "get_module_index",
+        description: "List packages and public symbol names for an exact module version. Call this before requesting package docs.",
+        parameters: @tools.object_schema(
+          {
+            "name": @tools.string_field("Exact owner/module name"),
+            "version": @tools.string_field("Exact version from the manifest"),
+          },
+          ["name", "version"],
+        ),
+      },
+      execute: async fn(arguments) {
+        @mooncakes.fetch_module_index(arguments) catch {
+          e => @tools.error_json(e.to_string())
+        }
+      },
+    },
+    {
+      schema: {
+        name: "get_package_docs",
+        description: "Get compact public API signatures and docstrings for one package returned by get_module_index.",
+        parameters: @tools.object_schema(
+          {
+            "name": @tools.string_field("Exact owner/module name"),
+            "version": @tools.string_field("Exact version from the manifest"),
+            "package_path": @tools.string_field(
+              "Exact full package path returned by get_module_index",
+            ),
+          },
+          ["name", "version", "package_path"],
+        ),
+      },
+      execute: async fn(arguments) {
+        package_docs_calls += 1
+        if package_docs_calls > 4 {
+          @tools.error_json(
+            "package docs budget reached; answer using evidence already collected",
+          )
+        } else {
+          @mooncakes.fetch_package_docs(arguments) catch {
+            e => @tools.error_json(e.to_string())
+          }
+        }
+      },
+    },
+  ]
+}
+
+///|
 // The `ask` agent: research Mooncakes packages and recommend candidates.
 pub fn ask_agent(modules : Array[@moonsage.ModuleSummary]) -> Agent {
-  let mut package_docs_calls = 0
   {
     system_prompt: ask_system_prompt(),
-    tools: [
-      {
-        schema: {
-          name: "search_modules",
-          description: "Search all Mooncakes modules. Use concise English technical keywords.",
-          parameters: @tools.object_schema(
-            {
-              "query": @tools.string_field(
-                "English package search keywords, for example: http client",
-              ),
-            },
-            ["query"],
-          ),
-        },
-        execute: async fn(arguments) {
-          let result = search_result_json(modules, arguments) catch {
-            e => @tools.error_json(e.to_string())
-          }
-          @async.sleep(0)
-          result
-        },
-      },
-      {
-        schema: {
-          name: "get_module_manifest",
-          description: "Get live metadata for one exact module, including downloads, versions, build status and license.",
-          parameters: @tools.object_schema(
-            {
-              "name": @tools.string_field(
-                "Exact owner/module name returned by search_modules",
-              ),
-            },
-            ["name"],
-          ),
-        },
-        execute: async fn(arguments) {
-          @mooncakes.fetch_manifest(arguments) catch {
-            e => @tools.error_json(e.to_string())
-          }
-        },
-      },
-      {
-        schema: {
-          name: "get_module_index",
-          description: "List packages and public symbol names for an exact module version. Call this before requesting package docs.",
-          parameters: @tools.object_schema(
-            {
-              "name": @tools.string_field("Exact owner/module name"),
-              "version": @tools.string_field("Exact version from the manifest"),
-            },
-            ["name", "version"],
-          ),
-        },
-        execute: async fn(arguments) {
-          @mooncakes.fetch_module_index(arguments) catch {
-            e => @tools.error_json(e.to_string())
-          }
-        },
-      },
-      {
-        schema: {
-          name: "get_package_docs",
-          description: "Get compact public API signatures and docstrings for one package returned by get_module_index.",
-          parameters: @tools.object_schema(
-            {
-              "name": @tools.string_field("Exact owner/module name"),
-              "version": @tools.string_field("Exact version from the manifest"),
-              "package_path": @tools.string_field(
-                "Exact full package path returned by get_module_index",
-              ),
-            },
-            ["name", "version", "package_path"],
-          ),
-        },
-        execute: async fn(arguments) {
-          package_docs_calls += 1
-          if package_docs_calls > 4 {
-            @tools.error_json(
-              "package docs budget reached; answer using evidence already collected",
-            )
-          } else {
-            @mooncakes.fetch_package_docs(arguments) catch {
-              e => @tools.error_json(e.to_string())
-            }
-          }
-        },
-      },
-    ],
+    tools: ask_tools(modules),
     max_tool_calls: 12,
     max_rounds: 6,
     max_tokens: 1200,
