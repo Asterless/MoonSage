@@ -5,4 +5,9 @@ import {
   "moonsage/md_ansi",
   "moonsage/mooncakes",
   "moonbitlang/async/stdio",
+  "moonbitlang/core/encoding/utf8",
 }
+
+options(
+  "native-stub": [ "input_utf8.c" ],
+)

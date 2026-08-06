@@ -70,25 +70,78 @@ fn help_text() -> String {
 }
 
 ///|
-// 从 stdin 读取一行原始字节并直接拷贝为字符串（不做严格 UTF-8 校验）。
-// 中文 Windows 控制台的默认输入代码页是 GBK，`read_until` 会按 UTF-8 解码
-// 并在失败后卡住内部缓冲；这里绕开解码，EOF 返回 None。
-async fn read_line_raw() -> String? {
-  let line = Buffer()
-  for ;; {
-    match @stdio.stdin.read_some() {
-      None =>
-        return if line.length() == 0 {
-          None
-        } else {
-          Some(line.to_bytes().to_unchecked_string())
-        }
-      Some(bytes) => {
-        if bytes.length() > 0 && bytes[0] == b'\n' {
-          return Some(line.to_bytes().to_unchecked_string())
-        }
-        line.write_bytes(bytes)
+#borrow(bytes)
+extern "C" fn gbk_bytes_to_utf8(
+  bytes : Bytes,
+  offset : Int,
+  len : Int,
+) -> Bytes = "moonsage_gbk_to_utf8"
+
+///|
+// 优先按 UTF-8 解码；失败（中文 Windows 控制台默认是 GBK 输入）时调用
+// C stub 用系统代码页转成 UTF-8。同时剥离前导 UTF-8 BOM（部分终端/管道
+// 会在输入前附加 EF BB BF），保证中文输入既不会崩溃也不会乱码。
+fn utf8_or_gbk(bytes : Bytes, end : Int) -> String {
+  let start = if end >= 3 &&
+    bytes[0] == b'\xef' &&
+    bytes[1] == b'\xbb' &&
+    bytes[2] == b'\xbf' {
+    3
+  } else {
+    0
+  }
+  @utf8.decode(bytes[start:end]) catch {
+    _ => {
+      let converted = gbk_bytes_to_utf8(bytes, start, end - start)
+      @utf8.decode(converted[0:converted.length()]) catch {
+        _ => converted.to_unchecked_string()
       }
+    }
+  }
+}
+
+///|
+// 带持久缓冲的行读取器：一次 read_some 可能返回多行（粘贴/管道），
+// `\n` 之后的剩余字节必须保留给下一轮，否则对话会在中途丢输入并退出。
+priv struct LineReader {
+  pending : Buffer
+}
+
+///|
+fn LineReader::new() -> LineReader {
+  { pending: Buffer() }
+}
+
+///|
+async fn LineReader::next(self : LineReader) -> String? {
+  for ;; {
+    let bytes = self.pending.to_bytes()
+    let len = bytes.length()
+    let mut found = -1
+    for i = 0; i < len; i = i + 1 {
+      if bytes[i] == b'\n' {
+        found = i
+        break
+      }
+    }
+    if found >= 0 {
+      let line = utf8_or_gbk(bytes, found)
+      self.pending.reset()
+      if found + 1 < len {
+        self.pending.write_bytes(bytes[found + 1:])
+      }
+      return Some(line)
+    }
+    match @stdio.stdin.read_some() {
+      None => {
+        if len == 0 {
+          return None
+        }
+        let line = utf8_or_gbk(bytes, len)
+        self.pending.reset()
+        return Some(line)
+      }
+      Some(chunk) => self.pending.write_bytes(chunk)
     }
   }
 }
@@ -108,10 +161,11 @@ pub async fn run_chat(
   }
   let agent = chat_agent(modules, cwd)
   let mut session = agent.new_session()
+  let reader = LineReader::new()
   println("MoonSage chat — /help for commands, /exit or /quit to leave")
   for ;; {
     @stdio.stdout.write("moon> ")
-    match read_line_raw() {
+    match reader.next() {
       None => {
         @stdio.stdout.write("\n")
         return

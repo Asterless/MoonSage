@@ -28,3 +28,20 @@ test "chat agent combines ask and local tools" {
   assert_eq(agent.max_rounds, 6)
   assert_true(agent.max_tokens > 0)
 }
+
+///|
+test "utf8_or_gbk passes valid UTF-8 through unchanged" {
+  let utf8 = b"\xe4\xbd\xa0\xe5\xa5\xbd" // 你好
+  assert_eq(utf8_or_gbk(utf8, utf8.length()), "你好")
+  // 带 UTF-8 BOM 的输入也应正确剥离
+  assert_eq(utf8_or_gbk(b"\xef\xbb\xbf" + utf8, utf8.length() + 3), "你好")
+}
+
+///|
+#cfg(platform="windows")
+test "utf8_or_gbk converts GBK bytes on the system codepage" {
+  let gbk = b"\xc4\xe3\xba\xc3" // 你好 (GBK)
+  assert_eq(utf8_or_gbk(gbk, gbk.length()), "你好")
+  // BOM + GBK 的组合（部分管道会在输入前附加 UTF-8 BOM）
+  assert_eq(utf8_or_gbk(b"\xef\xbb\xbf" + gbk, gbk.length() + 3), "你好")
+}
