@@ -168,3 +168,44 @@ async test "Agent::turn carries conversation history across turns" {
     assert_true(session.messages[4].stringify().contains("second"))
   }
 }
+
+///|
+async test "Agent::turn emits tool and answer events" {
+  @async.with_task_group() <| group => {
+    let round1 = sse_chunk(tool_call_choice(0, "call_1", "search_modules", "")) +
+      sse_chunk(tool_call_choice(0, "", "", "{\"query\":\"http\"}")) +
+      sse_chunk(tool_call_choice(0, "", "", "", finish_reason="tool_calls")) +
+      "data: [DONE]\n"
+    let round2 = sse_chunk(content_choice("Found it", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [round1, round2])
+    let modules : Array[@moonsage.ModuleSummary] = [
+      {
+        name: "owner/http-client",
+        version: "1.0.0",
+        license: "MIT",
+        repository: "",
+        keywords: ["http"],
+        description: "A native HTTP client",
+        created_at: "",
+      },
+    ]
+    let events : Array[EngineEvent] = []
+    let answer = run_llm_agent(
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      modules,
+      "find http client",
+      on_event=async fn(ev) {
+        events.push(ev)
+        @async.sleep(0)
+      },
+    )
+    assert_eq(answer.text, "Found it")
+    assert_eq(events.length(), 3)
+    assert_true(events[0] is ToolCall("search_modules"))
+    assert_true(events[1] is ToolResult("search_modules"))
+    assert_true(events[2] is AnswerDelta("Found it"))
+  }
+}

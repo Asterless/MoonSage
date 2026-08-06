@@ -32,6 +32,25 @@ pub fn Agent::new_session(self : Agent) -> Session {
 }
 
 ///|
+// 引擎向前端（终端 / 未来 TUI / GUI）发出的事件流。前端只消费事件，
+// 与渲染层完全解耦，便于替换成任意界面。
+pub(all) enum EngineEvent {
+  // 工具阶段的推理/过程文本（已按预算截断，空内容不发送）
+  ThinkingDelta(String)
+  // 工具调用开始
+  ToolCall(String)
+  // 工具调用完成
+  ToolResult(String)
+  // 最终回答增量（回合结束时一次性发送完整文本）
+  AnswerDelta(String)
+}
+
+///|
+pub async fn ignore_event(_ : EngineEvent) -> Unit {
+  @async.sleep(0)
+}
+
+///|
 pub struct AgentAnswer {
   text : String
   trace : Array[String]
@@ -48,9 +67,10 @@ pub async fn Agent::run(
   model : String,
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
+  on_event? : async (EngineEvent) -> Unit = ignore_event,
 ) -> AgentAnswer {
   let session = self.new_session()
-  self.turn(session, api_key, base_url, model, question, on_delta~)
+  self.turn(session, api_key, base_url, model, question, on_delta~, on_event~)
 }
 
 ///|
@@ -64,6 +84,7 @@ pub async fn Agent::turn(
   model : String,
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
+  on_event? : async (EngineEvent) -> Unit = ignore_event,
 ) -> AgentAnswer {
   session.messages.push(@llm.chat_message("user", question))
   let tools_json = self.tools.map(fn(t) { t.schema.to_json() })
@@ -117,18 +138,21 @@ pub async fn Agent::turn(
           result.content
         }
         session.messages.push(@llm.chat_message("assistant", text))
+        on_event(AnswerDelta(text))
         trace.push("[final] Model returned an answer (continued)")
         return { text, trace }
       }
       session.messages.push(@llm.chat_message("assistant", result.content))
+      on_event(AnswerDelta(result.content))
       trace.push("[final] Model returned an answer")
       return { text: result.content, trace }
     }
+    let trimmed = trim_intermediate_content(result.content)
+    if trimmed != "" {
+      on_event(ThinkingDelta(trimmed))
+    }
     session.messages.push(
-      @llm.assistant_message_with_tool_calls(
-        trim_intermediate_content(result.content),
-        result.tool_calls,
-      ),
+      @llm.assistant_message_with_tool_calls(trimmed, result.tool_calls),
     )
     for call in result.tool_calls {
       if total_tool_calls >= self.max_tool_calls {
@@ -145,10 +169,12 @@ pub async fn Agent::turn(
       }
       total_tool_calls += 1
       trace.push("[tool] \{call.name}")
+      on_event(ToolCall(call.name))
       let call_result = match @tools.find_tool(self.tools, call.name) {
         Some(tool) => tool.run(call.arguments)
         None => @tools.error_json("unknown tool: \{call.name}")
       }
+      on_event(ToolResult(call.name))
       session.messages.push(@llm.tool_result_message(call.id, call_result))
       trace.push("[observation] \{call.name} completed")
     }
@@ -178,6 +204,7 @@ pub async fn Agent::turn(
     )
     if result.content != "" {
       session.messages.push(@llm.chat_message("assistant", result.content))
+      on_event(AnswerDelta(result.content))
       trace.push("[final] Model answered from collected evidence")
       return { text: result.content, trace }
     }
@@ -331,6 +358,14 @@ pub async fn run_llm_agent(
   modules : Array[@moonsage.ModuleSummary],
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
+  on_event? : async (EngineEvent) -> Unit = ignore_event,
 ) -> AgentAnswer {
-  ask_agent(modules).run(api_key, base_url, model, question, on_delta~)
+  ask_agent(modules).run(
+    api_key,
+    base_url,
+    model,
+    question,
+    on_delta~,
+    on_event~,
+  )
 }

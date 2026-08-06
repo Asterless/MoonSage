@@ -42,3 +42,12 @@ test "audit args reconstruct raw arguments" {
   }
   assert_eq(audit_args(cm), ["--clean"])
 }
+
+///|
+test "cli accepts --version flag" {
+  let root = root_command()
+  let parsed = root.parse(argv=["--version"], env=Map([]))
+  assert_true(flag_of(parsed, "version"))
+  let short = root.parse(argv=["-V"], env=Map([]))
+  assert_true(flag_of(short, "version"))
+}

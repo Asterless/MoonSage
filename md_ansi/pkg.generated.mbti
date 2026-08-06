@@ -15,6 +15,7 @@ pub struct MdStreamPrinter {
 }
 pub fn MdStreamPrinter::feed(Self, String) -> Unit
 pub fn MdStreamPrinter::finish(Self) -> Unit
+pub fn MdStreamPrinter::flush_partial(Self) -> Unit
 pub fn MdStreamPrinter::new() -> Self
 pub fn MdStreamPrinter::take_output(Self) -> String
 

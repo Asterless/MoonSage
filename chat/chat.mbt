@@ -188,16 +188,30 @@ pub async fn run_chat(
           }
           Prompt => {
             let printer = @md_ansi.MdStreamPrinter::new()
-            let answer = agent.turn(session, api_key, base_url, model, input, on_delta=async fn(
-              text,
-            ) {
-              printer.feed(text)
-              printer.flush_partial()
-              let out = printer.take_output()
-              if out != "" {
-                @stdio.stdout.write(out)
-              }
-            }) catch {
+            let _ = agent.turn(
+              session,
+              api_key,
+              base_url,
+              model,
+              input,
+              on_delta=async fn(text) {
+                printer.feed(text)
+                printer.flush_partial()
+                let out = printer.take_output()
+                if out != "" {
+                  @stdio.stdout.write(out)
+                }
+              },
+              on_event=async fn(event) {
+                match event {
+                  @agent.ToolCall(name) =>
+                    @stdio.stdout.write("\n[tool] \{name} ...\n")
+                  @agent.ToolResult(name) =>
+                    @stdio.stdout.write("[observation] \{name} completed\n")
+                  _ => ()
+                }
+              },
+            ) catch {
               e => {
                 @stdio.stdout.write("\nerror: \{e.to_string()}\n")
                 continue
@@ -206,9 +220,6 @@ pub async fn run_chat(
             printer.finish()
             @stdio.stdout.write(printer.take_output())
             @stdio.stdout.write("\n")
-            for event in answer.trace {
-              println(event)
-            }
           }
         }
       }

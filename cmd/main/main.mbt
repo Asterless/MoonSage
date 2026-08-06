@@ -9,6 +9,7 @@ fn usage() -> String {
     #|  moonsage ask <question>
     #|  moonsage audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
     #|  moonsage audit --clean
+    #|  moonsage --version
     #|
     #|Run `moonsage --help` for the full option reference.
     #|
@@ -44,7 +45,9 @@ async fn run_search(query : String) -> Unit {
 async fn run_ask(question : String) -> Unit {
   let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
   guard key != "" else {
-    println("error: set MOONSAGE_API_KEY before using ask")
+    @stdio.stderr.write("error: set MOONSAGE_API_KEY before using ask\n") catch {
+      _ => ()
+    }
     return
   }
   let base_url = @sys.get_env_var("MOONSAGE_BASE_URL").unwrap_or(
@@ -76,7 +79,9 @@ async fn run_ask(question : String) -> Unit {
 async fn run_chat_cmd() -> Unit {
   let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
   guard key != "" else {
-    println("error: set MOONSAGE_API_KEY before using chat")
+    @stdio.stderr.write("error: set MOONSAGE_API_KEY before using chat\n") catch {
+      _ => ()
+    }
     return
   }
   let base_url = @sys.get_env_var("MOONSAGE_BASE_URL").unwrap_or(
@@ -114,8 +119,12 @@ async fn main {
       @stdio.stderr.write("error: \{error.to_string()}\n") catch {
         _ => ()
       }
-      return
+      abort("")
     }
+  }
+  if flag_of(matches, "version") {
+    println("moonsage \{MOONSAGE_VERSION}")
+    return
   }
   match matches.subcommand {
     Some(("chat", _)) => run_chat_cmd()

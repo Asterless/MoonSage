@@ -3,6 +3,13 @@ fn root_command() -> @argparse.Command {
   @argparse.Command(
     "moonsage",
     about="MoonSage - an agent for the MoonBit package ecosystem",
+    flags=[
+      @argparse.FlagArg(
+        "version",
+        short='V',
+        about="Print version information.",
+      ),
+    ],
     subcommands=[
       @argparse.Command(
         "chat",
@@ -65,6 +72,9 @@ fn root_command() -> @argparse.Command {
     ],
   )
 }
+
+///|
+const MOONSAGE_VERSION = "0.1.0"
 
 ///|
 fn values_of(m : @argparse.Matches, key : String) -> Array[String] {
