@@ -70,6 +70,30 @@ fn help_text() -> String {
 }
 
 ///|
+// 从 stdin 读取一行原始字节并直接拷贝为字符串（不做严格 UTF-8 校验）。
+// 中文 Windows 控制台的默认输入代码页是 GBK，`read_until` 会按 UTF-8 解码
+// 并在失败后卡住内部缓冲；这里绕开解码，EOF 返回 None。
+async fn read_line_raw() -> String? {
+  let line = Buffer()
+  for ;; {
+    match @stdio.stdin.read_some() {
+      None =>
+        return if line.length() == 0 {
+          None
+        } else {
+          Some(line.to_bytes().to_unchecked_string())
+        }
+      Some(bytes) => {
+        if bytes.length() > 0 && bytes[0] == b'\n' {
+          return Some(line.to_bytes().to_unchecked_string())
+        }
+        line.write_bytes(bytes)
+      }
+    }
+  }
+}
+
+///|
 pub async fn run_chat(
   api_key : String,
   base_url : String,
@@ -87,7 +111,7 @@ pub async fn run_chat(
   println("MoonSage chat — /help for commands, /exit or /quit to leave")
   for ;; {
     @stdio.stdout.write("moon> ")
-    match @stdio.stdin.read_until("\n") {
+    match read_line_raw() {
       None => {
         @stdio.stdout.write("\n")
         return

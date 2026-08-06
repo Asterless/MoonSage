@@ -30,7 +30,7 @@ async fn write_file_tool(ctx : AuditContext, arguments : String) -> String {
   match ctx.confirm {
     ConfirmPrompt => {
       @stdio.stdout.write("[fix] overwrite \{rel}? [y/N] ")
-      let answer = @stdio.stdin.read_until("\n")
+      let answer = @stdio.stdin.read_until("\n") catch { _ => None }
       let ok = match answer {
         Some(s) => s.trim().to_lower() == "y" || s.trim().to_lower() == "yes"
         None => false
