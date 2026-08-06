@@ -1,6 +1,7 @@
 import {
   "moonsage",
   "moonsage/tools",
+  "moonbitlang/async",
   "moonbitlang/async/http",
   "moonbitlang/core/json",
 }

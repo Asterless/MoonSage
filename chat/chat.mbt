@@ -138,6 +138,7 @@ pub async fn run_chat(
               text,
             ) {
               printer.feed(text)
+              printer.flush_partial()
               let out = printer.take_output()
               if out != "" {
                 @stdio.stdout.write(out)

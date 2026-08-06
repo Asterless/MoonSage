@@ -213,3 +213,53 @@ async test "stream_chat_completion assembles tool calls from fragments" {
 }
 
 ///|
+// 延迟 delay_ms 后才返回 SSE 响应，模拟 LLM 服务响应缓慢/中断。
+async fn mock_llm_server_delayed(
+  group : @async.TaskGroup[Unit],
+  delay_ms : Int,
+) -> Int {
+  let server = @http.Server(@socket.Addr::parse("127.0.0.1:0"))
+  group.spawn_bg(no_wait=true) <| () => {
+    server.run_forever() <| ((_request, body, conn) => {
+      while body.read_some() is Some(_) {
+        ()
+      }
+      @async.sleep(delay_ms)
+      let sse = sse_chunk(content_choice("late", finish_reason="stop")) +
+        "data: [DONE]\n"
+      conn
+      ..send_response(200, "OK", extra_headers={
+        "Content-Type": "text/event-stream",
+      })
+      ..write(sse)
+      .flush()
+    })
+  }
+  server.addr.port()
+}
+
+///|
+async test "stream_chat_completion times out when the response is delayed" {
+  @async.with_task_group() <| group => {
+    let port = mock_llm_server_delayed(group, 500)
+    let raised = try {
+      ignore(
+        stream_chat_completion(
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          [chat_message("user", "hi")],
+          [],
+          max_tokens=64,
+          connect_timeout_ms=100,
+        ),
+      )
+      false
+    } catch {
+      e => e.to_string().contains("timed out")
+    }
+    assert_true(raised)
+  }
+}
+
+///|
