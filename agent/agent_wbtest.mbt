@@ -280,3 +280,55 @@ async test "budget-exhausted final answer continues when truncated" {
     )
   }
 }
+
+///|
+async test "compact keeps tool results with their tool_calls message" {
+  @async.with_task_group() <| group => {
+    let sse = sse_chunk(content_choice("摘要", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [sse])
+    let agent : Agent = {
+      system_prompt: "sys",
+      tools: [],
+      max_tool_calls: 5,
+      max_rounds: 3,
+      max_tokens: 64,
+    }
+    let session = agent.new_session()
+    for i = 0; i < 8; i = i + 1 {
+      session.messages.push(@llm.chat_message("user", "u" + i.to_string()))
+      session.messages.push(@llm.chat_message("assistant", "a" + i.to_string()))
+    }
+    // 结尾：assistant(tool_calls) + tool 结果 + user + assistant
+    let tool_call : @llm.ChatToolCall = { id: "c1", name: "t", arguments: "{}" }
+    session.messages.push(
+      @llm.assistant_message_with_tool_calls("", [tool_call]),
+    )
+    session.messages.push(@llm.tool_result_message("c1", "ok"))
+    session.messages.push(@llm.chat_message("user", "继续"))
+    session.messages.push(@llm.chat_message("assistant", "完成"))
+    agent.compact(
+      session,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      threshold_chars=1,
+    )
+    // 校验：任何 tool 消息前一条必须是带 tool_calls 的 assistant。
+    for i = 1; i < session.messages.length(); i = i + 1 {
+      if message_role(session.messages[i]) == "tool" {
+        assert_true(is_assistant_with_tool_calls(session.messages[i - 1]))
+      }
+    }
+  }
+}
+
+///|
+fn is_assistant_with_tool_calls(message : Json) -> Bool {
+  match message {
+    Object(fields) =>
+      fields.get("role") is Some(String("assistant")) &&
+      fields.get("tool_calls") is Some(Array(_))
+    _ => false
+  }
+}

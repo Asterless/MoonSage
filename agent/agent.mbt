@@ -75,6 +75,18 @@ pub async fn ignore_event(_ : EngineEvent) -> Unit {
 }
 
 ///|
+fn message_role(message : Json) -> String {
+  match message {
+    Object(fields) =>
+      match fields.get("role") {
+        Some(String(role)) => role
+        _ => ""
+      }
+    _ => ""
+  }
+}
+
+///|
 // 上下文压缩：当会话超过阈值字符数时，把较早的历史（保留系统提示和最近
 // keep_recent 条消息）交给模型总结成一条摘要，替换掉旧消息。
 pub async fn Agent::compact(
@@ -90,7 +102,12 @@ pub async fn Agent::compact(
     return
   }
   let keep = if keep_recent < 1 { 1 } else { keep_recent }
-  let cut = session.messages.length() - keep
+  let mut cut = session.messages.length() - keep
+  // 保留窗口的起点不能是 tool 消息：tool 结果必须跟随其 assistant(tool_calls)，
+  // 否则重建后的历史会被 LLM API 以 400 拒绝（orphaned tool message）。
+  while cut > 1 && message_role(session.messages[cut]) == "tool" {
+    cut = cut - 1
+  }
   if cut <= 1 {
     return
   }
