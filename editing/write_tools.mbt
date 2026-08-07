@@ -8,15 +8,9 @@ pub(all) enum WriteConfirm {
 }
 
 ///|
-fn basename(path : String) -> String {
-  let parts = path.split("/").to_array()
-  parts[parts.length() - 1].to_owned()
-}
-
-///|
 // 修改后需要跑语法门校验的源码文件。
 fn is_syncheck_source(rel : String) -> Bool {
-  let base = basename(rel)
+  let base = @util.basename(rel)
   base.has_suffix(".mbt") ||
   base.has_suffix(".mbt.md") ||
   base == "moon.mod" ||
@@ -28,7 +22,7 @@ fn is_syncheck_source(rel : String) -> Bool {
 async fn syncheck_content(content : String, rel : String) -> String {
   let tmp = @fs.tmpdir(prefix="moonsage-syncheck-")
   try {
-    let file = tmp + "/" + basename(rel)
+    let file = tmp + "/" + @util.basename(rel)
     let _ = @fs.write_file(
       file,
       content,
@@ -81,11 +75,11 @@ async fn write_file_tool(
   arguments : String,
 ) -> String {
   let document = @json.parse(arguments)
-  let rel = json_string_arg(document, "path")
-  let content = json_string_arg(document, "content")
+  let rel = @util.json_string_arg(document, "path")
+  let content = @util.json_string_arg(document, "content")
   guard rel != "" else { fail("path is required") }
   let root = ws.get_root()
-  let path = safe_path(root, rel)
+  let path = @util.safe_path(root, rel)
   // 与 multi_edit 一致:源码文件先过语法门再询问确认,避免确认一个注定失败的写入。
   if is_syncheck_source(rel) {
     ignore(syncheck_content(content, rel))
@@ -130,11 +124,17 @@ async fn multi_edit_tool(
   let edits : Array[EditSpec] = []
   for item in items {
     guard item is Object(_) else { fail("each edit must be an object") }
-    let file = json_string_arg(item, "file")
-    let old_string = json_string_arg(item, "old_string")
-    let new_string = json_string_arg(item, "new_string")
-    let start_line = parse_int_or(json_string_arg(item, "start_line"), 1)
-    let end_line = parse_int_or(json_string_arg(item, "end_line"), 0)
+    let file = @util.json_string_arg(item, "file")
+    let old_string = @util.json_string_arg(item, "old_string")
+    let new_string = @util.json_string_arg(item, "new_string")
+    let start_line = @util.parse_int_or(
+      @util.json_string_arg(item, "start_line"),
+      1,
+    )
+    let end_line = @util.parse_int_or(
+      @util.json_string_arg(item, "end_line"),
+      0,
+    )
     guard file != "" else { fail("each edit requires a file") }
     edits.push({ file, old_string, new_string, start_line, end_line })
   }
@@ -143,7 +143,7 @@ async fn multi_edit_tool(
   let original : Map[String, String] = Map([])
   for edit in edits {
     if original.get(edit.file) is None {
-      let path = safe_path(root, edit.file)
+      let path = @util.safe_path(root, edit.file)
       original[edit.file] = @fs.read_file(path).text()
     }
   }
@@ -178,7 +178,7 @@ async fn multi_edit_tool(
     if original[file] != new_content {
       ws.push_undo(file, Some(original[file]))
       @fs.write_file(
-        safe_path(root, file),
+        @util.safe_path(root, file),
         new_content,
         create_mode=@fs.CreateMode::CreateOrTruncate,
       )
@@ -195,9 +195,9 @@ async fn remove_tool(
   arguments : String,
 ) -> String {
   let document = @json.parse(arguments)
-  let rel = json_string_arg(document, "path")
+  let rel = @util.json_string_arg(document, "path")
   guard rel != "" else { fail("path is required") }
-  let path = safe_path(ws.get_root(), rel)
+  let path = @util.safe_path(ws.get_root(), rel)
   guard @fs.kind(path) is @fs.FileKind::Regular else {
     fail("remove only supports regular files: \{rel}")
   }
@@ -333,38 +333,4 @@ pub fn write_tools(
       },
     },
   ]
-}
-
-///|
-// 从工具参数 JSON 中读取字符串字段。
-fn json_string_arg(document : Json, key : String) -> String {
-  match document {
-    Object(fields) =>
-      match fields.get(key) {
-        Some(String(s)) => s
-        _ => ""
-      }
-    _ => ""
-  }
-}
-
-///|
-// 将项目相对路径解析为绝对路径，拒绝穿越、绝对路径与反斜杠。
-pub fn safe_path(root : String, rel : String) -> String raise {
-  guard rel != "" &&
-    !rel.contains("..") &&
-    !rel.contains("\\") &&
-    !rel.contains(":") &&
-    !rel.has_prefix("/") &&
-    !rel.has_prefix("\\") else {
-    fail("invalid path: \{rel}")
-  }
-  root + "/" + rel
-}
-
-///|
-fn parse_int_or(s : String, default : Int) -> Int {
-  @string.parse_int(s) catch {
-    _ => default
-  }
 }

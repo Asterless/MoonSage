@@ -1,0 +1,20 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/util"
+
+// Values
+pub fn basename(String) -> String
+
+pub fn json_string_arg(Json, String) -> String
+
+pub fn parse_int_or(String, Int) -> Int
+
+pub fn safe_path(String, String) -> String raise
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits
+

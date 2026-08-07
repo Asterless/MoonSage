@@ -147,7 +147,7 @@ async fn github_identity() -> (String, String) {
   }
   let login = login.trim().to_owned()
   let id = if id_exit == 0 {
-    parse_int_or((id_out.text() catch { _ => "" }).trim().to_owned(), 0)
+    @util.parse_int_or((id_out.text() catch { _ => "" }).trim().to_owned(), 0)
   } else {
     0
   }
@@ -212,7 +212,7 @@ pub async fn publish_changes(
   let requested = branch.trim().to_owned()
   let current_branch = git_text(["branch", "--show-current"], project_dir)
   let base_branch = remote_default_branch(project_dir, current_branch)
-  let ahead = parse_int_or(
+  let ahead = @util.parse_int_or(
     git_text(["rev-list", "--count", base_branch + "..HEAD"], project_dir),
     0,
   )

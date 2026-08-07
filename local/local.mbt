@@ -1,31 +1,4 @@
 ///|
-// 从工具参数 JSON 中读取字符串字段。
-pub fn json_string_arg(document : Json, key : String) -> String {
-  match document {
-    Object(fields) =>
-      match fields.get(key) {
-        Some(String(s)) => s
-        _ => ""
-      }
-    _ => ""
-  }
-}
-
-///|
-// 将项目相对路径解析为绝对路径，拒绝穿越、绝对路径与反斜杠。
-pub fn safe_path(root : String, rel : String) -> String raise {
-  guard rel != "" &&
-    !rel.contains("..") &&
-    !rel.contains("\\") &&
-    !rel.contains(":") &&
-    !rel.has_prefix("/") &&
-    !rel.has_prefix("\\") else {
-    fail("invalid path: \{rel}")
-  }
-  root + "/" + rel
-}
-
-///|
 fn relative_to_root(root : String, path : String) -> String {
   if path.has_prefix(root + "/") {
     path[root.length() + 1:].to_owned()
@@ -40,13 +13,6 @@ fn truncate_output(s : String, max : Int) -> String {
     s[:max].to_owned() + "\n... (truncated)"
   } else {
     s
-  }
-}
-
-///|
-fn parse_int_or(s : String, default : Int) -> Int {
-  @string.parse_int(s) catch {
-    _ => default
   }
 }
 
@@ -123,9 +89,9 @@ fn match_here(pattern : String, pi : Int, text : String, ti : Int) -> Bool {
 ///|
 async fn list_project_files_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
-  let sub = json_string_arg(document, "path")
-  let pattern = json_string_arg(document, "pattern")
-  let dir = if sub == "" { root } else { safe_path(root, sub) }
+  let sub = @util.json_string_arg(document, "path")
+  let pattern = @util.json_string_arg(document, "pattern")
+  let dir = if sub == "" { root } else { @util.safe_path(root, sub) }
   let files : Array[String] = []
   collect_project_files(dir, root, files, collect_files_hard_cap)
   let filtered = if pattern != "" {
@@ -148,14 +114,14 @@ async fn list_project_files_tool(root : String, arguments : String) -> String {
 ///|
 async fn grep_files_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
-  let pattern = json_string_arg(document, "pattern")
-  let sub = json_string_arg(document, "path")
-  let max_matches = parse_int_or(
-    json_string_arg(document, "max_matches"),
+  let pattern = @util.json_string_arg(document, "pattern")
+  let sub = @util.json_string_arg(document, "path")
+  let max_matches = @util.parse_int_or(
+    @util.json_string_arg(document, "max_matches"),
     grep_max_matches_default,
   )
   guard pattern != "" else { fail("pattern is required") }
-  let dir = if sub == "" { root } else { safe_path(root, sub) }
+  let dir = if sub == "" { root } else { @util.safe_path(root, sub) }
   let needle = pattern.to_lower()
   let files : Array[String] = []
   collect_project_files(dir, root, files, collect_files_hard_cap)
@@ -164,7 +130,7 @@ async fn grep_files_tool(root : String, arguments : String) -> String {
     if matches.length() >= max_matches {
       break
     }
-    let read_result = Some(@fs.read_file(safe_path(root, file)).text()) catch {
+    let read_result = Some(@fs.read_file(@util.safe_path(root, file)).text()) catch {
       _ => None
     }
     match read_result {
@@ -197,14 +163,14 @@ async fn grep_files_tool(root : String, arguments : String) -> String {
 ///|
 async fn read_file_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
-  let rel = json_string_arg(document, "path")
-  let path = safe_path(root, rel)
-  let start = json_string_arg(document, "start")
-  let end = json_string_arg(document, "end")
+  let rel = @util.json_string_arg(document, "path")
+  let path = @util.safe_path(root, rel)
+  let start = @util.json_string_arg(document, "start")
+  let end = @util.json_string_arg(document, "end")
   let data = @fs.read_file(path)
   let lines = data.text().split("\n").map(fn(s) { s.to_owned() }).to_array()
-  let first = parse_int_or(start, 1)
-  let last = parse_int_or(end, lines.length())
+  let first = @util.parse_int_or(start, 1)
+  let last = @util.parse_int_or(end, lines.length())
   let first = if first < 1 { 1 } else { first }
   let last = if last > lines.length() { lines.length() } else { last }
   let out = StringBuilder::new()
@@ -220,15 +186,15 @@ async fn read_file_tool(root : String, arguments : String) -> String {
 ///|
 async fn run_moon_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
-  let args_text = json_string_arg(document, "args")
+  let args_text = @util.json_string_arg(document, "args")
   let args = args_text
     .split(" ")
     .filter(fn(s) { s != "" })
     .map(fn(s) { s.to_owned() })
     .to_array()
   guard args.length() > 0 else { fail("args must not be empty") }
-  let timeout_ms = parse_int_or(
-    json_string_arg(document, "timeout_ms"),
+  let timeout_ms = @util.parse_int_or(
+    @util.json_string_arg(document, "timeout_ms"),
     run_moon_default_timeout_ms,
   )
   let timeout_ms = if timeout_ms < 1000 { 1000 } else { timeout_ms }
@@ -312,9 +278,9 @@ pub async fn git_diff(root : String, path : String?) -> String {
 ///|
 async fn git_diff_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments) catch { _ => Json::object({}) }
-  let path = json_string_arg(document, "path")
+  let path = @util.json_string_arg(document, "path")
   let limited = if path != "" {
-    ignore(safe_path(root, path))
+    ignore(@util.safe_path(root, path))
     Some(path)
   } else {
     None
