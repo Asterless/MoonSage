@@ -326,6 +326,8 @@ pub async fn run_chat(
             }
             let printer = @md_ansi.MdStreamPrinter::new()
             let mut answer_started = false
+            // 思考/推理过程缓冲:在工具调用或最终回答前以暗色块输出。
+            let thinking = StringBuilder::new()
             let _ = agent.turn(
               session,
               api_key,
@@ -333,6 +335,12 @@ pub async fn run_chat(
               model,
               input,
               on_delta=async fn(text) {
+                if thinking.to_string().length() > 0 {
+                  @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
+                  @stdio.stdout.write(thinking.to_string())
+                  @stdio.stdout.write("\u001B[0m\n")
+                  thinking.reset()
+                }
                 if !answer_started {
                   answer_started = true
                   @stdio.stdout.write("\n")
@@ -344,10 +352,22 @@ pub async fn run_chat(
                   @stdio.stdout.write(out)
                 }
               },
+              on_thinking=fn(text) {
+                if text != "" && thinking.to_string().length() < 20000 {
+                  thinking.write_string(text)
+                }
+              },
               on_event=async fn(event) {
                 match event {
-                  @agent.ToolCall(name) =>
+                  @agent.ToolCall(name) => {
+                    if thinking.to_string().length() > 0 {
+                      @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
+                      @stdio.stdout.write(thinking.to_string())
+                      @stdio.stdout.write("\u001B[0m\n")
+                      thinking.reset()
+                    }
                     @stdio.stdout.write("\n▸ \{tool_label(name)} …\n")
+                  }
                   @agent.ToolResult(_) => ()
                   _ => ()
                 }
@@ -357,6 +377,12 @@ pub async fn run_chat(
                 @stdio.stdout.write("✗ \{prettify_error(e.to_string())}\n")
                 continue
               }
+            }
+            if thinking.to_string().length() > 0 {
+              @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
+              @stdio.stdout.write(thinking.to_string())
+              @stdio.stdout.write("\u001B[0m\n")
+              thinking.reset()
             }
             printer.finish()
             @stdio.stdout.write(printer.take_output())

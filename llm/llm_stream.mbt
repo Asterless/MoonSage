@@ -11,6 +11,7 @@ struct ToolCallDelta {
 /// A parsed delta from one streaming chat completion chunk.
 struct StreamChunk {
   content : String?
+  reasoning_content : String?
   tool_calls : Array[ToolCallDelta]
   finish_reason : String?
 } derive(Eq, Debug)
@@ -73,15 +74,23 @@ fn parse_stream_chunk(payload : String) -> StreamChunk? {
     Some(String(s)) => Some(s)
     _ => None
   }
+  // DeepSeek reasoner 系列通过 reasoning_content 增量返回思考过程。
+  let reasoning_content = match delta.get("reasoning_content") {
+    Some(String(s)) => Some(s)
+    _ => None
+  }
   let tool_calls = parse_tool_call_deltas(delta)
   let finish_reason = match choice.get("finish_reason") {
     Some(String(s)) => Some(s)
     _ => None
   }
-  if content is None && tool_calls.is_empty() && finish_reason is None {
+  if content is None &&
+    reasoning_content is None &&
+    tool_calls.is_empty() &&
+    finish_reason is None {
     return None
   }
-  Some({ content, tool_calls, finish_reason })
+  Some({ content, reasoning_content, tool_calls, finish_reason })
 }
 
 ///|
@@ -193,6 +202,7 @@ fn ToolCallAccumulator::finish(
 /// The complete result of a streaming chat completion.
 pub(all) struct StreamResult {
   content : String
+  reasoning_content : String
   tool_calls : Array[ChatToolCall]
   finish_reason : String?
 }
@@ -214,6 +224,7 @@ async fn attempt_chat_completion(
   tools : Array[Json],
   max_tokens : Int,
   on_delta : async (String) -> Unit,
+  on_reasoning : async (String) -> Unit,
   connect_timeout_ms : Int,
   stream_idle_timeout_ms : Int,
 ) -> StreamResult {
@@ -263,6 +274,7 @@ async fn attempt_chat_completion(
     }
   }
   let content = StringBuilder::new()
+  let reasoning = StringBuilder::new()
   let accumulator = ToolCallAccumulator::new()
   let mut finish_reason : String? = None
   for ;; {
@@ -286,6 +298,10 @@ async fn attempt_chat_completion(
                 content.write_string(text)
                 on_delta(text)
               }
+              if chunk.reasoning_content is Some(text) {
+                reasoning.write_string(text)
+                on_reasoning(text)
+              }
               if chunk.finish_reason is Some(reason) {
                 finish_reason = Some(reason)
               }
@@ -297,6 +313,7 @@ async fn attempt_chat_completion(
   }
   {
     content: content.to_string(),
+    reasoning_content: reasoning.to_string(),
     tool_calls: accumulator.finish(),
     finish_reason,
   }
@@ -316,6 +333,7 @@ pub async fn stream_chat_completion(
   tools : Array[Json],
   max_tokens? : Int = 1200,
   on_delta? : async (String) -> Unit = ignore_delta,
+  on_reasoning? : async (String) -> Unit = ignore_delta,
   connect_timeout_ms? : Int = 30000,
   stream_idle_timeout_ms? : Int = 60000,
   max_retries? : Int = 2,
@@ -324,6 +342,7 @@ pub async fn stream_chat_completion(
   let mut retries_left = max_retries
   let mut result : StreamResult = {
     content: "",
+    reasoning_content: "",
     tool_calls: [],
     finish_reason: None,
   }
@@ -331,8 +350,8 @@ pub async fn stream_chat_completion(
   while !done {
     try {
       result = attempt_chat_completion(
-        api_key, base_url, model, messages, tools, max_tokens, on_delta, connect_timeout_ms,
-        stream_idle_timeout_ms,
+        api_key, base_url, model, messages, tools, max_tokens, on_delta, on_reasoning,
+        connect_timeout_ms, stream_idle_timeout_ms,
       )
       done = true
     } catch {

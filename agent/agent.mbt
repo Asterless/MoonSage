@@ -206,6 +206,7 @@ pub async fn Agent::turn(
       tools_json,
       max_tokens=self.max_tokens,
       on_delta=@llm.ignore_delta,
+      on_reasoning=on_thinking,
     )
     if result.finish_reason is Some("length") {
       trace.push("[observation] Model hit max_tokens; answer may be truncated")
@@ -233,6 +234,7 @@ pub async fn Agent::turn(
           [],
           max_tokens=self.max_tokens,
           on_delta~,
+          on_reasoning=on_thinking,
         )
         let text = if cont.content != "" {
           result.content + "\n" + cont.content
@@ -304,6 +306,7 @@ pub async fn Agent::turn(
       [],
       max_tokens=self.max_tokens,
       on_delta~,
+      on_reasoning=on_thinking,
     )
     if result.content != "" {
       let mut text = result.content
@@ -326,6 +329,7 @@ pub async fn Agent::turn(
           [],
           max_tokens=self.max_tokens,
           on_delta~,
+          on_reasoning=on_thinking,
         )
         if cont.content != "" {
           text = text + "\n" + cont.content
