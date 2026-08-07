@@ -126,24 +126,22 @@ async fn clone_repo_tool(ws : Workspace, arguments : String) -> String {
   let already_cloned = dir_exists(target)
   if already_cloned {
     // 复用已有克隆（会话恢复后重新 clone 也安全）。
-    let (probe_exit, _, probe_err) = @process.collect_output(
-      "git",
+    let (probe_exit, probe_err) = run_cmd_with_timeout(
       ["rev-parse", "--git-dir"],
+      10_000,
       cwd=target,
-      no_console_window=true,
     )
     guard probe_exit == 0 else {
       fail(
-        "clone target \{target} already exists but is not a git repository: \{probe_err.text()}",
+        "clone target \{target} already exists but is not a git repository: \{probe_err}",
       )
     }
   } else {
-    let (exit, _, err) = @process.collect_output(
-      "git",
+    let (exit, err) = run_cmd_with_timeout(
       ["clone", "--depth", "1", url, target],
-      no_console_window=true,
+      300_000,
     )
-    guard exit == 0 else { fail("clone failed: \{err.text()}") }
+    guard exit == 0 else { fail("clone failed: \{err}") }
   }
   ws.set_root(target)
   let reused = if already_cloned { " (reused existing clone)" } else { "" }

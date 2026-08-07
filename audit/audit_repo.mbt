@@ -134,15 +134,11 @@ async fn fetch_repo_source(
           "clone", "--depth", "1", "--single-branch", "--branch", branch, url, target,
         ]
       }
-      let (exit, _, err) = @process.collect_output(
-        "git",
-        clone_args,
-        no_console_window=true,
-      )
+      let (exit, err) = @editing.run_cmd_with_timeout(clone_args, 300_000)
       if exit == 0 {
         return locate_project_root(dest_dir)
       }
-      last_err = err.text()
+      last_err = err
       @fs.rmdir(target, recursive=true) catch {
         _ => ()
       }

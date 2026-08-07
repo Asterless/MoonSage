@@ -18,6 +18,10 @@
   - 文件: `llm/llm_stream.mbt`
   - 内容: 非 2xx 响应体读取无超时;网络错误 / 429 / 5xx 无重试;加退避重试(收到内容前)并补测试。
 
+- [x] **补充: git clone 超时保护**(用户实测:克隆仓库时网络挂起会永久卡住会话)
+  - 文件: `editing/cmd_timeout.mbt`(新增 `run_cmd_with_timeout`)、`editing/publish_tools.mbt`(clone_repo_tool)、`audit/audit_repo.mbt`(fetch_repo_source)
+  - 完成: 两处 git clone 改为超时执行(probe 10s / clone 300s,超时杀子进程并返回结构化错误,不再永久阻塞);`.gitattributes` 补 `*.pkg eol=lf` 根治 moon.pkg 幽灵修改;`moon test` 138 全过(新增 3 个测试)。
+
 ## P1 体验与工程
 
 - [x] **5. 编辑前 diff 预览 + /undo**

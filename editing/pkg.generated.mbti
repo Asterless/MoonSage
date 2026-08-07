@@ -24,6 +24,8 @@ pub async fn publish_changes(String, String, String, WriteConfirm, String, title
 
 pub fn publish_tools(Workspace) -> Array[@tools.Tool]
 
+pub async fn run_cmd_with_timeout(Array[String], Int, cwd? : String, cmd? : String) -> (Int, String)
+
 pub fn write_tools(Workspace, WriteConfirm) -> Array[@tools.Tool]
 
 // Errors

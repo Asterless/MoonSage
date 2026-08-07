@@ -477,6 +477,50 @@ async test "clone_repo_tool clones and switches workspace root" {
 }
 
 ///|
+#cfg(platform="windows")
+fn sleep_cmd_for_timeout_test() -> (String, Array[String]) {
+  (
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"],
+  )
+}
+
+///|
+#cfg(not(platform="windows"))
+fn sleep_cmd_for_timeout_test() -> (String, Array[String]) {
+  ("sleep", ["30"])
+}
+
+///|
+async test "run_cmd_with_timeout terminates hung commands" {
+  let (cmd, args) = sleep_cmd_for_timeout_test()
+  let (exit, err) = run_cmd_with_timeout(args, 1000, cmd~)
+  assert_eq(exit, -1)
+  assert_true(err.contains("timed out after 1000 ms"))
+}
+
+///|
+async test "run_cmd_with_timeout returns quick command output" {
+  let (exit, err) = run_cmd_with_timeout(["version"], 10000)
+  assert_eq(exit, 0)
+  assert_eq(err, "")
+}
+
+///|
+async test "run_cmd_with_timeout reports non-zero exits" {
+  let tmp = @fs.tmpdir(prefix="moonsage-cmd-nongit-")
+  let (exit, _) = run_cmd_with_timeout(
+    ["rev-parse", "--git-dir"],
+    5000,
+    cwd=tmp,
+  )
+  assert_true(exit != 0)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
 async test "git_has_changes detects tracked, untracked and clean states" {
   let repo = @fs.tmpdir(prefix="moonsage-has-changes-")
   let _ = @fs.write_file(
