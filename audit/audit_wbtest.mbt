@@ -197,3 +197,14 @@ test "parse_audit_options rejects bad input" {
   }
   assert_true(unknown_flag)
 }
+
+///|
+test "fix phase prompt requires write_file and analysis stays read-only" {
+  assert_true(audit_fix_prompt().contains("write_file"))
+  assert_true(audit_fix_prompt().contains("## 审计报告"))
+  assert_true(!audit_analysis_prompt().contains("write_file"))
+  assert_true(audit_analysis_prompt().length() > 0)
+  assert_true(audit_analysis_question().contains("分析结果"))
+  assert_true(audit_fix_question("某个根因").contains("某个根因"))
+  assert_true(audit_fix_question("某个根因").contains("分析结果"))
+}

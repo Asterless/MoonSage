@@ -181,7 +181,7 @@ fn audit_tools(ctx : AuditContext) -> Array[@tools.Tool] {
       {
         schema: {
           name: "write_file",
-          description: "Overwrite a project file with the given full content (only available in fix mode).",
+          description: "Overwrite a project file with its full new content (available only in fix mode). Prefer multi_edit for precise edits; use write_file for whole-file replacements or new files.",
           parameters: @tools.object_schema(
             {
               "path": @tools.string_field("Relative file path"),
