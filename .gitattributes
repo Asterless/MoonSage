@@ -4,3 +4,5 @@
 *.mbt text eol=lf
 *.md text eol=lf
 *.mbti text eol=lf
+
+*.pkg text eol=lf
