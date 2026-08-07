@@ -30,6 +30,15 @@ test "parse_github_repo extracts owner and repo" {
 }
 
 ///|
+test "parse_github_repo rejects traversal or invalid components" {
+  assert_eq(parse_github_repo("https://github.com/owner/.."), None)
+  assert_eq(parse_github_repo("https://github.com/.."), None)
+  assert_eq(parse_github_repo("https://github.com/o wner/repo"), None)
+  assert_eq(parse_github_repo("https://github.com/owner/..%2e"), None)
+  assert_eq(parse_github_repo("https://github.com/owner/repo\\x"), None)
+}
+
+///|
 fn manifest_repo_checked(manifest : String) -> String {
   manifest_repository(manifest) catch {
     _ => ""
