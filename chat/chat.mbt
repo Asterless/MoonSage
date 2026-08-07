@@ -13,6 +13,9 @@ fn chat_system_prompt(cwd : String) -> String {
     #|before it is applied, and changed source files must pass syntax checks.
     #|Use clone_repo to work on a GitHub repository (all file tools switch to
     #|the clone), and create_pr to publish your changes as a pull request.
+    #|create_pr accepts an optional branch name; if the default
+    #|moonsage/fix-<repo> already exists on the remote, pass a new branch
+    #|name. Re-running create_pr after a failed push reuses the local commits.
     #|The local project root is:
     #|
   ) +

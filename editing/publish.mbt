@@ -36,22 +36,87 @@ async fn git_text(args : Array[String], cwd : String) -> String {
 }
 
 ///|
-// 唯一的 PR 分支名：若 base 已存在，则追加 -2、-3 后缀。
+// 本地是否存在同名分支（含 remote-tracking ref）。
+async fn branch_exists_local(project_dir : String, branch : String) -> Bool {
+  let (exit, _, _) = @process.collect_output(
+    "git",
+    ["rev-parse", "--verify", "--quiet", branch],
+    cwd=project_dir,
+    no_console_window=true,
+  )
+  exit == 0
+}
+
+///|
+// 远程（origin / moonsage-fork）是否已存在同名分支。
+// 网络不可用时无法确认，返回 false 并交给 push 阶段报错。
+async fn remote_has_branch(
+  project_dir : String,
+  remote : String,
+  branch : String,
+) -> Bool {
+  let (exit, out, _) = @process.collect_output(
+    "git",
+    ["ls-remote", "--heads", remote, branch],
+    cwd=project_dir,
+    no_console_window=true,
+  )
+  if exit != 0 {
+    false
+  } else {
+    (out.text() catch { _ => "" }).trim() != ""
+  }
+}
+
+///|
+// 分支名是否已被本地或任一相关远程占用。
+async fn branch_taken(project_dir : String, branch : String) -> Bool {
+  if branch_exists_local(project_dir, branch) {
+    return true
+  }
+  if remote_has_branch(project_dir, "origin", branch) {
+    return true
+  }
+  let (remote_exit, _, _) = @process.collect_output(
+    "git",
+    ["remote", "get-url", "moonsage-fork"],
+    cwd=project_dir,
+    no_console_window=true,
+  )
+  remote_exit == 0 && remote_has_branch(project_dir, "moonsage-fork", branch)
+}
+
+///|
+// 唯一的 PR 分支名：若 base 在本地或远程已存在，则追加 -2、-3 后缀。
 async fn unique_branch_name(project_dir : String, base : String) -> String {
   let mut candidate = base
   let mut suffix = 2
   for ;; {
-    let (exit, _, _) = @process.collect_output(
-      "git",
-      ["rev-parse", "--verify", "--quiet", candidate],
-      cwd=project_dir,
-      no_console_window=true,
-    )
-    if exit != 0 {
+    if !branch_taken(project_dir, candidate) {
       return candidate
     }
     candidate = base + "-" + suffix.to_string()
     suffix += 1
+  }
+}
+
+///|
+// 仓库默认分支：优先 origin/HEAD，其次当前分支（非发布分支），最后 main。
+async fn remote_default_branch(
+  project_dir : String,
+  current : String,
+) -> String {
+  let head = git_text(
+    ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    project_dir,
+  )
+  let prefix = "origin/"
+  if head.has_prefix(prefix) {
+    head[prefix.length():].to_owned()
+  } else if current != "" && !current.has_prefix("moonsage/fix-") {
+    current
+  } else {
+    "main"
   }
 }
 
@@ -142,13 +207,15 @@ pub async fn publish_changes(
   confirm : WriteConfirm,
   report : String,
   title? : String,
+  branch? : String = "",
 ) -> String? {
-  let default_branch = git_text(["branch", "--show-current"], project_dir)
-  let default_branch = if default_branch == "" {
-    "main"
-  } else {
-    default_branch
-  }
+  let requested = branch.trim().to_owned()
+  let current_branch = git_text(["branch", "--show-current"], project_dir)
+  let base_branch = remote_default_branch(project_dir, current_branch)
+  let ahead = parse_int_or(
+    git_text(["rev-list", "--count", base_branch + "..HEAD"], project_dir),
+    0,
+  )
   let diff_stat = git_text(["diff", "--stat"], project_dir)
   let status_short = git_text(["status", "--short"], project_dir)
   let title = if title is Some(t) && t != "" {
@@ -175,42 +242,60 @@ pub async fn publish_changes(
       return None
     }
   }
-  guard git_has_changes(project_dir) else {
+  let has_changes = git_has_changes(project_dir)
+  let on_publish_branch = current_branch != "" &&
+    current_branch.has_prefix("moonsage/fix-")
+  // 复用场景：改动已提交在当前发布分支（例如上次推送失败），工作树干净。
+  let reuse_branch = !has_changes && on_publish_branch && ahead > 0
+  guard has_changes || reuse_branch else {
     fail("no changes to publish (git diff is empty)")
   }
-  let branch = unique_branch_name(project_dir, pr_branch_name(repo))
-  let checkout = @process.collect_output(
-    "git",
-    ["checkout", "-b", branch],
-    cwd=project_dir,
-    no_console_window=true,
-  )
-  guard checkout.0 == 0 else {
-    fail("git checkout failed: \{checkout.2.text()}")
+  let mut branch = current_branch
+  if has_changes {
+    branch = if requested != "" {
+      requested
+    } else {
+      unique_branch_name(project_dir, pr_branch_name(repo))
+    }
+    if current_branch != branch {
+      if branch_taken(project_dir, branch) {
+        fail(
+          "branch \{branch} already exists locally or on the remote; pass a different branch name to create_pr",
+        )
+      }
+      let checkout = @process.collect_output(
+        "git",
+        ["checkout", "-b", branch],
+        cwd=project_dir,
+        no_console_window=true,
+      )
+      guard checkout.0 == 0 else {
+        fail("git checkout failed: \{checkout.2.text()}")
+      }
+    }
+    let (name, email) = github_identity()
+    let add = @process.collect_output(
+      "git",
+      ["-c", "user.name=\{name}", "-c", "user.email=\{email}", "add", "-A"],
+      cwd=project_dir,
+      no_console_window=true,
+    )
+    guard add.0 == 0 else { fail("git add failed: \{add.2.text()}") }
+    let commit = @process.collect_output(
+      "git",
+      [
+        "-c",
+        "user.name=\{name}",
+        "user.email=\{email}",
+        "commit",
+        "-m",
+        "fix: apply MoonSage audit fixes",
+      ],
+      cwd=project_dir,
+      no_console_window=true,
+    )
+    guard commit.0 == 0 else { fail("git commit failed: \{commit.2.text()}") }
   }
-  let (name, email) = github_identity()
-  let add = @process.collect_output(
-    "git",
-    ["-c", "user.name=\{name}", "-c", "user.email=\{email}", "add", "-A"],
-    cwd=project_dir,
-    no_console_window=true,
-  )
-  guard add.0 == 0 else { fail("git add failed: \{add.2.text()}") }
-  let commit = @process.collect_output(
-    "git",
-    [
-      "-c",
-      "user.name=\{name}",
-      "-c",
-      "user.email=\{email}",
-      "commit",
-      "-m",
-      "fix: apply MoonSage audit fixes",
-    ],
-    cwd=project_dir,
-    no_console_window=true,
-  )
-  guard commit.0 == 0 else { fail("git commit failed: \{commit.2.text()}") }
 
   let (login_exit, login_out, _) = @process.collect_output(
     "gh",
@@ -267,7 +352,25 @@ pub async fn publish_changes(
     cwd=project_dir,
     no_console_window=true,
   )
-  guard push.0 == 0 else { fail("git push failed: \{push.2.text()}") }
+  guard push.0 == 0 else {
+    let detail = push.2.text()
+    if detail.contains("Failed to connect") ||
+      detail.contains("Could not connect") ||
+      detail.contains("timed out") ||
+      detail.contains("Could not resolve host") {
+      fail(
+        "git push failed (network): \{detail}\n本地提交已保留；网络恢复后直接重试 create_pr 即可推送并创建 PR",
+      )
+    } else if detail.contains("fetch first") ||
+      detail.contains("non-fast-forward") ||
+      detail.contains("already exists") {
+      fail(
+        "git push rejected: \{detail}\n远程已存在同名分支；请用 create_pr 的 branch 参数换一个分支名",
+      )
+    } else {
+      fail("git push failed: \{detail}")
+    }
+  }
   let head = if direct { branch } else { "\{login}:\{branch}" }
   let body_dir = @fs.tmpdir(prefix="moonsage-pr-body-")
   let result = try {
@@ -287,7 +390,7 @@ pub async fn publish_changes(
         "--head",
         head,
         "--base",
-        default_branch,
+        base_branch,
         "--title",
         title,
         "--body-file",
@@ -296,7 +399,14 @@ pub async fn publish_changes(
       no_console_window=true,
     )
     if pr.0 != 0 {
-      fail("gh pr create failed: \{pr.2.text()}")
+      let detail = pr.2.text()
+      if detail.contains("already exists") {
+        fail(
+          "gh pr create failed: \{detail}\n该分支可能已有 PR；请查看 https://github.com/\{owner}/\{repo}/pulls",
+        )
+      } else {
+        fail("gh pr create failed: \{detail}")
+      }
     }
     (pr.1.text() catch { _ => "" }).trim().to_owned()
   } catch {

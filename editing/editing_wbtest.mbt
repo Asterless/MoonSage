@@ -393,3 +393,67 @@ async test "git_has_changes detects tracked, untracked and clean states" {
     _ => ()
   }
 }
+
+///|
+async test "unique_branch_name avoids remote branches" {
+  let src = @fs.tmpdir(prefix="moonsage-unique-src-")
+  let _ = @fs.write_file(
+    src + "/a.mbt",
+    "pub fn a() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=src,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "-A"],
+    cwd=src,
+    no_console_window=true,
+  )
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=src,
+    no_console_window=true,
+  )
+  // 在远程造一个会冲突的分支名。
+  let conflict = @process.collect_output(
+    "git",
+    [
+      "-c", "user.name=t", "user.email=t@t", "commit", "--allow-empty", "-m", "conflict",
+    ],
+    cwd=src,
+    no_console_window=true,
+  )
+  ignore(conflict)
+  let conflict_branch = @process.collect_output(
+    "git",
+    ["branch", "moonsage/fix-x"],
+    cwd=src,
+    no_console_window=true,
+  )
+  ignore(conflict_branch)
+  let ws_base = @fs.tmpdir(prefix="moonsage-unique-ws-")
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 {
+    let ws = Workspace::new(ws_base)
+    let url = src.replace_all(old="\\", new="/")
+    let out = clone_repo_tool(ws, "{\"url\":\"\{url}\"}")
+    assert_true(out.contains("cloned"))
+    let root = ws.get_root()
+    let name = unique_branch_name(root, "moonsage/fix-x")
+    assert_eq(name, "moonsage/fix-x-2")
+    let current = git_text(["branch", "--show-current"], root)
+    assert_true(current != "")
+    assert_eq(remote_default_branch(root, current), current)
+  }
+  @fs.rmdir(src, recursive=true) catch {
+    _ => ()
+  }
+  @fs.rmdir(ws_base, recursive=true) catch {
+    _ => ()
+  }
+}

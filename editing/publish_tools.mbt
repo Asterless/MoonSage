@@ -95,9 +95,11 @@ async fn create_pr_tool(ws : Workspace, arguments : String) -> String {
   let document = @json.parse(arguments)
   let title = json_string_arg(document, "title")
   let body = json_string_arg(document, "body")
+  let branch = json_string_arg(document, "branch")
   let (owner, repo) = current_repo_owner_name(ws.get_root())
   let report = if body != "" { body } else { "Automated changes by MoonSage." }
-  match publish_changes(ws.get_root(), owner, repo, Prompt, report, title~) {
+  match
+    publish_changes(ws.get_root(), owner, repo, Prompt, report, title~, branch~) {
     Some(url) => "PR created: \{url}"
     None => "PR cancelled by user"
   }
@@ -131,11 +133,14 @@ pub fn publish_tools(ws : Workspace) -> Array[@tools.Tool] {
     {
       schema: {
         name: "create_pr",
-        description: "Commit the current changes in the workspace, push a branch (forking first when needed) and open a pull request against the repository's origin. Asks for confirmation before pushing. Provide optional title and body.",
+        description: "Commit the current changes in the workspace, push a branch (forking first when needed) and open a pull request against the repository's origin. Asks for confirmation before pushing. Provide optional title, body and branch (branch defaults to moonsage/fix-<repo>, auto-suffixed when taken).",
         parameters: @tools.object_schema(
           {
             "title": @tools.string_field("Optional PR title"),
             "body": @tools.string_field("Optional PR body (Markdown)"),
+            "branch": @tools.string_field(
+              "Optional branch name to push; use a fresh name if the default one already exists on the remote",
+            ),
           },
           [],
         ),
