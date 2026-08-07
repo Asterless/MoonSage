@@ -84,7 +84,7 @@ test "json_string_arg reads string fields only" {
 
 ///|
 test "local_tools exposes the four read-only tools" {
-  let tools = local_tools("C:/work/proj")
+  let tools = local_tools(@editing.Workspace::new("C:/work/proj"))
   assert_eq(tools.length(), 4)
   let names = tools.map(fn(t) { t.schema.name })
   assert_eq(names, ["list_project_files", "read_file", "run_moon", "git_diff"])

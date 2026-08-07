@@ -27,6 +27,10 @@ In `chat` mode the agent can inspect the local project
 (`list_project_files`, `read_file`, `run_moon`, `git_diff`) and **modify it**
 with `write_file` / `multi_edit` / `remove` — every write asks for your
 confirmation (y/N) first, and edited source files must pass `moonc syncheck`.
+The agent can also **work on any GitHub repository**: `clone_repo` clones a
+repository into `.moonsage/workspaces/` and switches all file tools to it, and
+`create_pr` commits the changes, pushes a branch (forking first when needed)
+and opens a pull request against the repository (with your confirmation).
 Conversations persist under `.moonsage/sessions/` (resumable with `--session`
 or `--continue`); very long conversations are compacted automatically by
 summarizing older history.

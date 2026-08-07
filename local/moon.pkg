@@ -1,4 +1,5 @@
 import {
+  "moonsage/editing",
   "moonsage/tools",
   "moonbitlang/async/fs",
   "moonbitlang/async/process",

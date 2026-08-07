@@ -172,8 +172,11 @@ async fn remove_tool(
 }
 
 ///|
-// 共享写工具集：write_file / multi_edit / remove，全部限定在 root 工作区内。
-pub fn write_tools(root : String, confirm : WriteConfirm) -> Array[@tools.Tool] {
+// 共享写工具集：write_file / multi_edit / remove，全部限定在 Workspace 根目录内。
+pub fn write_tools(
+  ws : Workspace,
+  confirm : WriteConfirm,
+) -> Array[@tools.Tool] {
   [
     {
       schema: {
@@ -188,7 +191,7 @@ pub fn write_tools(root : String, confirm : WriteConfirm) -> Array[@tools.Tool] 
         ),
       },
       execute: async fn(arguments) {
-        write_file_tool(root, confirm, arguments) catch {
+        write_file_tool(ws.get_root(), confirm, arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },
@@ -207,7 +210,7 @@ pub fn write_tools(root : String, confirm : WriteConfirm) -> Array[@tools.Tool] 
         ),
       },
       execute: async fn(arguments) {
-        multi_edit_tool(root, confirm, arguments) catch {
+        multi_edit_tool(ws.get_root(), confirm, arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },
@@ -222,7 +225,7 @@ pub fn write_tools(root : String, confirm : WriteConfirm) -> Array[@tools.Tool] 
         ),
       },
       execute: async fn(arguments) {
-        remove_tool(root, confirm, arguments) catch {
+        remove_tool(ws.get_root(), confirm, arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },

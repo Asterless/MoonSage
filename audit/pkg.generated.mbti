@@ -2,14 +2,6 @@
 package "moonsage/audit"
 
 // Values
-pub fn build_pr_body(String, String, String) -> String
-
-pub fn pr_branch_name(String) -> String
-
-pub fn pr_commit_email(String, Int) -> String
-
-pub fn pr_title(String, String) -> String
-
 pub async fn run_audit(ArrayView[String]) -> Unit
 
 // Errors

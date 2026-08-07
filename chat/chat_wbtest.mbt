@@ -13,7 +13,7 @@ test "slash_command classifies input" {
 ///|
 test "chat agent combines ask and local tools" {
   let agent = chat_agent([], "C:/work")
-  assert_eq(agent.tools.length(), 11)
+  assert_eq(agent.tools.length(), 13)
   let names = agent.tools.map(fn(t) { t.schema.name })
   assert_true(names.contains("search_modules"))
   assert_true(names.contains("get_module_manifest"))
@@ -26,6 +26,8 @@ test "chat agent combines ask and local tools" {
   assert_true(names.contains("write_file"))
   assert_true(names.contains("multi_edit"))
   assert_true(names.contains("remove"))
+  assert_true(names.contains("clone_repo"))
+  assert_true(names.contains("create_pr"))
   assert_eq(agent.max_tool_calls, 12)
   assert_eq(agent.max_rounds, 6)
   assert_true(agent.max_tokens > 0)

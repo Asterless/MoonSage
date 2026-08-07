@@ -425,11 +425,15 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     @stdio.stdout.write("\n=== changes ===\n")
     @stdio.stdout.write(@local.git_diff(project_dir, None))
     if opts.pr {
-      let pr_url = publish_changes(
+      let pr_url = @editing.publish_changes(
         project_dir,
         owner,
         repo,
-        opts.confirm,
+        if opts.confirm is ConfirmPrompt {
+          @editing.Prompt
+        } else {
+          @editing.Auto
+        },
         answer.text,
       ) catch {
         e => {

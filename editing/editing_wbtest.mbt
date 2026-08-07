@@ -199,3 +199,95 @@ async test "write_file_tool creates and overwrites files" {
     _ => ()
   }
 }
+
+///|
+test "workspace root is shared and mutable" {
+  let ws = Workspace::new("C:/work")
+  assert_eq(ws.get_root(), "C:/work")
+  assert_eq(ws.clone_base(), "C:/work/.moonsage/workspaces")
+  ws.set_root("C:/work/.moonsage/workspaces/repo")
+  assert_eq(ws.get_root(), "C:/work/.moonsage/workspaces/repo")
+}
+
+///|
+test "parse_github_url extracts owner and repo" {
+  assert_eq(
+    parse_github_url("https://github.com/Asterless/MoonPtime.git"),
+    Some(("Asterless", "MoonPtime")),
+  )
+  assert_eq(
+    parse_github_url("https://github.com/owner/repo/"),
+    Some(("owner", "repo")),
+  )
+  assert_eq(parse_github_url("https://gitlab.com/owner/repo"), None)
+  assert_eq(parse_github_url("https://github.com/owner"), None)
+  assert_eq(parse_github_url("not a url"), None)
+}
+
+///|
+async test "current_repo_owner_name reads git origin" {
+  let tmp = @fs.tmpdir(prefix="moonsage-repoinfo-test-")
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=tmp,
+    no_console_window=true,
+  )
+  let remote = @process.collect_output(
+    "git",
+    ["remote", "add", "origin", "https://github.com/Asterless/MoonPtime.git"],
+    cwd=tmp,
+    no_console_window=true,
+  )
+  if init.0 == 0 && remote.0 == 0 {
+    let pair = current_repo_owner_name(tmp)
+    assert_eq(pair, ("Asterless", "MoonPtime"))
+  }
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "clone_repo_tool clones and switches workspace root" {
+  let src = @fs.tmpdir(prefix="moonsage-clone-src-")
+  let _ = @fs.write_file(
+    src + "/a.mbt",
+    "pub fn a() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=src,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "-A"],
+    cwd=src,
+    no_console_window=true,
+  )
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=src,
+    no_console_window=true,
+  )
+  let ws_base = @fs.tmpdir(prefix="moonsage-clone-ws-")
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 {
+    let ws = Workspace::new(ws_base)
+    let url = src.replace_all(old="\\", new="/")
+    let out = clone_repo_tool(ws, "{\"url\":\"\{url}\"}")
+    assert_true(out.contains("cloned"))
+    let root = ws.get_root()
+    assert_true(root.has_prefix(ws_base))
+    assert_true(@fs.read_file(root + "/a.mbt").text().contains("pub fn a()"))
+  }
+  @fs.rmdir(src, recursive=true) catch {
+    _ => ()
+  }
+  @fs.rmdir(ws_base, recursive=true) catch {
+    _ => ()
+  }
+}

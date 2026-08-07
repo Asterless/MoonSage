@@ -11,6 +11,8 @@ fn chat_system_prompt(cwd : String) -> String {
     #|git_diff. You can also modify the local project with write_file,
     #|multi_edit and remove; every change asks the user to confirm (y/N)
     #|before it is applied, and changed source files must pass syntax checks.
+    #|Use clone_repo to work on a GitHub repository (all file tools switch to
+    #|the clone), and create_pr to publish your changes as a pull request.
     #|The local project root is:
     #|
   ) +
@@ -35,11 +37,13 @@ fn chat_agent(
   modules : Array[@moonsage.ModuleSummary],
   cwd : String,
 ) -> @agent.Agent {
+  let ws = @editing.Workspace::new(cwd)
   {
     system_prompt: chat_system_prompt(cwd),
     tools: @agent.ask_tools(modules) +
-    @local.local_tools(cwd) +
-    @editing.write_tools(cwd, @editing.Prompt),
+    @local.local_tools(ws) +
+    @editing.write_tools(ws, @editing.Prompt) +
+    @editing.publish_tools(ws),
     max_tool_calls: 12,
     max_rounds: 6,
     max_tokens: 1500,

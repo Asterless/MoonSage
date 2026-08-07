@@ -107,14 +107,15 @@ async fn github_identity() -> (String, String) {
 }
 
 ///|
-// 修复完成后发布：建分支 → 提交 → 推送（fork 优先）→ 创建 PR。
-// 返回 PR 链接；用户拒绝时返回 None。
-async fn publish_changes(
+// 发布：建分支 → 提交 → 推送（fork 优先）→ 创建 PR。返回 PR 链接；
+// Prompt 确认模式下用户拒绝时返回 None。
+pub async fn publish_changes(
   project_dir : String,
   owner : String,
   repo : String,
-  confirm : ConfirmMode,
+  confirm : WriteConfirm,
   report : String,
+  title? : String,
 ) -> String? {
   let default_branch = git_text(["branch", "--show-current"], project_dir)
   let default_branch = if default_branch == "" {
@@ -123,12 +124,16 @@ async fn publish_changes(
     default_branch
   }
   let diff_stat = git_text(["diff", "--stat"], project_dir)
-  let title = pr_title(owner, repo)
+  let title = if title is Some(t) && t != "" {
+    t
+  } else {
+    pr_title(owner, repo)
+  }
   let body = build_pr_body(report, owner, repo)
   @stdio.stdout.write("\n=== publish preview ===\n")
   @stdio.stdout.write("Title: \{title}\n")
   @stdio.stdout.write("\{diff_stat}\n")
-  if !(confirm is ConfirmYes) {
+  if !(confirm is Auto) {
     @stdio.stdout.write("Push branch and open a pull request? [y/N] ")
     let answer = @stdio.stdin.read_until("\n") catch { _ => None }
     let ok = match answer {
