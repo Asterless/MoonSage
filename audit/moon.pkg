@@ -1,4 +1,5 @@
 import {
+  "moonsage/editing",
   "moonsage/local",
   "moonsage/tools",
   "moonsage/agent",

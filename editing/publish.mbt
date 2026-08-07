@@ -107,14 +107,41 @@ async fn github_identity() -> (String, String) {
 }
 
 ///|
-// 修复完成后发布：建分支 → 提交 → 推送（fork 优先）→ 创建 PR。
-// 返回 PR 链接；用户拒绝时返回 None。
-async fn publish_changes(
+// 工作区是否存在可发布的改动：已跟踪文件的 diff 或未跟踪/暂存文件。
+// git 本身失败时保守视为“有改动”，让后续命令给出更明确的错误。
+async fn git_has_changes(project_dir : String) -> Bool {
+  let (diff_exit, _, _) = @process.collect_output(
+    "git",
+    ["diff", "--quiet"],
+    cwd=project_dir,
+    no_console_window=true,
+  )
+  if diff_exit != 0 {
+    return true
+  }
+  let (status_exit, status_out, _) = @process.collect_output(
+    "git",
+    ["status", "--porcelain"],
+    cwd=project_dir,
+    no_console_window=true,
+  )
+  if status_exit != 0 {
+    return true
+  }
+  let status_text = status_out.text() catch { _ => "" }
+  status_text.trim() != ""
+}
+
+///|
+// 发布：建分支 → 提交 → 推送（fork 优先）→ 创建 PR。返回 PR 链接；
+// Prompt 确认模式下用户拒绝时返回 None。
+pub async fn publish_changes(
   project_dir : String,
   owner : String,
   repo : String,
-  confirm : ConfirmMode,
+  confirm : WriteConfirm,
   report : String,
+  title? : String,
 ) -> String? {
   let default_branch = git_text(["branch", "--show-current"], project_dir)
   let default_branch = if default_branch == "" {
@@ -123,30 +150,32 @@ async fn publish_changes(
     default_branch
   }
   let diff_stat = git_text(["diff", "--stat"], project_dir)
-  let title = pr_title(owner, repo)
+  let status_short = git_text(["status", "--short"], project_dir)
+  let title = if title is Some(t) && t != "" {
+    t
+  } else {
+    pr_title(owner, repo)
+  }
   let body = build_pr_body(report, owner, repo)
-  @stdio.stdout.write("\n=== publish preview ===\n")
-  @stdio.stdout.write("Title: \{title}\n")
+  @stdio.stdout.write("\n── PR 预览 ──\n")
+  @stdio.stdout.write("标题: \{title}\n")
   @stdio.stdout.write("\{diff_stat}\n")
-  if !(confirm is ConfirmYes) {
-    @stdio.stdout.write("Push branch and open a pull request? [y/N] ")
+  if status_short != "" {
+    @stdio.stdout.write("\{status_short}\n")
+  }
+  if !(confirm is Auto) {
+    @stdio.stdout.write("? 推送分支并创建 PR？[y/N] ")
     let answer = @stdio.stdin.read_until("\n") catch { _ => None }
     let ok = match answer {
       Some(s) => s.trim().to_lower() == "y" || s.trim().to_lower() == "yes"
       None => false
     }
     if !ok {
-      println("PR cancelled; workspace kept for inspection.")
+      println("已取消，工作区保留供检查。")
       return None
     }
   }
-  let (diff_exit, _, _) = @process.collect_output(
-    "git",
-    ["diff", "--quiet"],
-    cwd=project_dir,
-    no_console_window=true,
-  )
-  guard diff_exit != 0 else {
+  guard git_has_changes(project_dir) else {
     fail("no changes to publish (git diff is empty)")
   }
   let branch = unique_branch_name(project_dir, pr_branch_name(repo))

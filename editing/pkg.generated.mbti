@@ -1,0 +1,59 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/editing"
+
+import {
+  "moonsage/tools",
+}
+
+// Values
+pub fn apply_edits_to_file(String, Array[EditSpec]) -> String raise
+
+pub fn build_pr_body(String, String, String) -> String
+
+pub async fn dir_exists(String) -> Bool
+
+pub fn parse_github_url(String) -> (String, String)?
+
+pub fn pr_branch_name(String) -> String
+
+pub fn pr_commit_email(String, Int) -> String
+
+pub fn pr_title(String, String) -> String
+
+pub async fn publish_changes(String, String, String, WriteConfirm, String, title? : String) -> String?
+
+pub fn publish_tools(Workspace) -> Array[@tools.Tool]
+
+pub fn safe_path(String, String) -> String raise
+
+pub fn write_tools(Workspace, WriteConfirm) -> Array[@tools.Tool]
+
+// Errors
+
+// Types and methods
+pub(all) struct EditSpec {
+  file : String
+  old_string : String
+  new_string : String
+  start_line : Int
+  end_line : Int
+}
+
+pub(all) struct Workspace {
+  root : Array[String]
+  base : String
+}
+pub fn Workspace::clone_base(Self) -> String
+pub fn Workspace::get_root(Self) -> String
+pub fn Workspace::new(String) -> Self
+pub fn Workspace::set_root(Self, String) -> Unit
+
+pub(all) enum WriteConfirm {
+  Prompt
+  Auto
+}
+
+// Type aliases
+
+// Traits
+

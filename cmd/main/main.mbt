@@ -76,7 +76,7 @@ async fn run_ask(question : String) -> Unit {
 }
 
 ///|
-async fn run_chat_cmd() -> Unit {
+async fn run_chat_cmd(m : @argparse.Matches) -> Unit {
   let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
   guard key != "" else {
     @stdio.stderr.write("error: set MOONSAGE_API_KEY before using chat\n") catch {
@@ -89,7 +89,12 @@ async fn run_chat_cmd() -> Unit {
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
   let cwd = @env.current_dir().unwrap_or(".")
-  @chat.run_chat(key, base_url, model, cwd)
+  let session_id = match values_of(m, "session") {
+    [id, ..] => Some(id)
+    _ => None
+  }
+  let continue_latest = flag_of(m, "continue")
+  @chat.run_chat(key, base_url, model, cwd, session_id, continue_latest)
 }
 
 ///|
@@ -127,7 +132,7 @@ async fn main {
     return
   }
   match matches.subcommand {
-    Some(("chat", _)) => run_chat_cmd()
+    Some(("chat", m)) => run_chat_cmd(m)
     Some(("search", m)) => run_search(join_values(m, "keywords"))
     Some(("ask", m)) => run_ask(join_values(m, "question"))
     Some(("audit", m)) => @audit.run_audit(audit_args(m))

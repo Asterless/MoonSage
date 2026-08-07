@@ -2,6 +2,7 @@
 package "moonsage/local"
 
 import {
+  "moonsage/editing",
   "moonsage/tools",
 }
 
@@ -10,7 +11,7 @@ pub async fn git_diff(String, String?) -> String
 
 pub fn json_string_arg(Json, String) -> String
 
-pub fn local_tools(String) -> Array[@tools.Tool]
+pub fn local_tools(@editing.Workspace) -> Array[@tools.Tool]
 
 pub fn safe_path(String, String) -> String raise
 

@@ -161,8 +161,8 @@ async fn git_diff_tool(root : String, arguments : String) -> String {
 }
 
 ///|
-// 只读本地工具集：作用于 root 目录（当前工作目录或审计克隆目录）。
-pub fn local_tools(root : String) -> Array[@tools.Tool] {
+// 只读本地工具集：作用于 Workspace 当前根目录。
+pub fn local_tools(ws : @editing.Workspace) -> Array[@tools.Tool] {
   [
     {
       schema: {
@@ -178,7 +178,7 @@ pub fn local_tools(root : String) -> Array[@tools.Tool] {
         ),
       },
       execute: async fn(arguments) {
-        list_project_files_tool(root, arguments) catch {
+        list_project_files_tool(ws.get_root(), arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },
@@ -197,7 +197,7 @@ pub fn local_tools(root : String) -> Array[@tools.Tool] {
         ),
       },
       execute: async fn(arguments) {
-        read_file_tool(root, arguments) catch {
+        read_file_tool(ws.get_root(), arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },
@@ -216,7 +216,7 @@ pub fn local_tools(root : String) -> Array[@tools.Tool] {
         ),
       },
       execute: async fn(arguments) {
-        run_moon_tool(root, arguments) catch {
+        run_moon_tool(ws.get_root(), arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },
@@ -234,7 +234,7 @@ pub fn local_tools(root : String) -> Array[@tools.Tool] {
           [],
         ),
       },
-      execute: async fn(arguments) { git_diff_tool(root, arguments) },
+      execute: async fn(arguments) { git_diff_tool(ws.get_root(), arguments) },
     },
   ]
 }

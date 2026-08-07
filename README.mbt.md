@@ -19,11 +19,21 @@ conversation that keeps its history until you leave with `/exit` or `/quit`:
 ```powershell
 moon run cmd/main -- ask "帮我找一个适合 native 后端的 HTTP 客户端"
 moon run cmd/main -- chat
+moon run cmd/main -- chat --session demo      # resume/create a durable session
+moon run cmd/main -- chat --continue          # resume the most recent session
 ```
 
-In `chat` mode the agent can also inspect the local project read-only
-(`list_project_files`, `read_file`, `run_moon`, `git_diff`), so you can ask
-questions about the current codebase as well as Mooncakes packages.
+In `chat` mode the agent can inspect the local project
+(`list_project_files`, `read_file`, `run_moon`, `git_diff`) and **modify it**
+with `write_file` / `multi_edit` / `remove` — every write asks for your
+confirmation (y/N) first, and edited source files must pass `moonc syncheck`.
+The agent can also **work on any GitHub repository**: `clone_repo` clones a
+repository into `.moonsage/workspaces/` and switches all file tools to it, and
+`create_pr` commits the changes, pushes a branch (forking first when needed)
+and opens a pull request against the repository (with your confirmation).
+Conversations persist under `.moonsage/sessions/` (resumable with `--session`
+or `--continue`); very long conversations are compacted automatically by
+summarizing older history.
 
 To audit a remote Mooncakes package and (optionally) fix issues it finds:
 

@@ -27,6 +27,30 @@ pub(all) struct Session {
 }
 
 ///|
+// 会话序列化：消息本身已是 Json。
+pub fn Session::to_json(self : Session) -> Json {
+  Json::array(self.messages)
+}
+
+///|
+pub fn Session::from_json(document : Json) -> Session {
+  match document {
+    Array(items) => { messages: items }
+    _ => { messages: [] }
+  }
+}
+
+///|
+// 会话消息总字符数（粗略的上下文规模估计）。
+pub fn Session::char_count(self : Session) -> Int {
+  let mut total = 0
+  for message in self.messages {
+    total = total + message.stringify().length()
+  }
+  total
+}
+
+///|
 pub fn Agent::new_session(self : Agent) -> Session {
   { messages: [@llm.chat_message("system", self.system_prompt)] }
 }
@@ -48,6 +72,80 @@ pub(all) enum EngineEvent {
 ///|
 pub async fn ignore_event(_ : EngineEvent) -> Unit {
   @async.sleep(0)
+}
+
+///|
+fn message_role(message : Json) -> String {
+  match message {
+    Object(fields) =>
+      match fields.get("role") {
+        Some(String(role)) => role
+        _ => ""
+      }
+    _ => ""
+  }
+}
+
+///|
+// 上下文压缩：当会话超过阈值字符数时，把较早的历史（保留系统提示和最近
+// keep_recent 条消息）交给模型总结成一条摘要，替换掉旧消息。
+pub async fn Agent::compact(
+  self : Agent,
+  session : Session,
+  api_key : String,
+  base_url : String,
+  model : String,
+  threshold_chars? : Int = 20000,
+  keep_recent? : Int = 3,
+) -> Unit {
+  if session.char_count() <= threshold_chars {
+    return
+  }
+  let keep = if keep_recent < 1 { 1 } else { keep_recent }
+  let mut cut = session.messages.length() - keep
+  // 保留窗口的起点不能是 tool 消息：tool 结果必须跟随其 assistant(tool_calls)，
+  // 否则重建后的历史会被 LLM API 以 400 拒绝（orphaned tool message）。
+  while cut > 1 && message_role(session.messages[cut]) == "tool" {
+    cut = cut - 1
+  }
+  if cut <= 1 {
+    return
+  }
+  let transcript = StringBuilder::new()
+  for i = 1; i < cut; i = i + 1 {
+    transcript.write_string(session.messages[i].stringify())
+    transcript.write_string("\n")
+  }
+  let summary_result = @llm.stream_chat_completion(
+    api_key,
+    base_url,
+    model,
+    [
+      @llm.chat_message(
+        "system", "Summarize the conversation history into a concise summary that preserves key facts, decisions, file changes and the user's requests. Output only the summary.",
+      ),
+      @llm.chat_message("user", transcript.to_string()),
+    ],
+    [],
+    max_tokens=self.max_tokens,
+    on_delta=@llm.ignore_delta,
+  )
+  if summary_result.content == "" {
+    return
+  }
+  let new_messages : Array[Json] = [session.messages[0]]
+  new_messages.push(
+    @llm.chat_message("user", "(会话摘要) " + summary_result.content),
+  )
+  for i = cut; i < session.messages.length(); i = i + 1 {
+    new_messages.push(session.messages[i])
+  }
+  while session.messages.length() > 0 {
+    ignore(session.messages.pop())
+  }
+  for message in new_messages {
+    session.messages.push(message)
+  }
 }
 
 ///|
@@ -85,6 +183,7 @@ pub async fn Agent::turn(
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
   on_event? : async (EngineEvent) -> Unit = ignore_event,
+  on_thinking? : async (String) -> Unit = @llm.ignore_delta,
 ) -> AgentAnswer {
   session.messages.push(@llm.chat_message("user", question))
   let tools_json = self.tools.map(fn(t) { t.schema.to_json() })
@@ -97,6 +196,8 @@ pub async fn Agent::turn(
       budget_exhausted = true
       break
     }
+    // 主循环请求不直接流式输出：工具回合里的内容属于思考叙述，
+    // 走 on_thinking（前端默认忽略）；最终答案在回合结束后用 on_delta 输出。
     let result = @llm.stream_chat_completion(
       api_key,
       base_url,
@@ -104,13 +205,14 @@ pub async fn Agent::turn(
       session.messages,
       tools_json,
       max_tokens=self.max_tokens,
-      on_delta~,
+      on_delta=@llm.ignore_delta,
     )
     if result.finish_reason is Some("length") {
       trace.push("[observation] Model hit max_tokens; answer may be truncated")
     }
     if result.tool_calls.is_empty() {
       guard result.content != "" else { fail("model returned an empty answer") }
+      on_delta(result.content)
       // A truncated final answer is continued once: feed it back as context
       // and ask the model to complete it with no tools available.
       if result.finish_reason is Some("length") {
@@ -147,6 +249,7 @@ pub async fn Agent::turn(
       trace.push("[final] Model returned an answer")
       return { text: result.content, trace }
     }
+    on_thinking(result.content)
     let trimmed = trim_intermediate_content(result.content)
     if trimmed != "" {
       on_event(ThinkingDelta(trimmed))
@@ -203,10 +306,37 @@ pub async fn Agent::turn(
       on_delta~,
     )
     if result.content != "" {
+      let mut text = result.content
       session.messages.push(@llm.chat_message("assistant", result.content))
-      on_event(AnswerDelta(result.content))
-      trace.push("[final] Model answered from collected evidence")
-      return { text: result.content, trace }
+      if result.finish_reason is Some("length") {
+        // 预算耗尽后的最终回答同样可能超长：续写一次，避免输出截断。
+        trace.push(
+          "[observation] Final answer hit max_tokens; requesting continuation",
+        )
+        session.messages.push(
+          @llm.chat_message(
+            "user", "(System: continue and complete the answer exactly from where it stopped, keeping the same language and format. Output ONLY the plain Markdown answer.)",
+          ),
+        )
+        let cont = @llm.stream_chat_completion(
+          api_key,
+          base_url,
+          model,
+          session.messages,
+          [],
+          max_tokens=self.max_tokens,
+          on_delta~,
+        )
+        if cont.content != "" {
+          text = text + "\n" + cont.content
+          session.messages.push(@llm.chat_message("assistant", cont.content))
+        }
+        trace.push("[final] Model answered from collected evidence (continued)")
+      } else {
+        trace.push("[final] Model answered from collected evidence")
+      }
+      on_event(AnswerDelta(text))
+      return { text, trace }
     }
     fail("model could not answer after exhausting the agent budget")
   }

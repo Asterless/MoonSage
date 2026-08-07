@@ -1,16 +1,29 @@
 ///|
+// 会话历史超过该字符数时触发一次上下文压缩。
+let compact_threshold_chars = 20000
+
+///|
 fn chat_system_prompt(cwd : String) -> String {
   (
     #|You are MoonSage, an interactive agent for the MoonBit ecosystem.
     #|You can search Mooncakes packages with search_modules, and inspect the
     #|local project read-only with list_project_files, read_file, run_moon and
-    #|git_diff (never modify files - no write tools are available).
+    #|git_diff. You can also modify the local project with write_file,
+    #|multi_edit and remove; every change asks the user to confirm (y/N)
+    #|before it is applied, and changed source files must pass syntax checks.
+    #|Use clone_repo to work on a GitHub repository (all file tools switch to
+    #|the clone), and create_pr to publish your changes as a pull request.
     #|The local project root is:
     #|
   ) +
   cwd +
   (
     #|
+    #|All file tools (list_project_files, read_file, write_file, multi_edit,
+    #|remove, git_diff, run_moon) operate on the current workspace root and
+    #|use paths relative to it. clone_repo switches the workspace root to the
+    #|clone; after that use plain relative paths like README.md, never paths
+    #|starting with .moonsage/workspaces/.
     #|
     #|Rules:
     #|- Search before recommending packages; cite https://mooncakes.io/docs/<owner>/<module>.
@@ -28,13 +41,34 @@ fn chat_system_prompt(cwd : String) -> String {
 fn chat_agent(
   modules : Array[@moonsage.ModuleSummary],
   cwd : String,
+  ws : @editing.Workspace,
 ) -> @agent.Agent {
   {
     system_prompt: chat_system_prompt(cwd),
-    tools: @agent.ask_tools(modules) + @local.local_tools(cwd),
-    max_tool_calls: 12,
-    max_rounds: 6,
-    max_tokens: 1500,
+    tools: @agent.ask_tools(modules) +
+    @local.local_tools(ws) +
+    @editing.write_tools(ws, @editing.Prompt) +
+    @editing.publish_tools(ws),
+    max_tool_calls: 30,
+    max_rounds: 10,
+    max_tokens: 6000,
+  }
+}
+
+///|
+// 恢复会话时还原工作区根目录；克隆目录已不存在则回退到项目根。
+async fn restore_ws_root(
+  ws : @editing.Workspace,
+  saved_root : String,
+  fallback : String,
+) -> Unit {
+  if saved_root == "" {
+    return
+  }
+  if @editing.dir_exists(saved_root) {
+    ws.set_root(saved_root)
+  } else {
+    println("! 工作区 \{saved_root} 已不存在，回到 \{fallback}")
   }
 }
 
@@ -64,9 +98,47 @@ fn help_text() -> String {
     #|  /clear         clear the conversation history
     #|  /exit, /quit   leave the chat (exit/quit also work)
     #|
-    #|The agent can search Mooncakes packages and inspect the local project
-    #|read-only. Type your message and press Enter.
+    #|The agent can search Mooncakes packages, inspect and modify the local
+    #|project, clone a GitHub repository (clone_repo) and open a pull request
+    #|(create_pr). Type your message and press Enter.
   )
+}
+
+///|
+// 工具事件的中文短标签，用于一行式状态提示。
+fn tool_label(name : String) -> String {
+  match name {
+    "search_modules" => "搜索模块"
+    "get_module_manifest" => "获取模块信息"
+    "get_module_index" => "获取模块索引"
+    "get_package_docs" => "获取包文档"
+    "list_project_files" => "列出文件"
+    "read_file" => "读取文件"
+    "run_moon" => "运行 moon"
+    "git_diff" => "查看差异"
+    "write_file" => "写入文件"
+    "multi_edit" => "批量编辑"
+    "remove" => "删除文件"
+    "clone_repo" => "克隆仓库"
+    "create_pr" => "创建 PR"
+    _ => name
+  }
+}
+
+///|
+// 把 Failure(...)@moonsage FAILED: 前缀剥掉，只留人话错误信息。
+fn prettify_error(message : String) -> String {
+  let parts = message.split("FAILED: ").to_array()
+  if parts.length() > 1 {
+    let raw = parts[parts.length() - 1].to_owned()
+    if raw.has_suffix(")") {
+      raw[:raw.length() - 1].to_owned()
+    } else {
+      raw
+    }
+  } else {
+    message
+  }
 }
 
 ///|
@@ -152,17 +224,56 @@ pub async fn run_chat(
   base_url : String,
   model : String,
   cwd : String,
+  session_id : String?,
+  continue_latest : Bool,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
-    e => {
-      println("warning: failed to fetch Mooncakes modules: \{e.to_string()}")
+    _ => {
+      println("! 无法获取 Mooncakes 模块索引（继续本地模式）")
       []
     }
   }
-  let agent = chat_agent(modules, cwd)
-  let mut session = agent.new_session()
+  let ws = @editing.Workspace::new(cwd)
+  let agent = chat_agent(modules, cwd, ws)
+  let store_root = session_root(cwd)
+  let fresh_session = fn() -> (String, @agent.Session) {
+    (
+      generated_session_id(@env.now().reinterpret_as_int64()),
+      agent.new_session(),
+    )
+  }
+  let resolved = match session_id {
+    Some(id) =>
+      match load_session_with_root(store_root, id) {
+        Some(saved) => {
+          restore_ws_root(ws, saved.ws_root, cwd)
+          (id, saved.session)
+        }
+        None => {
+          println("! 会话 \{id} 不存在，已开启新对话")
+          fresh_session()
+        }
+      }
+    None if continue_latest =>
+      match latest_session_id(store_root) {
+        Some(id) =>
+          match load_session_with_root(store_root, id) {
+            Some(saved) => {
+              restore_ws_root(ws, saved.ws_root, cwd)
+              (id, saved.session)
+            }
+            None => fresh_session()
+          }
+        None => fresh_session()
+      }
+    _ => fresh_session()
+  }
+  let mut current_id = resolved.0
+  let mut session = resolved.1
   let reader = LineReader::new()
-  println("MoonSage chat — /help for commands, /exit or /quit to leave")
+  println(
+    "MoonSage chat · 会话 \{current_id} — /help 查看命令，/exit 或 /quit 退出",
+  )
   for ;; {
     @stdio.stdout.write("moon> ")
     match reader.next() {
@@ -178,8 +289,11 @@ pub async fn run_chat(
         match slash_command(input) {
           Exit => return
           Clear => {
-            session = agent.new_session()
-            println("conversation cleared")
+            let (new_id, new_session) = fresh_session()
+            current_id = new_id
+            session = new_session
+            ws.set_root(cwd)
+            println("已清空对话 · 会话 \{current_id}")
             continue
           }
           Help => {
@@ -187,7 +301,19 @@ pub async fn run_chat(
             continue
           }
           Prompt => {
+            // 上下文过长时先压缩再回答。
+            if session.char_count() > compact_threshold_chars {
+              @stdio.stdout.write("⋯ 正在压缩对话历史…\n")
+              agent.compact(session, api_key, base_url, model) catch {
+                _ =>
+                  @stdio.stdout.write(
+                    "! 上下文压缩失败，继续使用原历史\n",
+                  )
+              }
+              save_session(store_root, current_id, session, ws.get_root())
+            }
             let printer = @md_ansi.MdStreamPrinter::new()
+            let mut answer_started = false
             let _ = agent.turn(
               session,
               api_key,
@@ -195,6 +321,10 @@ pub async fn run_chat(
               model,
               input,
               on_delta=async fn(text) {
+                if !answer_started {
+                  answer_started = true
+                  @stdio.stdout.write("\n")
+                }
                 printer.feed(text)
                 printer.flush_partial()
                 let out = printer.take_output()
@@ -205,21 +335,21 @@ pub async fn run_chat(
               on_event=async fn(event) {
                 match event {
                   @agent.ToolCall(name) =>
-                    @stdio.stdout.write("\n[tool] \{name} ...\n")
-                  @agent.ToolResult(name) =>
-                    @stdio.stdout.write("[observation] \{name} completed\n")
+                    @stdio.stdout.write("\n▸ \{tool_label(name)} …\n")
+                  @agent.ToolResult(_) => ()
                   _ => ()
                 }
               },
             ) catch {
               e => {
-                @stdio.stdout.write("\nerror: \{e.to_string()}\n")
+                @stdio.stdout.write("✗ \{prettify_error(e.to_string())}\n")
                 continue
               }
             }
             printer.finish()
             @stdio.stdout.write(printer.take_output())
             @stdio.stdout.write("\n")
+            save_session(store_root, current_id, session, ws.get_root())
           }
         }
       }

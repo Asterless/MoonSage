@@ -1,8 +1,12 @@
 import {
-  "moonsage/editing",
   "moonsage/tools",
   "moonbitlang/async/fs",
   "moonbitlang/async/process",
+  "moonbitlang/async/stdio",
   "moonbitlang/core/json",
   "moonbitlang/core/string",
 }
+
+import {
+  "moonbitlang/async",
+} for "wbtest"
