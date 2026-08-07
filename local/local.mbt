@@ -116,16 +116,67 @@ async fn run_moon_tool(root : String, arguments : String) -> String {
     .map(fn(s) { s.to_owned() })
     .to_array()
   guard args.length() > 0 else { fail("args must not be empty") }
-  let (exit, out, err) = @process.collect_output(
-    "moon",
-    args,
-    cwd=root,
-    no_console_window=true,
+  let timeout_ms = parse_int_or(
+    json_string_arg(document, "timeout_ms"),
+    run_moon_default_timeout_ms,
   )
+  let timeout_ms = if timeout_ms < 1000 { 1000 } else { timeout_ms }
+  run_moon_with_timeout(root, args, timeout_ms)
+}
+
+///|
+// Default cap for a single `run_moon` call: 5 minutes.
+// A hung moon process must not block the whole agent session forever.
+let run_moon_default_timeout_ms : Int = 300000
+
+///|
+// Run `moon` with a timeout. When the deadline hits, the process is
+// cancelled (terminated) and a structured JSON result is returned so the
+// agent can recover instead of hanging indefinitely.
+async fn run_moon_with_timeout(
+  root : String,
+  args : Array[String],
+  timeout_ms : Int,
+) -> String {
+  run_command_with_timeout("moon", root, args, timeout_ms)
+}
+
+///|
+// Run any command with a timeout. On timeout the child process is cancelled
+// (terminated) and a structured JSON result is returned instead of hanging.
+async fn run_command_with_timeout(
+  cmd : String,
+  root : String,
+  args : Array[String],
+  timeout_ms : Int,
+) -> String {
+  let payload = @async.with_timeout_opt(timeout_ms, async fn() {
+    let (exit, out, err) = @process.collect_output(
+      cmd,
+      args,
+      cwd=root,
+      no_console_window=true,
+    )
+    Json::object({
+      "exit_code": Json::number(exit.to_double()),
+      "stdout": Json::string(truncate_output(out.text(), 6000)),
+      "stderr": Json::string(truncate_output(err.text(), 2000)),
+    }).stringify()
+  })
+  match payload {
+    Some(result) => result
+    None => command_timeout_json(timeout_ms)
+  }
+}
+
+///|
+fn command_timeout_json(timeout_ms : Int) -> String {
   Json::object({
-    "exit_code": Json::number(exit.to_double()),
-    "stdout": Json::string(truncate_output(out.text(), 6000)),
-    "stderr": Json::string(truncate_output(err.text(), 2000)),
+    "exit_code": Json::number(-1.0),
+    "stdout": Json::string(""),
+    "stderr": Json::string(
+      "command timed out after \{timeout_ms} ms and was terminated",
+    ),
   }).stringify()
 }
 
@@ -205,11 +256,14 @@ pub fn local_tools(ws : @editing.Workspace) -> Array[@tools.Tool] {
     {
       schema: {
         name: "run_moon",
-        description: "Run a moon command inside the project (e.g. 'build' or 'test'). Returns exit code, stdout and stderr.",
+        description: "Run a moon command inside the project (e.g. 'build' or 'test'). Returns exit code, stdout and stderr. The process is capped at 5 minutes by default.",
         parameters: @tools.object_schema(
           {
             "args": @tools.string_field(
               "Space-separated moon arguments, for example 'build' or 'test'",
+            ),
+            "timeout_ms": @tools.string_field(
+              "Optional timeout in milliseconds for the moon process (default \{run_moon_default_timeout_ms})",
             ),
           },
           ["args"],

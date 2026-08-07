@@ -89,3 +89,63 @@ test "local_tools exposes the four read-only tools" {
   let names = tools.map(fn(t) { t.schema.name })
   assert_eq(names, ["list_project_files", "read_file", "run_moon", "git_diff"])
 }
+
+///|
+// A command that sleeps long enough to reliably trigger a timeout.
+#cfg(platform="windows")
+fn sleep_long_command() -> (String, Array[String]) {
+  (
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"],
+  )
+}
+
+///|
+#cfg(not(platform="windows"))
+fn sleep_long_command() -> (String, Array[String]) {
+  ("sleep", ["30"])
+}
+
+///|
+test "command_timeout_json reports the deadline" {
+  let payload = command_timeout_json(3000)
+  assert_true(payload.contains("timed out after 3000 ms"))
+  let doc = @json.parse(payload)
+  match doc {
+    Object(fields) =>
+      match fields.get("exit_code") {
+        Some(Number(n, ..)) => assert_eq(n, -1.0)
+        _ => fail("exit_code missing")
+      }
+    _ => fail("expected JSON object")
+  }
+}
+
+///|
+async test "run_command_with_timeout terminates hung commands" {
+  let tmp = @fs.tmpdir(prefix="moonsage-timeout-test-")
+  let (cmd, args) = sleep_long_command()
+  let payload = run_command_with_timeout(cmd, tmp, args, 1000)
+  assert_true(payload.contains("timed out after 1000 ms"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "run_command_with_timeout returns output for quick commands" {
+  let tmp = @fs.tmpdir(prefix="moonsage-runmoon-test-")
+  let payload = run_command_with_timeout("moon", tmp, ["version"], 10000)
+  let doc = @json.parse(payload)
+  match doc {
+    Object(fields) =>
+      match fields.get("exit_code") {
+        Some(Number(n, ..)) => assert_eq(n, 0.0)
+        _ => fail("exit_code missing")
+      }
+    _ => fail("expected JSON object")
+  }
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
