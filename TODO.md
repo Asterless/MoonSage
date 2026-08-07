@@ -35,7 +35,7 @@
 - [x] **9. CI 加 Windows job + fmt/info 一致性检查**
   - 文件: `.github/workflows/ci.yml`
   - 内容: 项目有大量 Windows 专属代码但 CI 只在 ubuntu 跑;补 windows-latest,并加 `moon fmt --check`、`moon info` diff 检查。
-- [ ] **10. 抽取共享 util 包去重**
+- [x] **10. 抽取共享 util 包去重**
   - 文件: 新增 `util` 包;`local/`、`editing/`、`audit/` 的 `safe_path` / `json_string_arg` / `parse_int_or` / `basename` 收敛
 
 ## P2 架构与生态(长期)
