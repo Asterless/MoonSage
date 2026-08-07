@@ -217,6 +217,7 @@ pub async fn ignore_delta(_ : String) -> Unit {
 // (网络/连接超时/429/5xx),调用方据此退避重试;已开始接收内容后
 // 的流中断不标记,避免重试导致内容重复。
 async fn attempt_chat_completion(
+  provider : ProviderKind,
   api_key : String,
   base_url : String,
   model : String,
@@ -228,22 +229,65 @@ async fn attempt_chat_completion(
   connect_timeout_ms : Int,
   stream_idle_timeout_ms : Int,
 ) -> StreamResult {
-  let endpoint = base_url.trim_end(chars="/").to_owned() + "/chat/completions"
-  let payload : Map[String, Json] = {
-    "model": Json::string(model),
-    "messages": Json::array(messages),
-    "stream": Json::boolean(true),
-    "max_tokens": Json::number(max_tokens.to_double()),
+  let (endpoint, headers) = match provider {
+    OpenAi =>
+      (
+        base_url.trim_end(chars="/").to_owned() + "/chat/completions",
+        {
+          "Authorization": "Bearer " + api_key,
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream",
+        },
+      )
+    Anthropic =>
+      (
+        base_url.trim_end(chars="/").to_owned() + "/v1/messages",
+        {
+          "x-api-key": api_key,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream",
+        },
+      )
+    Ollama =>
+      (
+        base_url.trim_end(chars="/").to_owned() + "/api/chat",
+        { "Content-Type": "application/json" },
+      )
+  }
+  let payload : Map[String, Json] = match provider {
+    OpenAi =>
+      {
+        "model": Json::string(model),
+        "messages": Json::array(messages),
+        "stream": Json::boolean(true),
+        "max_tokens": Json::number(max_tokens.to_double()),
+      }
+    Anthropic =>
+      {
+        "model": Json::string(model),
+        "max_tokens": Json::number(max_tokens.to_double()),
+        "stream": Json::boolean(true),
+        "system": Json::string(anthropic_system(messages)),
+        "messages": Json::array(anthropic_messages(messages)),
+      }
+    Ollama =>
+      {
+        "model": Json::string(model),
+        "messages": Json::array(messages),
+        "stream": Json::boolean(true),
+        "options": Json::object({
+          "num_predict": Json::number(max_tokens.to_double()),
+        }),
+      }
   }
   if tools.length() > 0 {
-    payload["tools"] = Json::array(tools)
+    payload["tools"] = match provider {
+      Anthropic => Json::array(anthropic_tools(tools))
+      _ => Json::array(tools)
+    }
   }
   let request = Json::object(payload)
-  let headers = {
-    "Authorization": "Bearer " + api_key,
-    "Content-Type": "application/json",
-    "Accept": "text/event-stream",
-  }
   let client = @async.with_timeout(connect_timeout_ms, () => {
     @http.post_stream(endpoint, headers~)
   }) catch {
@@ -292,7 +336,11 @@ async fn attempt_chat_completion(
           Skip => ()
           Done => break
           Data(payload) => {
-            let chunk = parse_stream_chunk(payload)
+            let chunk = match provider {
+              OpenAi => parse_stream_chunk(payload)
+              Anthropic => parse_anthropic_chunk(payload)
+              Ollama => parse_ollama_chunk(payload)
+            }
             if chunk is Some(chunk) {
               if chunk.content is Some(text) {
                 content.write_string(text)
@@ -325,7 +373,8 @@ async fn attempt_chat_completion(
 /// connect timeout / HTTP 429 / HTTP 5xx) are retried with a fixed backoff
 /// until `max_retries` is exhausted; errors raised after streaming has
 /// started are never retried.
-pub async fn stream_chat_completion(
+pub async fn stream_chat_completion_provider(
+  provider : ProviderKind,
   api_key : String,
   base_url : String,
   model : String,
@@ -350,8 +399,8 @@ pub async fn stream_chat_completion(
   while !done {
     try {
       result = attempt_chat_completion(
-        api_key, base_url, model, messages, tools, max_tokens, on_delta, on_reasoning,
-        connect_timeout_ms, stream_idle_timeout_ms,
+        provider, api_key, base_url, model, messages, tools, max_tokens, on_delta,
+        on_reasoning, connect_timeout_ms, stream_idle_timeout_ms,
       )
       done = true
     } catch {
@@ -375,6 +424,40 @@ pub async fn stream_chat_completion(
     }
   }
   result
+}
+
+///|
+/// Stream a chat completion through the OpenAI-compatible protocol
+/// (the default provider).
+pub async fn stream_chat_completion(
+  api_key : String,
+  base_url : String,
+  model : String,
+  messages : Array[Json],
+  tools : Array[Json],
+  max_tokens? : Int = 1200,
+  on_delta? : async (String) -> Unit = ignore_delta,
+  on_reasoning? : async (String) -> Unit = ignore_delta,
+  connect_timeout_ms? : Int = 30000,
+  stream_idle_timeout_ms? : Int = 60000,
+  max_retries? : Int = 2,
+  retry_delay_ms? : Int = 500,
+) -> StreamResult {
+  stream_chat_completion_provider(
+    OpenAi,
+    api_key,
+    base_url,
+    model,
+    messages,
+    tools,
+    max_tokens~,
+    on_delta~,
+    on_reasoning~,
+    connect_timeout_ms~,
+    stream_idle_timeout_ms~,
+    max_retries~,
+    retry_delay_ms~,
+  )
 }
 
 ///|

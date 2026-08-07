@@ -204,6 +204,7 @@ async fn run_audit_agent(
   question : String,
   max_tool_calls~ : Int,
   max_rounds~ : Int,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> @agent.AgentAnswer {
   let agent : @agent.Agent = {
     system_prompt: audit_system_prompt(),
@@ -212,7 +213,7 @@ async fn run_audit_agent(
     max_rounds,
     max_tokens: 6000,
   }
-  agent.run(api_key, base_url, model, question)
+  agent.run(api_key, base_url, model, question, provider~)
 }
 
 ///|
@@ -222,6 +223,7 @@ async fn run_analysis_agent(
   base_url : String,
   model : String,
   ctx : AuditContext,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> @agent.AgentAnswer {
   let ro_ctx : AuditContext = {
     project_dir: ctx.project_dir,
@@ -235,7 +237,7 @@ async fn run_analysis_agent(
     max_rounds: 4,
     max_tokens: 4000,
   }
-  agent.run(api_key, base_url, model, audit_analysis_question())
+  agent.run(api_key, base_url, model, audit_analysis_question(), provider~)
 }
 
 ///|
@@ -248,6 +250,7 @@ async fn run_fix_agent(
   findings : String,
   max_tool_calls~ : Int,
   max_rounds~ : Int,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> @agent.AgentAnswer {
   let agent : @agent.Agent = {
     system_prompt: audit_fix_prompt(),
@@ -256,7 +259,7 @@ async fn run_fix_agent(
     max_rounds,
     max_tokens: 6000,
   }
-  agent.run(api_key, base_url, model, audit_fix_question(findings))
+  agent.run(api_key, base_url, model, audit_fix_question(findings), provider~)
 }
 
 ///|
@@ -320,6 +323,9 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
+  let provider = @llm.provider_from_string(
+    @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
+  )
 
   @stdio.stdout.write("MoonSage audit\n")
   @stdio.stdout.write("Fetching manifest for \{opts.name}...\n")
@@ -387,7 +393,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       )
     }
     @stdio.stdout.write("Phase 1/2: analyzing the project...\n")
-    let analysis = run_analysis_agent(key, base_url, model, ctx) catch {
+    let analysis = run_analysis_agent(key, base_url, model, ctx, provider~) catch {
       e => {
         if opts.clean {
           remove_workspace_dir(workspace)
@@ -405,6 +411,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       analysis.text,
       max_tool_calls=opts.max_calls,
       max_rounds=opts.max_rounds,
+      provider~,
     ) catch {
       e => {
         if opts.clean {
@@ -456,6 +463,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       audit_question_text(),
       max_tool_calls=opts.max_calls,
       max_rounds=opts.max_rounds,
+      provider~,
     ) catch {
       e => {
         if opts.clean {
