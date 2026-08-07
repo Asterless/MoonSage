@@ -8,15 +8,22 @@ research, inspect live manifests, and return cited recommendations.
 ## Run
 
 ```shell
-moon run cmd/main -- search "json parser"
+moon run cmd/main -- search "json parser"        # via moon run
+moonsage search "json parser"                    # built binary (moon build)
 ```
 
 `search` does not require an LLM key. To use the agent, configure an API key
-and run `ask`:
+and run `ask` for a one-shot question, or `chat` for an interactive streaming
+conversation that keeps its history until you leave with `/exit` or `/quit`:
 
 ```powershell
 moon run cmd/main -- ask "帮我找一个适合 native 后端的 HTTP 客户端"
+moon run cmd/main -- chat
 ```
+
+In `chat` mode the agent can also inspect the local project read-only
+(`list_project_files`, `read_file`, `run_moon`, `git_diff`), so you can ask
+questions about the current codebase as well as Mooncakes packages.
 
 To audit a remote Mooncakes package and (optionally) fix issues it finds:
 
@@ -33,9 +40,22 @@ moon run cmd/main -- audit moonbit-community/cmark --fix --confirm diff
 # fix mode: apply without confirmation
 moon run cmd/main -- audit moonbit-community/cmark --fix --yes
 
+# fix + push a branch and open a pull request with the changes
+moon run cmd/main -- audit moonbit-community/cmark --fix --pr
+
 # remove temporary workspaces left by previous audits
 moon run cmd/main -- audit --clean
 ```
+
+`--pr` requires the GitHub CLI (`gh`) to be authenticated; after the audit
+finishes fixing and verifying the clone, MoonSage creates a
+`moonsage/fix-<repo>` branch, commits the changes with your GitHub identity,
+pushes them (forking the package repository into your account first when you
+have no write access), and opens a pull request against the original repo with
+the audit report as the PR body. The fix phase uses three write tools:
+`write_file` (whole-file writes), `multi_edit` (line-anchored batch edits with
+a `moonc syncheck` gate that rejects edits breaking syntax), and `remove`
+(delete files); all writes are confined to the cloned workspace.
 
 ## Remote audit
 
@@ -49,8 +69,11 @@ user's language plus a `git diff` of every change.
 Audit mode is read-only by default; `--fix` enables file writes with a
 configurable confirmation mode (`prompt` per-file, `diff` for a final review,
 or `yes` to skip). Changes are confined to the cloned workspace and never
-touch the user's own files. The audit agent has its own budget
-(`--max-calls`, default 30 tool calls) independent of `ask`. The MoonBit
+touch the user's own files. Fix mode runs in two phases: a read-only
+analysis phase (bounded budget) that lists root causes and concrete fixes,
+then a fix phase that applies them one at a time with `write_file` and
+re-runs `moon build` / `moon test` to verify each change before writing the
+report. `--max-calls` (default 30) applies to the fix phase. The MoonBit
 toolchain (`moon`) and `git` must be available on `PATH`. Each run without
 `--workspace` creates a temporary workspace under the system temp directory;
 run `audit --clean` to remove all leftover `moonsage-audit-*` workspaces, or

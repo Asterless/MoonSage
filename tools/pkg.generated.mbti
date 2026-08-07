@@ -4,6 +4,8 @@ package "moonsage/tools"
 // Values
 pub fn argument_string(String, String) -> String raise
 
+pub fn array_field(String) -> Json
+
 pub fn error_json(String) -> String
 
 pub fn find_tool(Array[Tool], String) -> Tool?

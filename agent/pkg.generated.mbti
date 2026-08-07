@@ -8,7 +8,11 @@ import {
 // Values
 pub fn ask_agent(Array[@moonsage.ModuleSummary]) -> Agent
 
-pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit) -> AgentAnswer
+pub fn ask_tools(Array[@moonsage.ModuleSummary]) -> Array[@tools.Tool]
+
+pub async fn ignore_event(EngineEvent) -> Unit
+
+pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
 
 // Errors
 
@@ -20,11 +24,24 @@ pub(all) struct Agent {
   max_rounds : Int
   max_tokens : Int
 }
-pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit) -> AgentAnswer
+pub fn Agent::new_session(Self) -> Session
+pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
+pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
 
 pub struct AgentAnswer {
   text : String
   trace : Array[String]
+}
+
+pub(all) enum EngineEvent {
+  ThinkingDelta(String)
+  ToolCall(String)
+  ToolResult(String)
+  AnswerDelta(String)
+}
+
+pub(all) struct Session {
+  messages : Array[Json]
 }
 
 // Type aliases

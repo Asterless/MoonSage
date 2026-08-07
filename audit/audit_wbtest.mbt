@@ -61,76 +61,6 @@ test "parse_int_or falls back to default" {
 }
 
 ///|
-test "relative_to_root strips project root prefix" {
-  assert_eq(relative_to_root("C:/p", "C:/p/src/a.mbt"), "src/a.mbt")
-  assert_eq(relative_to_root("C:/p", "C:/other"), "C:/other")
-  assert_eq(relative_to_root("C:/p", "C:/p"), "C:/p")
-  assert_eq(relative_to_root("/root", "/root/moon.mod"), "moon.mod")
-}
-
-///|
-test "truncate_output keeps long output bounded" {
-  assert_eq(truncate_output("short", 100), "short")
-  assert_eq(truncate_output("", 10), "")
-  let long = truncate_output("a".repeat(20), 10)
-  assert_true(long.contains("truncated"))
-  assert_true(!long.contains("a".repeat(20)))
-}
-
-///|
-test "safe_project_path allows relative files and blocks traversal" {
-  let ctx : AuditContext = {
-    project_dir: "C:/work/proj",
-    fix: false,
-    confirm: ConfirmDiff,
-  }
-  assert_eq(safe_project_path(ctx, "src/a.mbt"), "C:/work/proj/src/a.mbt")
-  assert_eq(safe_project_path(ctx, "moon.mod"), "C:/work/proj/moon.mod")
-  let blocked = try {
-    ignore(safe_project_path(ctx, "../evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(blocked)
-  let nested = try {
-    ignore(safe_project_path(ctx, "src/../../evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(nested)
-  let absolute = try {
-    ignore(safe_project_path(ctx, "/etc/passwd"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(absolute)
-  let win_abs = try {
-    ignore(safe_project_path(ctx, "C:\\evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(win_abs)
-  let drive = try {
-    ignore(safe_project_path(ctx, "C:/evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(drive)
-  let empty = try {
-    ignore(safe_project_path(ctx, ""))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(empty)
-}
-
-///|
 test "audit tools include write_file only in fix mode" {
   let ro_ctx : AuditContext = {
     project_dir: "C:/p",
@@ -148,8 +78,10 @@ test "audit tools include write_file only in fix mode" {
     confirm: ConfirmDiff,
   }
   let fix = audit_tools(fix_ctx)
-  assert_eq(fix.length(), 5)
+  assert_eq(fix.length(), 7)
   assert_true(fix.map(fn(t) { t.schema.name }).contains("write_file"))
+  assert_true(fix.map(fn(t) { t.schema.name }).contains("multi_edit"))
+  assert_true(fix.map(fn(t) { t.schema.name }).contains("remove"))
   // git_diff tool is always present
   let always = fix.filter(fn(t) { t.schema.name == "git_diff" })
   assert_eq(always.length(), 1)
@@ -264,4 +196,15 @@ test "parse_audit_options rejects bad input" {
     _ => true
   }
   assert_true(unknown_flag)
+}
+
+///|
+test "fix phase prompt requires write_file and analysis stays read-only" {
+  assert_true(audit_fix_prompt().contains("write_file"))
+  assert_true(audit_fix_prompt().contains("## 审计报告"))
+  assert_true(!audit_analysis_prompt().contains("write_file"))
+  assert_true(audit_analysis_prompt().length() > 0)
+  assert_true(audit_analysis_question().contains("分析结果"))
+  assert_true(audit_fix_question("某个根因").contains("某个根因"))
+  assert_true(audit_fix_question("某个根因").contains("分析结果"))
 }

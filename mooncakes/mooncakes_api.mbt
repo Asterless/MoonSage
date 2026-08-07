@@ -1,6 +1,17 @@
 ///|
+// 网络请求超时：mooncakes API / 静态资源 30 秒无响应即失败，避免交互
+// 界面在连接或读取阶段无限期挂起。
+let http_timeout_ms = 30000
+
+///|
 pub async fn fetch_modules() -> Array[@moonsage.ModuleSummary] {
-  let (response, body) = @http.get("https://mooncakes.io/api/v0/modules")
+  let (response, body) = @async.with_timeout(http_timeout_ms, () => {
+    @http.get("https://mooncakes.io/api/v0/modules")
+  }) catch {
+    @async.TimeoutError(_) =>
+      fail("Mooncakes API timed out (\{http_timeout_ms} ms)")
+    err => raise err
+  }
   guard response.code == 200 else {
     fail("Mooncakes API returned HTTP \{response.code}")
   }
@@ -43,7 +54,13 @@ pub async fn fetch_package_docs(arguments : String) -> String {
 
 ///|
 pub async fn fetch_asset(url : String, error_label : String) -> String {
-  let (response, body) = @http.get(url, headers=asset_headers())
+  let (response, body) = @async.with_timeout(http_timeout_ms, () => {
+    @http.get(url, headers=asset_headers())
+  }) catch {
+    @async.TimeoutError(_) =>
+      fail("\{error_label} timed out (\{http_timeout_ms} ms)")
+    err => raise err
+  }
   let text = body.text()
   guard response.code == 200 else {
     fail("\{error_label} returned HTTP \{response.code}")

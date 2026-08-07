@@ -213,6 +213,8 @@ pub async fn stream_chat_completion(
   tools : Array[Json],
   max_tokens? : Int = 1200,
   on_delta? : async (String) -> Unit = ignore_delta,
+  connect_timeout_ms? : Int = 30000,
+  stream_idle_timeout_ms? : Int = 60000,
 ) -> StreamResult {
   let endpoint = base_url.trim_end(chars="/").to_owned() + "/chat/completions"
   let payload : Map[String, Json] = {
@@ -230,9 +232,21 @@ pub async fn stream_chat_completion(
     "Content-Type": "application/json",
     "Accept": "text/event-stream",
   }
-  let client = @http.post_stream(endpoint, headers~)
+  let client = @async.with_timeout(connect_timeout_ms, () => {
+    @http.post_stream(endpoint, headers~)
+  }) catch {
+    @async.TimeoutError(_) =>
+      fail("LLM API connect timed out (\{connect_timeout_ms} ms)")
+    err => raise err
+  }
   defer client.close()
-  let response = client..write(request.stringify()).end_request()
+  let response = @async.with_timeout(connect_timeout_ms, () => {
+    client..write(request.stringify()).end_request()
+  }) catch {
+    @async.TimeoutError(_) =>
+      fail("LLM API request timed out (\{connect_timeout_ms} ms)")
+    err => raise err
+  }
   guard response.code >= 200 && response.code < 300 else {
     let detail = client.read_all().binary().to_string() catch { _ => "" }
     fail("LLM API returned HTTP \{response.code}: \{detail}")
@@ -241,7 +255,14 @@ pub async fn stream_chat_completion(
   let accumulator = ToolCallAccumulator::new()
   let mut finish_reason : String? = None
   for ;; {
-    match client.read_until("\n") {
+    let line = @async.with_timeout(stream_idle_timeout_ms, () => {
+      client.read_until("\n")
+    }) catch {
+      @async.TimeoutError(_) =>
+        fail("LLM API stream idle timed out (\{stream_idle_timeout_ms} ms)")
+      err => raise err
+    }
+    match line {
       None => break
       Some(line) =>
         match parse_sse_line(line) {

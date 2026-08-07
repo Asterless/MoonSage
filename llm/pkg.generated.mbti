@@ -12,7 +12,7 @@ pub fn chat_message(String, String) -> Json
 
 pub async fn ignore_delta(String) -> Unit
 
-pub async fn stream_chat_completion(String, String, String, Array[Json], Array[Json], max_tokens? : Int, on_delta? : async (String) -> Unit) -> StreamResult
+pub async fn stream_chat_completion(String, String, String, Array[Json], Array[Json], max_tokens? : Int, on_delta? : async (String) -> Unit, connect_timeout_ms? : Int, stream_idle_timeout_ms? : Int) -> StreamResult
 
 pub fn tool_result_message(String, String) -> Json
 

@@ -438,6 +438,12 @@ pub fn MdStreamPrinter::feed(self : MdStreamPrinter, text : String) -> Unit {
 }
 
 ///|
+// 立即渲染已完成的完整行（不等待空行分隔），供交互式对话即时显示进度。
+pub fn MdStreamPrinter::flush_partial(self : MdStreamPrinter) -> Unit {
+  self.flush_buffer()
+}
+
+///|
 // Flush the trailing buffer and close any still-open code block.
 pub fn MdStreamPrinter::finish(self : MdStreamPrinter) -> Unit {
   if self.in_code_block {
