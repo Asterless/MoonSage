@@ -77,9 +77,11 @@ test "audit tools include write_file only in fix mode" {
     confirm: ConfirmDiff,
   }
   let read_only = audit_tools(ro_ctx)
-  assert_eq(read_only.length(), 4)
+  assert_eq(read_only.length(), 5)
   let names = read_only.map(fn(t) { t.schema.name })
-  assert_eq(names, ["list_project_files", "read_file", "run_moon", "git_diff"])
+  assert_eq(names, [
+    "list_project_files", "grep_files", "read_file", "run_moon", "git_diff",
+  ])
   assert_true(!names.contains("write_file"))
   let fix_ctx : AuditContext = {
     project_dir: "C:/p",
@@ -87,7 +89,7 @@ test "audit tools include write_file only in fix mode" {
     confirm: ConfirmDiff,
   }
   let fix = audit_tools(fix_ctx)
-  assert_eq(fix.length(), 7)
+  assert_eq(fix.length(), 8)
   assert_true(fix.map(fn(t) { t.schema.name }).contains("write_file"))
   assert_true(fix.map(fn(t) { t.schema.name }).contains("multi_edit"))
   assert_true(fix.map(fn(t) { t.schema.name }).contains("remove"))
