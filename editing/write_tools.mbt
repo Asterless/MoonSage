@@ -76,7 +76,7 @@ async fn confirm_write(
 
 ///|
 async fn write_file_tool(
-  root : String,
+  ws : Workspace,
   confirm : WriteConfirm,
   arguments : String,
 ) -> String {
@@ -84,21 +84,39 @@ async fn write_file_tool(
   let rel = json_string_arg(document, "path")
   let content = json_string_arg(document, "content")
   guard rel != "" else { fail("path is required") }
+  let root = ws.get_root()
   let path = safe_path(root, rel)
   // 与 multi_edit 一致:源码文件先过语法门再询问确认,避免确认一个注定失败的写入。
   if is_syncheck_source(rel) {
     ignore(syncheck_content(content, rel))
   }
+  let original_opt = try {
+    if @fs.kind(path) is @fs.FileKind::Regular {
+      Some(@fs.read_file(path).text())
+    } else {
+      None
+    }
+  } catch {
+    _ => None
+  }
+  let original = match original_opt {
+    Some(s) => s
+    None => ""
+  }
+  if confirm is Prompt {
+    preview_diff(rel, original, content)
+  }
   guard confirm_write(confirm, "写入 ", rel) else {
     return "change declined by user"
   }
+  ws.push_undo(rel, original_opt)
   @fs.write_file(path, content, create_mode=@fs.CreateMode::CreateOrTruncate)
   "wrote \{rel}"
 }
 
 ///|
 async fn multi_edit_tool(
-  root : String,
+  ws : Workspace,
   confirm : WriteConfirm,
   arguments : String,
 ) -> String {
@@ -121,6 +139,7 @@ async fn multi_edit_tool(
     edits.push({ file, old_string, new_string, start_line, end_line })
   }
   guard edits.length() > 0 else { fail("edits must not be empty") }
+  let root = ws.get_root()
   let original : Map[String, String] = Map([])
   for edit in edits {
     if original.get(edit.file) is None {
@@ -144,12 +163,20 @@ async fn multi_edit_tool(
       ignore(syncheck_content(new_content, file))
     }
   }
+  if confirm is Prompt {
+    for file, new_content in results {
+      if original[file] != new_content {
+        preview_diff(file, original[file], new_content)
+      }
+    }
+  }
   guard confirm_write(confirm, "", "批量编辑") else {
     return "change declined by user"
   }
   let mut changed = 0
   for file, new_content in results {
     if original[file] != new_content {
+      ws.push_undo(file, Some(original[file]))
       @fs.write_file(
         safe_path(root, file),
         new_content,
@@ -163,22 +190,87 @@ async fn multi_edit_tool(
 
 ///|
 async fn remove_tool(
-  root : String,
+  ws : Workspace,
   confirm : WriteConfirm,
   arguments : String,
 ) -> String {
   let document = @json.parse(arguments)
   let rel = json_string_arg(document, "path")
   guard rel != "" else { fail("path is required") }
-  guard confirm_write(confirm, "删除 ", rel) else {
-    return "change declined by user"
-  }
-  let path = safe_path(root, rel)
+  let path = safe_path(ws.get_root(), rel)
   guard @fs.kind(path) is @fs.FileKind::Regular else {
     fail("remove only supports regular files: \{rel}")
   }
+  let content = Some(@fs.read_file(path).text()) catch { _ => None }
+  if confirm is Prompt {
+    match content {
+      Some(c) => preview_diff(rel, c, "")
+      None => ()
+    }
+  }
+  guard confirm_write(confirm, "删除 ", rel) else {
+    return "change declined by user"
+  }
+  ws.push_undo(rel, content)
   @fs.remove(path)
   "removed \{rel}"
+}
+
+///|
+// Prompt 确认前在终端展示简洁 unified diff(单文件最多 50 行),让用户
+// 看到将要发生的变更。预览失败不阻塞写入(仅提示能力)。
+async fn preview_diff(rel : String, original : String, new : String) -> Unit {
+  let tmp = @fs.tmpdir(prefix="moonsage-diff-")
+  try {
+    let old_path = tmp + "/old"
+    let new_path = tmp + "/new"
+    let _ = @fs.write_file(
+      old_path,
+      original,
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    let _ = @fs.write_file(
+      new_path,
+      new,
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    let (exit, out, _) = @process.collect_output(
+      "git",
+      [
+        "diff",
+        "--no-index",
+        "--label",
+        "a/\{rel}",
+        "--label",
+        "b/\{rel}",
+        "--",
+        old_path,
+        new_path,
+      ],
+      no_console_window=true,
+    )
+    // git diff --no-index:0 表示无差异,1 表示有差异,其他为 git 不可用。
+    if exit == 0 || exit == 1 {
+      let text = out.text() catch { _ => "" }
+      if text != "" {
+        let lines = text.split("\n").to_array()
+        let limit = if lines.length() > 50 { 50 } else { lines.length() }
+        @stdio.stdout.write("\n")
+        for i = 0; i < limit; i = i + 1 {
+          @stdio.stdout.write(lines[i] + "\n")
+        }
+        if lines.length() > 50 {
+          @stdio.stdout.write("... (diff truncated)\n")
+        }
+        @stdio.stdout.write("\n")
+      }
+    }
+  } catch {
+    _ => ()
+  }
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
 }
 
 ///|
@@ -201,7 +293,7 @@ pub fn write_tools(
         ),
       },
       execute: async fn(arguments) {
-        write_file_tool(ws.get_root(), confirm, arguments) catch {
+        write_file_tool(ws, confirm, arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },
@@ -220,7 +312,7 @@ pub fn write_tools(
         ),
       },
       execute: async fn(arguments) {
-        multi_edit_tool(ws.get_root(), confirm, arguments) catch {
+        multi_edit_tool(ws, confirm, arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },
@@ -235,7 +327,7 @@ pub fn write_tools(
         ),
       },
       execute: async fn(arguments) {
-        remove_tool(ws.get_root(), confirm, arguments) catch {
+        remove_tool(ws, confirm, arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },

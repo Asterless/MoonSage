@@ -81,6 +81,7 @@ priv enum ChatCommand {
   Clear
   Help
   Prompt
+  Undo
 }
 
 ///|
@@ -89,6 +90,7 @@ fn slash_command(input : String) -> ChatCommand {
     "/exit" | "/quit" | "exit" | "quit" => Exit
     "/clear" => Clear
     "/help" => Help
+    "/undo" => Undo
     _ => Prompt
   }
 }
@@ -99,6 +101,7 @@ fn help_text() -> String {
     #|Commands:
     #|  /help          show this help
     #|  /clear         clear the conversation history
+    #|  /undo          undo the last file edit
     #|  /exit, /quit   leave the chat (exit/quit also work)
     #|
     #|The agent can search Mooncakes packages, inspect and modify the local
@@ -301,6 +304,12 @@ pub async fn run_chat(
           }
           Help => {
             println(help_text())
+            continue
+          }
+          Undo => {
+            let message = ws.undo()
+            println(message)
+            save_session(store_root, current_id, session, ws.get_root())
             continue
           }
           Prompt => {
