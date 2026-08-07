@@ -2,6 +2,7 @@
 package "moonsage/agent"
 
 import {
+  "moonsage/llm",
   "moonsage/tools",
 }
 
@@ -12,7 +13,7 @@ pub fn ask_tools(Array[@moonsage.ModuleSummary]) -> Array[@tools.Tool]
 
 pub async fn ignore_event(EngineEvent) -> Unit
 
-pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
+pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, provider? : @llm.ProviderKind) -> AgentAnswer
 
 // Errors
 
@@ -24,10 +25,10 @@ pub(all) struct Agent {
   max_rounds : Int
   max_tokens : Int
 }
-pub async fn Agent::compact(Self, Session, String, String, String, threshold_tokens? : Int, keep_recent_turns? : Int) -> Unit
+pub async fn Agent::compact(Self, Session, String, String, String, threshold_tokens? : Int, keep_recent_turns? : Int, provider? : @llm.ProviderKind) -> Unit
 pub fn Agent::new_session(Self) -> Session
-pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
-pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, on_thinking? : async (String) -> Unit) -> AgentAnswer
+pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, provider? : @llm.ProviderKind) -> AgentAnswer
+pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, on_thinking? : async (String) -> Unit, provider? : @llm.ProviderKind) -> AgentAnswer
 
 pub struct AgentAnswer {
   text : String

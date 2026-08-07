@@ -3,6 +3,7 @@ pkgtype(kind: "executable")
 supported_targets = "+native"
 
 import {
+  "moonsage/llm",
   "moonsage",
   "moonsage/chat",
   "moonsage/mooncakes",

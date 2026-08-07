@@ -116,6 +116,7 @@ pub async fn Agent::compact(
   model : String,
   threshold_tokens? : Int = 8000,
   keep_recent_turns? : Int = 2,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> Unit {
   if session.estimated_tokens() <= threshold_tokens {
     return
@@ -143,7 +144,8 @@ pub async fn Agent::compact(
     transcript.write_string(session.messages[i].stringify())
     transcript.write_string("\n")
   }
-  let summary_result = @llm.stream_chat_completion(
+  let summary_result = @llm.stream_chat_completion_provider(
+    provider,
     api_key,
     base_url,
     model,
@@ -201,9 +203,19 @@ pub async fn Agent::run(
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
   on_event? : async (EngineEvent) -> Unit = ignore_event,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> AgentAnswer {
   let session = self.new_session()
-  self.turn(session, api_key, base_url, model, question, on_delta~, on_event~)
+  self.turn(
+    session,
+    api_key,
+    base_url,
+    model,
+    question,
+    on_delta~,
+    on_event~,
+    provider~,
+  )
 }
 
 ///|
@@ -219,6 +231,7 @@ pub async fn Agent::turn(
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
   on_event? : async (EngineEvent) -> Unit = ignore_event,
   on_thinking? : async (String) -> Unit = @llm.ignore_delta,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> AgentAnswer {
   session.messages.push(@llm.chat_message("user", question))
   let tools_json = self.tools.map(fn(t) { t.schema.to_json() })
@@ -233,7 +246,8 @@ pub async fn Agent::turn(
     }
     // 主循环请求不直接流式输出：工具回合里的内容属于思考叙述，
     // 走 on_thinking（前端默认忽略）；最终答案在回合结束后用 on_delta 输出。
-    let result = @llm.stream_chat_completion(
+    let result = @llm.stream_chat_completion_provider(
+      provider,
       api_key,
       base_url,
       model,
@@ -261,7 +275,8 @@ pub async fn Agent::turn(
             "user", "(System: continue and complete the answer exactly from where it stopped, keeping the same language and format. No tools are available now: output ONLY the plain Markdown answer, never tool calls or XML.)",
           ),
         )
-        let cont = @llm.stream_chat_completion(
+        let cont = @llm.stream_chat_completion_provider(
+          provider,
           api_key,
           base_url,
           model,
@@ -333,7 +348,8 @@ pub async fn Agent::turn(
       ),
     )
     // Budget exhausted: force a final answer with no tools exposed.
-    let result = @llm.stream_chat_completion(
+    let result = @llm.stream_chat_completion_provider(
+      provider,
       api_key,
       base_url,
       model,
@@ -356,7 +372,8 @@ pub async fn Agent::turn(
             "user", "(System: continue and complete the answer exactly from where it stopped, keeping the same language and format. Output ONLY the plain Markdown answer.)",
           ),
         )
-        let cont = @llm.stream_chat_completion(
+        let cont = @llm.stream_chat_completion_provider(
+          provider,
           api_key,
           base_url,
           model,
@@ -528,6 +545,7 @@ pub async fn run_llm_agent(
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
   on_event? : async (EngineEvent) -> Unit = ignore_event,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> AgentAnswer {
   ask_agent(modules).run(
     api_key,
@@ -536,5 +554,6 @@ pub async fn run_llm_agent(
     question,
     on_delta~,
     on_event~,
+    provider~,
   )
 }

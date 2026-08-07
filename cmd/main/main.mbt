@@ -54,18 +54,27 @@ async fn run_ask(question : String) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
+  let provider = @llm.provider_from_string(
+    @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
+  )
   let modules = @mooncakes.fetch_modules()
   @stdio.stdout.write("MoonSage\n")
   let printer = @md_ansi.MdStreamPrinter::new()
-  let answer = @agent.run_llm_agent(key, base_url, model, modules, question, on_delta=async fn(
-    text,
-  ) {
-    printer.feed(text)
-    let out = printer.take_output()
-    if out != "" {
-      @stdio.stdout.write(out)
-    }
-  })
+  let answer = @agent.run_llm_agent(
+    key,
+    base_url,
+    model,
+    modules,
+    question,
+    on_delta=async fn(text) {
+      printer.feed(text)
+      let out = printer.take_output()
+      if out != "" {
+        @stdio.stdout.write(out)
+      }
+    },
+    provider~,
+  )
   printer.finish()
   @stdio.stdout.write(printer.take_output())
   @stdio.stdout.write("\n")
@@ -88,13 +97,24 @@ async fn run_chat_cmd(m : @argparse.Matches) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
+  let provider = @llm.provider_from_string(
+    @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
+  )
   let cwd = @env.current_dir().unwrap_or(".")
   let session_id = match values_of(m, "session") {
     [id, ..] => Some(id)
     _ => None
   }
   let continue_latest = flag_of(m, "continue")
-  @chat.run_chat(key, base_url, model, cwd, session_id, continue_latest)
+  @chat.run_chat(
+    key,
+    base_url,
+    model,
+    cwd,
+    session_id,
+    continue_latest,
+    provider~,
+  )
 }
 
 ///|

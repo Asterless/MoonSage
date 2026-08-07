@@ -456,3 +456,231 @@ async test "stream_chat_completion strips retry marker after retries are spent" 
     assert_eq(received[0], 3)
   }
 }
+
+///|
+test "parse_ollama_chunk extracts content, tool calls and done" {
+  let text = parse_ollama_chunk(
+    "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}",
+  )
+  assert_eq(
+    text,
+    Some({
+      content: Some("hi"),
+      reasoning_content: None,
+      tool_calls: [],
+      finish_reason: None,
+    }),
+  )
+  let tool = parse_ollama_chunk(
+    "{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"search\",\"arguments\":{\"q\":\"x\"}}}]},\"done\":false}",
+  )
+  assert_eq(
+    tool,
+    Some({
+      content: None,
+      reasoning_content: None,
+      tool_calls: [
+        {
+          index: 0,
+          id: None,
+          name: Some("search"),
+          arguments: Some("{\"q\":\"x\"}"),
+        },
+      ],
+      finish_reason: None,
+    }),
+  )
+  let done = parse_ollama_chunk("{\"done\":true,\"done_reason\":\"stop\"}")
+  assert_eq(
+    done,
+    Some({
+      content: None,
+      reasoning_content: None,
+      tool_calls: [],
+      finish_reason: Some("stop"),
+    }),
+  )
+  assert_eq(parse_ollama_chunk("not json"), None)
+}
+
+///|
+test "parse_anthropic_chunk handles text, thinking, tool use and stop" {
+  let text = parse_anthropic_chunk(
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}",
+  )
+  assert_eq(
+    text,
+    Some({
+      content: Some("Hi"),
+      reasoning_content: None,
+      tool_calls: [],
+      finish_reason: None,
+    }),
+  )
+  let thinking = parse_anthropic_chunk(
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"ponder\"}}",
+  )
+  assert_eq(
+    thinking,
+    Some({
+      content: None,
+      reasoning_content: Some("ponder"),
+      tool_calls: [],
+      finish_reason: None,
+    }),
+  )
+  let start = parse_anthropic_chunk(
+    "{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"search\",\"input\":{}}}",
+  )
+  assert_eq(
+    start,
+    Some({
+      content: None,
+      reasoning_content: None,
+      tool_calls: [
+        {
+          index: 2,
+          id: Some("toolu_1"),
+          name: Some("search"),
+          arguments: Some(""),
+        },
+      ],
+      finish_reason: None,
+    }),
+  )
+  let json_delta = parse_anthropic_chunk(
+    "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"x\\\"}\"}}",
+  )
+  assert_eq(
+    json_delta,
+    Some({
+      content: None,
+      reasoning_content: None,
+      tool_calls: [
+        { index: 2, id: None, name: None, arguments: Some("{\"q\":\"x\"}") },
+      ],
+      finish_reason: None,
+    }),
+  )
+  let stop = parse_anthropic_chunk(
+    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}",
+  )
+  assert_eq(
+    stop,
+    Some({
+      content: None,
+      reasoning_content: None,
+      tool_calls: [],
+      finish_reason: Some("end_turn"),
+    }),
+  )
+  assert_eq(
+    parse_anthropic_chunk(
+      "{\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}",
+    ),
+    None,
+  )
+}
+
+///|
+test "anthropic message conversion splits system and merges tool results" {
+  let messages = [
+    chat_message("system", "You are helpful"),
+    chat_message("user", "hi"),
+    assistant_message_with_tool_calls("", [
+      { id: "c1", name: "search", arguments: "{\"q\":\"x\"}" },
+    ]),
+    tool_result_message("c1", "ok"),
+    chat_message("user", "thanks"),
+  ]
+  assert_eq(anthropic_system(messages), "You are helpful")
+  let converted = anthropic_messages(messages)
+  assert_eq(converted.length(), 4)
+  // user "hi"
+  assert_eq(converted[0].stringify(), "{\"role\":\"user\",\"content\":\"hi\"}")
+  // assistant with text + tool_use blocks
+  assert_true(converted[1].stringify().contains("\"type\":\"tool_use\""))
+  assert_true(converted[1].stringify().contains("\"id\":\"c1\""))
+  assert_true(converted[1].stringify().contains("\"input\":{\"q\":\"x\"}"))
+  // merged tool_result user message
+  assert_eq(
+    converted[2].stringify(),
+    "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"c1\",\"content\":\"ok\"}]}",
+  )
+  // trailing plain user message is preserved after the merged tool results
+  assert_eq(
+    converted[3].stringify(),
+    "{\"role\":\"user\",\"content\":\"thanks\"}",
+  )
+}
+
+///|
+test "anthropic tools convert OpenAI schema to input_schema" {
+  let tools = [
+    Json::object({
+      "type": Json::string("function"),
+      "function": Json::object({
+        "name": Json::string("search"),
+        "description": Json::string("Find things"),
+        "parameters": Json::object({
+          "type": Json::string("object"),
+          "properties": Json::object({}),
+        }),
+      }),
+    }),
+  ]
+  let converted = anthropic_tools(tools)
+  assert_eq(converted.length(), 1)
+  assert_true(converted[0].stringify().contains("\"name\":\"search\""))
+  assert_true(
+    converted[0].stringify().contains("\"input_schema\":{\"type\":\"object\""),
+  )
+}
+
+///|
+async test "stream_chat_completion_provider speaks the Anthropic protocol" {
+  @async.with_task_group() <| group => {
+    let sse = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n" +
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n" +
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n"
+    let port = mock_llm_server(group, [sse])
+    let deltas = StringBuilder::new()
+    let result = stream_chat_completion_provider(
+      Anthropic,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "claude-test",
+      [chat_message("user", "hi")],
+      [],
+      max_tokens=64,
+      on_delta=async fn(text) {
+        deltas.write_string(text)
+        @async.sleep(0)
+      },
+    )
+    assert_eq(result.content, "Hello world")
+    assert_eq(deltas.to_string(), "Hello world")
+    assert_eq(result.finish_reason, Some("end_turn"))
+  }
+}
+
+///|
+async test "stream_chat_completion_provider speaks the Ollama protocol" {
+  @async.with_task_group() <| group => {
+    let sse = "data: {\"message\":{\"role\":\"assistant\",\"content\":\"O\"},\"done\":false}\n" +
+      "data: {\"message\":{\"role\":\"assistant\",\"content\":\"K\"},\"done\":false}\n" +
+      "data: {\"done\":true,\"done_reason\":\"stop\"}\n"
+    let port = mock_llm_server(group, [sse])
+    let result = stream_chat_completion_provider(
+      Ollama,
+      "",
+      "http://127.0.0.1:\{port}",
+      "llama-test",
+      [chat_message("user", "hi")],
+      [],
+      max_tokens=64,
+    )
+    assert_eq(result.content, "OK")
+    assert_eq(result.finish_reason, Some("stop"))
+  }
+}

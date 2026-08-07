@@ -232,6 +232,7 @@ pub async fn run_chat(
   cwd : String,
   session_id : String?,
   continue_latest : Bool,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
     _ => {
@@ -316,7 +317,7 @@ pub async fn run_chat(
             // 上下文过长时先压缩再回答。
             if session.estimated_tokens() > compact_threshold_tokens {
               @stdio.stdout.write("⋯ 正在压缩对话历史…\n")
-              agent.compact(session, api_key, base_url, model) catch {
+              agent.compact(session, api_key, base_url, model, provider~) catch {
                 _ =>
                   @stdio.stdout.write(
                     "! 上下文压缩失败，继续使用原历史\n",
@@ -372,6 +373,7 @@ pub async fn run_chat(
                   _ => ()
                 }
               },
+              provider~,
             ) catch {
               e => {
                 @stdio.stdout.write("✗ \{prettify_error(e.to_string())}\n")
