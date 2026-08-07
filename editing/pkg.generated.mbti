@@ -1,0 +1,34 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/editing"
+
+import {
+  "moonsage/tools",
+}
+
+// Values
+pub fn apply_edits_to_file(String, Array[EditSpec]) -> String raise
+
+pub fn safe_path(String, String) -> String raise
+
+pub fn write_tools(String, WriteConfirm) -> Array[@tools.Tool]
+
+// Errors
+
+// Types and methods
+pub(all) struct EditSpec {
+  file : String
+  old_string : String
+  new_string : String
+  start_line : Int
+  end_line : Int
+}
+
+pub(all) enum WriteConfirm {
+  Prompt
+  Auto
+}
+
+// Type aliases
+
+// Traits
+

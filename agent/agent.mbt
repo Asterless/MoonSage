@@ -27,6 +27,30 @@ pub(all) struct Session {
 }
 
 ///|
+// 会话序列化：消息本身已是 Json。
+pub fn Session::to_json(self : Session) -> Json {
+  Json::array(self.messages)
+}
+
+///|
+pub fn Session::from_json(document : Json) -> Session {
+  match document {
+    Array(items) => { messages: items }
+    _ => { messages: [] }
+  }
+}
+
+///|
+// 会话消息总字符数（粗略的上下文规模估计）。
+pub fn Session::char_count(self : Session) -> Int {
+  let mut total = 0
+  for message in self.messages {
+    total = total + message.stringify().length()
+  }
+  total
+}
+
+///|
 pub fn Agent::new_session(self : Agent) -> Session {
   { messages: [@llm.chat_message("system", self.system_prompt)] }
 }
@@ -48,6 +72,63 @@ pub(all) enum EngineEvent {
 ///|
 pub async fn ignore_event(_ : EngineEvent) -> Unit {
   @async.sleep(0)
+}
+
+///|
+// 上下文压缩：当会话超过阈值字符数时，把较早的历史（保留系统提示和最近
+// keep_recent 条消息）交给模型总结成一条摘要，替换掉旧消息。
+pub async fn Agent::compact(
+  self : Agent,
+  session : Session,
+  api_key : String,
+  base_url : String,
+  model : String,
+  threshold_chars? : Int = 20000,
+  keep_recent? : Int = 3,
+) -> Unit {
+  if session.char_count() <= threshold_chars {
+    return
+  }
+  let keep = if keep_recent < 1 { 1 } else { keep_recent }
+  let cut = session.messages.length() - keep
+  if cut <= 1 {
+    return
+  }
+  let transcript = StringBuilder::new()
+  for i = 1; i < cut; i = i + 1 {
+    transcript.write_string(session.messages[i].stringify())
+    transcript.write_string("\n")
+  }
+  let summary_result = @llm.stream_chat_completion(
+    api_key,
+    base_url,
+    model,
+    [
+      @llm.chat_message(
+        "system", "Summarize the conversation history into a concise summary that preserves key facts, decisions, file changes and the user's requests. Output only the summary.",
+      ),
+      @llm.chat_message("user", transcript.to_string()),
+    ],
+    [],
+    max_tokens=self.max_tokens,
+    on_delta=@llm.ignore_delta,
+  )
+  if summary_result.content == "" {
+    return
+  }
+  let new_messages : Array[Json] = [session.messages[0]]
+  new_messages.push(
+    @llm.chat_message("user", "(会话摘要) " + summary_result.content),
+  )
+  for i = cut; i < session.messages.length(); i = i + 1 {
+    new_messages.push(session.messages[i])
+  }
+  while session.messages.length() > 0 {
+    ignore(session.messages.pop())
+  }
+  for message in new_messages {
+    session.messages.push(message)
+  }
 }
 
 ///|

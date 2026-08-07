@@ -51,3 +51,18 @@ test "cli accepts --version flag" {
   let short = root.parse(argv=["-V"], env=Map([]))
   assert_true(flag_of(short, "version"))
 }
+
+///|
+test "cli parses chat session options" {
+  let root = root_command()
+  let parsed = root.parse(
+    argv=["chat", "--session", "demo", "--continue"],
+    env=Map([]),
+  )
+  guard parsed.subcommand is Some(("chat", m)) else {
+    assert_true(false)
+    return
+  }
+  assert_eq(values_of(m, "session"), ["demo"])
+  assert_true(flag_of(m, "continue"))
+}

@@ -1,10 +1,16 @@
 ///|
+// 会话历史超过该字符数时触发一次上下文压缩。
+let compact_threshold_chars = 20000
+
+///|
 fn chat_system_prompt(cwd : String) -> String {
   (
     #|You are MoonSage, an interactive agent for the MoonBit ecosystem.
     #|You can search Mooncakes packages with search_modules, and inspect the
     #|local project read-only with list_project_files, read_file, run_moon and
-    #|git_diff (never modify files - no write tools are available).
+    #|git_diff. You can also modify the local project with write_file,
+    #|multi_edit and remove; every change asks the user to confirm (y/N)
+    #|before it is applied, and changed source files must pass syntax checks.
     #|The local project root is:
     #|
   ) +
@@ -31,7 +37,9 @@ fn chat_agent(
 ) -> @agent.Agent {
   {
     system_prompt: chat_system_prompt(cwd),
-    tools: @agent.ask_tools(modules) + @local.local_tools(cwd),
+    tools: @agent.ask_tools(modules) +
+    @local.local_tools(cwd) +
+    @editing.write_tools(cwd, @editing.Prompt),
     max_tool_calls: 12,
     max_rounds: 6,
     max_tokens: 1500,
@@ -152,6 +160,8 @@ pub async fn run_chat(
   base_url : String,
   model : String,
   cwd : String,
+  session_id : String?,
+  continue_latest : Bool,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
     e => {
@@ -160,9 +170,42 @@ pub async fn run_chat(
     }
   }
   let agent = chat_agent(modules, cwd)
-  let mut session = agent.new_session()
+  let store_root = session_root(cwd)
+  let fresh_session = fn() -> (String, @agent.Session) {
+    (
+      generated_session_id(@env.now().reinterpret_as_int64()),
+      agent.new_session(),
+    )
+  }
+  let resolved = match session_id {
+    Some(id) =>
+      match load_session(store_root, id) {
+        Some(saved) => (id, saved)
+        None => {
+          println(
+            "warning: session \{id} not found; starting a new conversation",
+          )
+          fresh_session()
+        }
+      }
+    None if continue_latest =>
+      match latest_session_id(store_root) {
+        Some(id) => {
+          let saved = load_session(store_root, id).unwrap_or(
+            agent.new_session(),
+          )
+          (id, saved)
+        }
+        None => fresh_session()
+      }
+    _ => fresh_session()
+  }
+  let mut current_id = resolved.0
+  let mut session = resolved.1
   let reader = LineReader::new()
-  println("MoonSage chat — /help for commands, /exit or /quit to leave")
+  println(
+    "MoonSage chat · session \{current_id} — /help for commands, /exit or /quit to leave",
+  )
   for ;; {
     @stdio.stdout.write("moon> ")
     match reader.next() {
@@ -178,8 +221,10 @@ pub async fn run_chat(
         match slash_command(input) {
           Exit => return
           Clear => {
-            session = agent.new_session()
-            println("conversation cleared")
+            let (new_id, new_session) = fresh_session()
+            current_id = new_id
+            session = new_session
+            println("conversation cleared · session \{current_id}")
             continue
           }
           Help => {
@@ -187,6 +232,12 @@ pub async fn run_chat(
             continue
           }
           Prompt => {
+            // 上下文过长时先压缩再回答。
+            if session.char_count() > compact_threshold_chars {
+              @stdio.stdout.write("[compacting conversation...]\n")
+              agent.compact(session, api_key, base_url, model)
+              save_session(store_root, current_id, session)
+            }
             let printer = @md_ansi.MdStreamPrinter::new()
             let _ = agent.turn(
               session,
@@ -220,6 +271,7 @@ pub async fn run_chat(
             printer.finish()
             @stdio.stdout.write(printer.take_output())
             @stdio.stdout.write("\n")
+            save_session(store_root, current_id, session)
           }
         }
       }

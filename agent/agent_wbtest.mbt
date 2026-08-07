@@ -209,3 +209,40 @@ async test "Agent::turn emits tool and answer events" {
     assert_true(events[2] is AnswerDelta("Found it"))
   }
 }
+
+///|
+async test "Agent::compact summarizes old history" {
+  @async.with_task_group() <| group => {
+    let sse = sse_chunk(content_choice("摘要内容", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [sse])
+    let agent : Agent = {
+      system_prompt: "sys",
+      tools: [],
+      max_tool_calls: 5,
+      max_rounds: 3,
+      max_tokens: 64,
+    }
+    let session = agent.new_session()
+    for i = 0; i < 10; i = i + 1 {
+      session.messages.push(
+        @llm.chat_message("user", "message " + i.to_string()),
+      )
+      session.messages.push(
+        @llm.chat_message("assistant", "answer " + i.to_string()),
+      )
+    }
+    let before = session.messages.length()
+    agent.compact(
+      session,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      threshold_chars=1,
+    )
+    assert_true(session.messages.length() < before)
+    // system + 摘要 + 最近 3 条 = 5 条
+    assert_eq(session.messages.length(), 5)
+    assert_true(session.messages[1].stringify().contains("摘要内容"))
+  }
+}

@@ -1,12 +1,21 @@
 import {
   "moonsage",
   "moonsage/agent",
+  "moonsage/editing",
   "moonsage/local",
   "moonsage/md_ansi",
   "moonsage/mooncakes",
+  "moonbitlang/async/fs",
   "moonbitlang/async/stdio",
+  "moonbitlang/core/env",
   "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
+  "moonbitlang/core/string",
 }
+
+import {
+  "moonbitlang/async",
+} for "wbtest"
 
 options(
   "native-stub": [ "input_utf8.c" ],

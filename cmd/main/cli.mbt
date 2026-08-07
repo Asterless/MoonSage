@@ -14,6 +14,20 @@ fn root_command() -> @argparse.Command {
       @argparse.Command(
         "chat",
         about="Start an interactive streaming conversation; exit with /exit or /quit.",
+        options=[
+          @argparse.OptionArg(
+            "session",
+            long="session",
+            about="Resume or create this durable session id.",
+          ),
+        ],
+        flags=[
+          @argparse.FlagArg(
+            "continue",
+            long="continue",
+            about="Resume the most recent durable session.",
+          ),
+        ],
       ),
       @argparse.Command("search", about="Search Mooncakes modules.", positionals=[
         @argparse.PositionArg(
