@@ -246,6 +246,47 @@ async test "write_file_tool creates and overwrites files" {
 }
 
 ///|
+async test "write_file_tool rejects invalid syntax without writing" {
+  let tmp = @fs.tmpdir(prefix="moonsage-write-syncheck-test-")
+  let bad = try {
+    ignore(
+      write_file_tool(
+        tmp,
+        Auto,
+        "{\"path\":\"bad.mbt\",\"content\":\"fn bad( {\"}",
+      ),
+    )
+    false
+  } catch {
+    e => e.to_string().contains("语法检查")
+  }
+  assert_true(bad)
+  // 语法门在写盘前执行,目标文件不应被创建。
+  let created = try (@fs.kind(tmp + "/bad.mbt") is @fs.FileKind::Regular) catch {
+    _ => false
+  }
+  assert_eq(created, false)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "write_file_tool skips syntax gate for non-source files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-write-plain-test-")
+  let ok = write_file_tool(
+    tmp,
+    Auto,
+    "{\"path\":\"notes.txt\",\"content\":\"any text\\n\"}",
+  )
+  assert_eq(ok, "wrote notes.txt")
+  assert_true(@fs.read_file(tmp + "/notes.txt").text().contains("any text"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
 test "workspace root is shared and mutable" {
   let ws = Workspace::new("C:/work")
   assert_eq(ws.get_root(), "C:/work")
