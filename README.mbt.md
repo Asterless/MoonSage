@@ -40,9 +40,22 @@ moon run cmd/main -- audit moonbit-community/cmark --fix --confirm diff
 # fix mode: apply without confirmation
 moon run cmd/main -- audit moonbit-community/cmark --fix --yes
 
+# fix + push a branch and open a pull request with the changes
+moon run cmd/main -- audit moonbit-community/cmark --fix --pr
+
 # remove temporary workspaces left by previous audits
 moon run cmd/main -- audit --clean
 ```
+
+`--pr` requires the GitHub CLI (`gh`) to be authenticated; after the audit
+finishes fixing and verifying the clone, MoonSage creates a
+`moonsage/fix-<repo>` branch, commits the changes with your GitHub identity,
+pushes them (forking the package repository into your account first when you
+have no write access), and opens a pull request against the original repo with
+the audit report as the PR body. The fix phase uses three write tools:
+`write_file` (whole-file writes), `multi_edit` (line-anchored batch edits with
+a `moonc syncheck` gate that rejects edits breaking syntax), and `remove`
+(delete files); all writes are confined to the cloned workspace.
 
 ## Remote audit
 

@@ -27,6 +27,14 @@ pub fn string_field(description : String) -> Json {
 }
 
 ///|
+pub fn array_field(description : String) -> Json {
+  Json::object({
+    "type": Json::string("array"),
+    "description": Json::string(description),
+  })
+}
+
+///|
 pub fn object_schema(
   properties : Map[String, Json],
   required : Array[String],

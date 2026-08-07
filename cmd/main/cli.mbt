@@ -56,6 +56,11 @@ fn root_command() -> @argparse.Command {
             about="Apply fixes with write_file.",
           ),
           @argparse.FlagArg(
+            "pr",
+            long="pr",
+            about="After fixing, push a branch and open a pull request.",
+          ),
+          @argparse.FlagArg(
             "clean",
             long="clean",
             about="Clean leftover audit workspaces.",
@@ -110,6 +115,9 @@ fn audit_args(m : @argparse.Matches) -> Array[String] {
   }
   if flag_of(m, "clean") {
     out.push("--clean")
+  }
+  if flag_of(m, "pr") {
+    out.push("--pr")
   }
   match m.values.get("confirm") {
     Some([value, ..]) => {

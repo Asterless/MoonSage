@@ -90,6 +90,7 @@ async fn fetch_repo_source(
   owner : String,
   repo : String,
   dest_dir : String,
+  full? : Bool = false,
 ) -> String {
   let url = "https://github.com/\{owner}/\{repo}.git"
   let target = dest_dir + "/repo"
@@ -101,11 +102,16 @@ async fn fetch_repo_source(
   let mut last_err = "git clone failed"
   for branch in ["main", "master"] {
     for retry = 0; retry < 3; retry = retry + 1 {
-      let (exit, _, err) = @process.collect_output(
-        "git",
+      let clone_args = if full {
+        ["clone", url, target]
+      } else {
         [
           "clone", "--depth", "1", "--single-branch", "--branch", branch, url, target,
-        ],
+        ]
+      }
+      let (exit, _, err) = @process.collect_output(
+        "git",
+        clone_args,
         no_console_window=true,
       )
       if exit == 0 {

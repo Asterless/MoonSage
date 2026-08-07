@@ -2,11 +2,28 @@
 package "moonsage/audit"
 
 // Values
+pub fn apply_edits_to_file(String, Array[EditSpec]) -> String raise
+
+pub fn build_pr_body(String, String, String) -> String
+
+pub fn pr_branch_name(String) -> String
+
+pub fn pr_commit_email(String, Int) -> String
+
+pub fn pr_title(String, String) -> String
+
 pub async fn run_audit(ArrayView[String]) -> Unit
 
 // Errors
 
 // Types and methods
+pub(all) struct EditSpec {
+  file : String
+  old_string : String
+  new_string : String
+  start_line : Int
+  end_line : Int
+}
 
 // Type aliases
 

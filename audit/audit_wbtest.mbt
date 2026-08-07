@@ -78,8 +78,10 @@ test "audit tools include write_file only in fix mode" {
     confirm: ConfirmDiff,
   }
   let fix = audit_tools(fix_ctx)
-  assert_eq(fix.length(), 5)
+  assert_eq(fix.length(), 7)
   assert_true(fix.map(fn(t) { t.schema.name }).contains("write_file"))
+  assert_true(fix.map(fn(t) { t.schema.name }).contains("multi_edit"))
+  assert_true(fix.map(fn(t) { t.schema.name }).contains("remove"))
   // git_diff tool is always present
   let always = fix.filter(fn(t) { t.schema.name == "git_diff" })
   assert_eq(always.length(), 1)

@@ -8,6 +8,7 @@ priv struct AuditOptions {
   mut max_calls : Int
   max_rounds : Int
   mut clean : Bool
+  mut pr : Bool
 }
 
 ///|
@@ -20,6 +21,7 @@ fn audit_default_options() -> AuditOptions {
     max_calls: 30,
     max_rounds: 8,
     clean: false,
+    pr: false,
   }
 }
 
@@ -30,6 +32,7 @@ fn parse_audit_options(args : ArrayView[String]) -> AuditOptions raise {
   while i < args.length() {
     match args[i] {
       "--clean" => opts.clean = true
+      "--pr" => opts.pr = true
       "--fix" => opts.fix = true
       "--confirm" => {
         guard i + 1 < args.length() else { fail("--confirm requires a mode") }
@@ -61,6 +64,9 @@ fn parse_audit_options(args : ArrayView[String]) -> AuditOptions raise {
       }
     }
     i += 1
+  }
+  if opts.pr {
+    opts.fix = true
   }
   guard opts.name != "" || opts.clean else {
     fail(
@@ -172,6 +178,17 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     println("error: --clean cannot be combined with --workspace")
     return
   }
+  if opts.pr {
+    let (gh_exit, _, _) = @process.collect_output(
+      "gh",
+      ["api", "user"],
+      no_console_window=true,
+    )
+    guard gh_exit == 0 else {
+      println("error: --pr requires GitHub CLI (gh) authenticated")
+      return
+    }
+  }
   let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
   guard key != "" else {
     println("error: set MOONSAGE_API_KEY before using audit")
@@ -224,7 +241,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     }
   }
   @stdio.stdout.write("Downloading \{owner}/\{repo}...\n")
-  let project_dir = fetch_repo_source(owner, repo, workspace) catch {
+  let project_dir = fetch_repo_source(owner, repo, workspace, full=opts.pr) catch {
     e => {
       if opts.clean {
         remove_workspace_dir(workspace)
@@ -241,6 +258,11 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       ConfirmYes => "yes"
     }
     @stdio.stdout.write("Fix mode enabled (confirm: \{mode})\n")
+  }
+  if opts.pr {
+    @stdio.stdout.write(
+      "PR mode enabled: changes will be pushed as a pull request\n",
+    )
   }
   let ctx : AuditContext = { project_dir, fix: opts.fix, confirm: opts.confirm }
   let answer = run_audit_agent(
@@ -268,6 +290,24 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
   if opts.fix {
     @stdio.stdout.write("\n=== changes ===\n")
     @stdio.stdout.write(@local.git_diff(project_dir, None))
+  }
+  if opts.pr {
+    let pr_url = publish_changes(
+      project_dir,
+      owner,
+      repo,
+      opts.confirm,
+      answer.text,
+    ) catch {
+      e => {
+        println("error: publish failed: \{e.to_string()}")
+        None
+      }
+    }
+    match pr_url {
+      Some(url) => println("\nPR created: \{url}")
+      None => ()
+    }
   }
   @stdio.stdout.write("\n")
   for event in answer.trace {
