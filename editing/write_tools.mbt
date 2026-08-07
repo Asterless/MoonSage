@@ -60,11 +60,15 @@ async fn syncheck_content(content : String, rel : String) -> String {
 
 ///|
 // 确认一次写入；Prompt 模式在 stdin 询问，拒绝返回 false。
-async fn confirm_write(confirm : WriteConfirm, rel : String) -> Bool {
+async fn confirm_write(
+  confirm : WriteConfirm,
+  verb : String,
+  target : String,
+) -> Bool {
   if confirm is Auto {
     return true
   }
-  @stdio.stdout.write("[write] \{rel}? [y/N] ")
+  @stdio.stdout.write("? 确认\{verb}\{target}？[y/N] ")
   let answer = @stdio.stdin.read_until("\n") catch { _ => None }
   match answer {
     Some(s) => s.trim().to_lower() == "y" || s.trim().to_lower() == "yes"
@@ -82,7 +86,9 @@ async fn write_file_tool(
   let rel = json_string_arg(document, "path")
   let content = json_string_arg(document, "content")
   guard rel != "" else { fail("path is required") }
-  guard confirm_write(confirm, rel) else { return "change declined by user" }
+  guard confirm_write(confirm, "写入 ", rel) else {
+    return "change declined by user"
+  }
   let path = safe_path(root, rel)
   @fs.write_file(path, content, create_mode=@fs.CreateMode::CreateOrTruncate)
   "wrote \{rel}"
@@ -136,7 +142,7 @@ async fn multi_edit_tool(
       ignore(syncheck_content(new_content, file))
     }
   }
-  guard confirm_write(confirm, "batch edit") else {
+  guard confirm_write(confirm, "", "批量编辑") else {
     return "change declined by user"
   }
   let mut changed = 0
@@ -162,7 +168,9 @@ async fn remove_tool(
   let document = @json.parse(arguments)
   let rel = json_string_arg(document, "path")
   guard rel != "" else { fail("path is required") }
-  guard confirm_write(confirm, rel) else { return "change declined by user" }
+  guard confirm_write(confirm, "删除 ", rel) else {
+    return "change declined by user"
+  }
   let path = safe_path(root, rel)
   guard @fs.kind(path) is @fs.FileKind::Regular else {
     fail("remove only supports regular files: \{rel}")

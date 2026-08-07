@@ -68,9 +68,7 @@ async fn restore_ws_root(
   if @editing.dir_exists(saved_root) {
     ws.set_root(saved_root)
   } else {
-    println(
-      "warning: workspace root \{saved_root} no longer exists; resetting to \{fallback}",
-    )
+    println("! 工作区 \{saved_root} 已不存在，回到 \{fallback}")
   }
 }
 
@@ -100,9 +98,47 @@ fn help_text() -> String {
     #|  /clear         clear the conversation history
     #|  /exit, /quit   leave the chat (exit/quit also work)
     #|
-    #|The agent can search Mooncakes packages and inspect the local project
-    #|read-only. Type your message and press Enter.
+    #|The agent can search Mooncakes packages, inspect and modify the local
+    #|project, clone a GitHub repository (clone_repo) and open a pull request
+    #|(create_pr). Type your message and press Enter.
   )
+}
+
+///|
+// 工具事件的中文短标签，用于一行式状态提示。
+fn tool_label(name : String) -> String {
+  match name {
+    "search_modules" => "搜索模块"
+    "get_module_manifest" => "获取模块信息"
+    "get_module_index" => "获取模块索引"
+    "get_package_docs" => "获取包文档"
+    "list_project_files" => "列出文件"
+    "read_file" => "读取文件"
+    "run_moon" => "运行 moon"
+    "git_diff" => "查看差异"
+    "write_file" => "写入文件"
+    "multi_edit" => "批量编辑"
+    "remove" => "删除文件"
+    "clone_repo" => "克隆仓库"
+    "create_pr" => "创建 PR"
+    _ => name
+  }
+}
+
+///|
+// 把 Failure(...)@moonsage FAILED: 前缀剥掉，只留人话错误信息。
+fn prettify_error(message : String) -> String {
+  let parts = message.split("FAILED: ").to_array()
+  if parts.length() > 1 {
+    let raw = parts[parts.length() - 1].to_owned()
+    if raw.has_suffix(")") {
+      raw[:raw.length() - 1].to_owned()
+    } else {
+      raw
+    }
+  } else {
+    message
+  }
 }
 
 ///|
@@ -192,8 +228,8 @@ pub async fn run_chat(
   continue_latest : Bool,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
-    e => {
-      println("warning: failed to fetch Mooncakes modules: \{e.to_string()}")
+    _ => {
+      println("! 无法获取 Mooncakes 模块索引（继续本地模式）")
       []
     }
   }
@@ -214,9 +250,7 @@ pub async fn run_chat(
           (id, saved.session)
         }
         None => {
-          println(
-            "warning: session \{id} not found; starting a new conversation",
-          )
+          println("! 会话 \{id} 不存在，已开启新对话")
           fresh_session()
         }
       }
@@ -238,7 +272,7 @@ pub async fn run_chat(
   let mut session = resolved.1
   let reader = LineReader::new()
   println(
-    "MoonSage chat · session \{current_id} — /help for commands, /exit or /quit to leave",
+    "MoonSage chat · 会话 \{current_id} — /help 查看命令，/exit 或 /quit 退出",
   )
   for ;; {
     @stdio.stdout.write("moon> ")
@@ -259,7 +293,7 @@ pub async fn run_chat(
             current_id = new_id
             session = new_session
             ws.set_root(cwd)
-            println("conversation cleared · session \{current_id}")
+            println("已清空对话 · 会话 \{current_id}")
             continue
           }
           Help => {
@@ -269,16 +303,17 @@ pub async fn run_chat(
           Prompt => {
             // 上下文过长时先压缩再回答。
             if session.char_count() > compact_threshold_chars {
-              @stdio.stdout.write("[compacting conversation...]\n")
+              @stdio.stdout.write("⋯ 正在压缩对话历史…\n")
               agent.compact(session, api_key, base_url, model) catch {
-                e =>
+                _ =>
                   @stdio.stdout.write(
-                    "\n[compaction failed: \{e.to_string()}]\n",
+                    "! 上下文压缩失败，继续使用原历史\n",
                   )
               }
               save_session(store_root, current_id, session, ws.get_root())
             }
             let printer = @md_ansi.MdStreamPrinter::new()
+            let mut answer_started = false
             let _ = agent.turn(
               session,
               api_key,
@@ -286,6 +321,10 @@ pub async fn run_chat(
               model,
               input,
               on_delta=async fn(text) {
+                if !answer_started {
+                  answer_started = true
+                  @stdio.stdout.write("\n")
+                }
                 printer.feed(text)
                 printer.flush_partial()
                 let out = printer.take_output()
@@ -296,15 +335,14 @@ pub async fn run_chat(
               on_event=async fn(event) {
                 match event {
                   @agent.ToolCall(name) =>
-                    @stdio.stdout.write("\n[tool] \{name} ...\n")
-                  @agent.ToolResult(name) =>
-                    @stdio.stdout.write("[observation] \{name} completed\n")
+                    @stdio.stdout.write("\n▸ \{tool_label(name)} …\n")
+                  @agent.ToolResult(_) => ()
                   _ => ()
                 }
               },
             ) catch {
               e => {
-                @stdio.stdout.write("\nerror: \{e.to_string()}\n")
+                @stdio.stdout.write("✗ \{prettify_error(e.to_string())}\n")
                 continue
               }
             }

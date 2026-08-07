@@ -11,6 +11,26 @@ test "slash_command classifies input" {
 }
 
 ///|
+test "tool_label maps known tools to Chinese labels" {
+  assert_eq(tool_label("read_file"), "读取文件")
+  assert_eq(tool_label("multi_edit"), "批量编辑")
+  assert_eq(tool_label("clone_repo"), "克隆仓库")
+  assert_eq(tool_label("create_pr"), "创建 PR")
+  assert_eq(tool_label("unknown_tool"), "unknown_tool")
+}
+
+///|
+test "prettify_error strips the Failure wrapper" {
+  assert_eq(
+    prettify_error(
+      "Failure(editing/publish.mbt:155:5-155:54@moonsage FAILED: no changes to publish (git diff is empty))",
+    ),
+    "no changes to publish (git diff is empty)",
+  )
+  assert_eq(prettify_error("plain message"), "plain message")
+}
+
+///|
 test "chat agent combines ask and local tools" {
   let agent = chat_agent([], "C:/work", @editing.Workspace::new("C:/work"))
   assert_eq(agent.tools.length(), 13)

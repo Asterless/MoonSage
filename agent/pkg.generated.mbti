@@ -27,7 +27,7 @@ pub(all) struct Agent {
 pub async fn Agent::compact(Self, Session, String, String, String, threshold_chars? : Int, keep_recent? : Int) -> Unit
 pub fn Agent::new_session(Self) -> Session
 pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
-pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
+pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, on_thinking? : async (String) -> Unit) -> AgentAnswer
 
 pub struct AgentAnswer {
   text : String

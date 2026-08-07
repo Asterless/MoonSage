@@ -183,6 +183,7 @@ pub async fn Agent::turn(
   question : String,
   on_delta? : async (String) -> Unit = @llm.ignore_delta,
   on_event? : async (EngineEvent) -> Unit = ignore_event,
+  on_thinking? : async (String) -> Unit = @llm.ignore_delta,
 ) -> AgentAnswer {
   session.messages.push(@llm.chat_message("user", question))
   let tools_json = self.tools.map(fn(t) { t.schema.to_json() })
@@ -195,6 +196,8 @@ pub async fn Agent::turn(
       budget_exhausted = true
       break
     }
+    // 主循环请求不直接流式输出：工具回合里的内容属于思考叙述，
+    // 走 on_thinking（前端默认忽略）；最终答案在回合结束后用 on_delta 输出。
     let result = @llm.stream_chat_completion(
       api_key,
       base_url,
@@ -202,13 +205,14 @@ pub async fn Agent::turn(
       session.messages,
       tools_json,
       max_tokens=self.max_tokens,
-      on_delta~,
+      on_delta=@llm.ignore_delta,
     )
     if result.finish_reason is Some("length") {
       trace.push("[observation] Model hit max_tokens; answer may be truncated")
     }
     if result.tool_calls.is_empty() {
       guard result.content != "" else { fail("model returned an empty answer") }
+      on_delta(result.content)
       // A truncated final answer is continued once: feed it back as context
       // and ask the model to complete it with no tools available.
       if result.finish_reason is Some("length") {
@@ -245,6 +249,7 @@ pub async fn Agent::turn(
       trace.push("[final] Model returned an answer")
       return { text: result.content, trace }
     }
+    on_thinking(result.content)
     let trimmed = trim_intermediate_content(result.content)
     if trimmed != "" {
       on_event(ThinkingDelta(trimmed))

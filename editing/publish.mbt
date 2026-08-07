@@ -157,21 +157,21 @@ pub async fn publish_changes(
     pr_title(owner, repo)
   }
   let body = build_pr_body(report, owner, repo)
-  @stdio.stdout.write("\n=== publish preview ===\n")
-  @stdio.stdout.write("Title: \{title}\n")
+  @stdio.stdout.write("\n── PR 预览 ──\n")
+  @stdio.stdout.write("标题: \{title}\n")
   @stdio.stdout.write("\{diff_stat}\n")
   if status_short != "" {
     @stdio.stdout.write("\{status_short}\n")
   }
   if !(confirm is Auto) {
-    @stdio.stdout.write("Push branch and open a pull request? [y/N] ")
+    @stdio.stdout.write("? 推送分支并创建 PR？[y/N] ")
     let answer = @stdio.stdin.read_until("\n") catch { _ => None }
     let ok = match answer {
       Some(s) => s.trim().to_lower() == "y" || s.trim().to_lower() == "yes"
       None => false
     }
     if !ok {
-      println("PR cancelled; workspace kept for inspection.")
+      println("已取消，工作区保留供检查。")
       return None
     }
   }
