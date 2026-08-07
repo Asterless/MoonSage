@@ -182,7 +182,7 @@ async test "multi_edit_tool applies edits atomically with syntax gate" {
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
   let ok = multi_edit_tool(
-    tmp,
+    Workspace::new(tmp),
     Auto,
     "{\"edits\":[{\"file\":\"a.mbt\",\"old_string\":\"pub fn old() {}\",\"new_string\":\"pub fn new() {}\",\"start_line\":1}]}",
   )
@@ -192,7 +192,7 @@ async test "multi_edit_tool applies edits atomically with syntax gate" {
   let bad = try {
     ignore(
       multi_edit_tool(
-        tmp,
+        Workspace::new(tmp),
         Auto,
         "{\"edits\":[{\"file\":\"a.mbt\",\"old_string\":\"pub fn new() {}\",\"new_string\":\"fn bad( {\",\"start_line\":1}]}",
       ),
@@ -216,10 +216,10 @@ async test "remove_tool deletes files within workspace only" {
     "x",
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
-  let ok = remove_tool(tmp, Auto, "{\"path\":\"gone.mbt\"}")
+  let ok = remove_tool(Workspace::new(tmp), Auto, "{\"path\":\"gone.mbt\"}")
   assert_eq(ok, "removed gone.mbt")
   let raised = try {
-    ignore(remove_tool(tmp, Auto, "{\"path\":\"../outside\"}"))
+    ignore(remove_tool(Workspace::new(tmp), Auto, "{\"path\":\"../outside\"}"))
     false
   } catch {
     _ => true
@@ -234,7 +234,7 @@ async test "remove_tool deletes files within workspace only" {
 async test "write_file_tool creates and overwrites files" {
   let tmp = @fs.tmpdir(prefix="moonsage-write-test-")
   let ok = write_file_tool(
-    tmp,
+    Workspace::new(tmp),
     Auto,
     "{\"path\":\"new.mbt\",\"content\":\"pub fn x() {}\"}",
   )
@@ -251,7 +251,7 @@ async test "write_file_tool rejects invalid syntax without writing" {
   let bad = try {
     ignore(
       write_file_tool(
-        tmp,
+        Workspace::new(tmp),
         Auto,
         "{\"path\":\"bad.mbt\",\"content\":\"fn bad( {\"}",
       ),
@@ -275,12 +275,106 @@ async test "write_file_tool rejects invalid syntax without writing" {
 async test "write_file_tool skips syntax gate for non-source files" {
   let tmp = @fs.tmpdir(prefix="moonsage-write-plain-test-")
   let ok = write_file_tool(
-    tmp,
+    Workspace::new(tmp),
     Auto,
     "{\"path\":\"notes.txt\",\"content\":\"any text\\n\"}",
   )
   assert_eq(ok, "wrote notes.txt")
   assert_true(@fs.read_file(tmp + "/notes.txt").text().contains("any text"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo restores overwritten files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-overwrite-test-")
+  let ws = Workspace::new(tmp)
+  let _ = @fs.write_file(
+    tmp + "/notes.txt",
+    "old text\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let ok = write_file_tool(
+    ws,
+    Auto,
+    "{\"path\":\"notes.txt\",\"content\":\"new text\"}",
+  )
+  assert_eq(ok, "wrote notes.txt")
+  let msg = ws.undo()
+  assert_eq(msg, "undid edit to notes.txt")
+  assert_eq(@fs.read_file(tmp + "/notes.txt").text(), "old text\n")
+  let again = ws.undo()
+  assert_eq(again, "nothing to undo")
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo removes created files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-create-test-")
+  let ws = Workspace::new(tmp)
+  let ok = write_file_tool(
+    ws,
+    Auto,
+    "{\"path\":\"fresh.txt\",\"content\":\"hello\"}",
+  )
+  assert_eq(ok, "wrote fresh.txt")
+  let msg = ws.undo()
+  assert_eq(msg, "undid creation of fresh.txt")
+  let exists = try (@fs.kind(tmp + "/fresh.txt") is @fs.FileKind::Regular) catch {
+    _ => false
+  }
+  assert_eq(exists, false)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo restores removed files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-remove-test-")
+  let ws = Workspace::new(tmp)
+  let _ = @fs.write_file(
+    tmp + "/del.txt",
+    "keep me\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let ok = remove_tool(ws, Auto, "{\"path\":\"del.txt\"}")
+  assert_eq(ok, "removed del.txt")
+  let msg = ws.undo()
+  assert_eq(msg, "undid edit to del.txt")
+  assert_eq(@fs.read_file(tmp + "/del.txt").text(), "keep me\n")
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo restores multi_edit batches per file" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-multi-test-")
+  let ws = Workspace::new(tmp)
+  let _ = @fs.write_file(
+    tmp + "/a.txt",
+    "one\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/b.txt",
+    "two\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let ok = multi_edit_tool(
+    ws,
+    Auto,
+    "{\"edits\":[{\"file\":\"a.txt\",\"old_string\":\"one\",\"new_string\":\"ONE\",\"start_line\":1},{\"file\":\"b.txt\",\"old_string\":\"two\",\"new_string\":\"TWO\",\"start_line\":1}]}",
+  )
+  assert_true(ok.contains("applied"))
+  assert_eq(ws.undo(), "undid edit to b.txt")
+  assert_eq(@fs.read_file(tmp + "/b.txt").text(), "two\n")
+  assert_eq(ws.undo(), "undid edit to a.txt")
+  assert_eq(@fs.read_file(tmp + "/a.txt").text(), "one\n")
   @fs.rmdir(tmp, recursive=true) catch {
     _ => ()
   }
