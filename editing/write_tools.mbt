@@ -40,9 +40,7 @@ async fn syncheck_content(content : String, rel : String) -> String {
       no_console_window=true,
     )
     guard exit == 0 else {
-      fail(
-        "multi_edit: \{rel} 修改后无法通过语法检查:\n\{err.text()}",
-      )
+      fail("\{rel} 修改后无法通过语法检查:\n\{err.text()}")
     }
   } catch {
     e => {
@@ -86,10 +84,14 @@ async fn write_file_tool(
   let rel = json_string_arg(document, "path")
   let content = json_string_arg(document, "content")
   guard rel != "" else { fail("path is required") }
+  let path = safe_path(root, rel)
+  // 与 multi_edit 一致:源码文件先过语法门再询问确认,避免确认一个注定失败的写入。
+  if is_syncheck_source(rel) {
+    ignore(syncheck_content(content, rel))
+  }
   guard confirm_write(confirm, "写入 ", rel) else {
     return "change declined by user"
   }
-  let path = safe_path(root, rel)
   @fs.write_file(path, content, create_mode=@fs.CreateMode::CreateOrTruncate)
   "wrote \{rel}"
 }
