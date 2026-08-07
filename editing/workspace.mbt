@@ -26,3 +26,14 @@ pub fn Workspace::set_root(self : Workspace, path : String) -> Unit {
 pub fn Workspace::clone_base(self : Workspace) -> String {
   self.base
 }
+
+///|
+// 目录是否存在（@fs.kind 对缺失路径会抛错，这里统一转为 Bool）。
+pub async fn dir_exists(path : String) -> Bool {
+  try {
+    let kind = @fs.kind(path)
+    kind is @fs.FileKind::Directory
+  } catch {
+    _ => false
+  }
+}

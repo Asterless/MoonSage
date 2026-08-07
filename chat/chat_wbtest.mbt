@@ -12,7 +12,7 @@ test "slash_command classifies input" {
 
 ///|
 test "chat agent combines ask and local tools" {
-  let agent = chat_agent([], "C:/work")
+  let agent = chat_agent([], "C:/work", @editing.Workspace::new("C:/work"))
   assert_eq(agent.tools.length(), 13)
   let names = agent.tools.map(fn(t) { t.schema.name })
   assert_true(names.contains("search_modules"))
@@ -53,11 +53,16 @@ test "utf8_or_gbk converts GBK bytes on the system codepage" {
 ///|
 async test "session store round-trips and picks latest" {
   let root = @fs.tmpdir(prefix="moonsage-session-test-")
-  let agent = chat_agent([], "C:/work")
+  let agent = chat_agent([], "C:/work", @editing.Workspace::new("C:/work"))
   let s1 = agent.new_session()
   let s2 = agent.new_session()
-  save_session(root, "chat-100", s1)
-  save_session(root, "chat-200", s2)
+  // 旧格式会话没有 ws_root 字段，应回退为空字符串。
+  @fs.write_file(
+    root + "/chat-100.json",
+    Json::object({ "id": Json::string("chat-100"), "messages": s1.to_json() }).stringify(),
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  save_session(root, "chat-200", s2, "C:/work/.moonsage/workspaces/repo")
   let loaded = load_session(root, "chat-200")
   guard loaded is Some(saved) else {
     assert_true(false)
@@ -67,6 +72,24 @@ async test "session store round-trips and picks latest" {
     return
   }
   assert_eq(saved.messages.length(), s2.messages.length())
+  let with_root = load_session_with_root(root, "chat-200")
+  guard with_root is Some(saved_full) else {
+    assert_true(false)
+    @fs.rmdir(root, recursive=true) catch {
+      _ => ()
+    }
+    return
+  }
+  assert_eq(saved_full.ws_root, "C:/work/.moonsage/workspaces/repo")
+  let old_style = load_session_with_root(root, "chat-100")
+  guard old_style is Some(old_full) else {
+    assert_true(false)
+    @fs.rmdir(root, recursive=true) catch {
+      _ => ()
+    }
+    return
+  }
+  assert_eq(old_full.ws_root, "")
   assert_eq(latest_session_id(root), Some("chat-200"))
   assert_true(load_session(root, "chat-missing") is None)
   @fs.rmdir(root, recursive=true) catch {

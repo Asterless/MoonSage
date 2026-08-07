@@ -10,6 +10,8 @@ pub fn apply_edits_to_file(String, Array[EditSpec]) -> String raise
 
 pub fn build_pr_body(String, String, String) -> String
 
+pub async fn dir_exists(String) -> Bool
+
 pub fn parse_github_url(String) -> (String, String)?
 
 pub fn pr_branch_name(String) -> String

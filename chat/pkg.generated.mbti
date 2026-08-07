@@ -12,15 +12,21 @@ pub async fn latest_session_id(String) -> String?
 
 pub async fn load_session(String, String) -> @agent.Session?
 
+pub async fn load_session_with_root(String, String) -> SavedSession?
+
 pub async fn run_chat(String, String, String, String, String?, Bool) -> Unit
 
-pub async fn save_session(String, String, @agent.Session) -> Unit
+pub async fn save_session(String, String, @agent.Session, String) -> Unit
 
 pub fn session_root(String) -> String
 
 // Errors
 
 // Types and methods
+pub struct SavedSession {
+  session : @agent.Session
+  ws_root : String
+}
 
 // Type aliases
 

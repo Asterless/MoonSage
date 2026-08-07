@@ -328,11 +328,68 @@ async test "clone_repo_tool clones and switches workspace root" {
     let root = ws.get_root()
     assert_true(root.has_prefix(ws_base))
     assert_true(@fs.read_file(root + "/a.mbt").text().contains("pub fn a()"))
+    // 再次调用应复用已有克隆而不是报“已存在”。
+    let again = clone_repo_tool(ws, "{\"url\":\"\{url}\"}")
+    assert_true(again.contains("reused existing clone"))
+    assert_eq(ws.get_root(), root)
   }
   @fs.rmdir(src, recursive=true) catch {
     _ => ()
   }
   @fs.rmdir(ws_base, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "git_has_changes detects tracked, untracked and clean states" {
+  let repo = @fs.tmpdir(prefix="moonsage-has-changes-")
+  let _ = @fs.write_file(
+    repo + "/a.txt",
+    "one\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "-A"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 {
+    assert_true(!git_has_changes(repo))
+    // 已跟踪文件修改。
+    let _ = @fs.write_file(
+      repo + "/a.txt",
+      "one\ntwo\n",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    assert_true(git_has_changes(repo))
+    // 恢复干净，再新增未跟踪文件。
+    let _ = @fs.write_file(
+      repo + "/a.txt",
+      "one\n",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    let _ = @fs.write_file(
+      repo + "/b.txt",
+      "new\n",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    assert_true(git_has_changes(repo))
+  }
+  @fs.rmdir(repo, recursive=true) catch {
     _ => ()
   }
 }

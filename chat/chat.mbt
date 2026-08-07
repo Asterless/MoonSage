@@ -19,6 +19,11 @@ fn chat_system_prompt(cwd : String) -> String {
   cwd +
   (
     #|
+    #|All file tools (list_project_files, read_file, write_file, multi_edit,
+    #|remove, git_diff, run_moon) operate on the current workspace root and
+    #|use paths relative to it. clone_repo switches the workspace root to the
+    #|clone; after that use plain relative paths like README.md, never paths
+    #|starting with .moonsage/workspaces/.
     #|
     #|Rules:
     #|- Search before recommending packages; cite https://mooncakes.io/docs/<owner>/<module>.
@@ -36,8 +41,8 @@ fn chat_system_prompt(cwd : String) -> String {
 fn chat_agent(
   modules : Array[@moonsage.ModuleSummary],
   cwd : String,
+  ws : @editing.Workspace,
 ) -> @agent.Agent {
-  let ws = @editing.Workspace::new(cwd)
   {
     system_prompt: chat_system_prompt(cwd),
     tools: @agent.ask_tools(modules) +
@@ -47,6 +52,25 @@ fn chat_agent(
     max_tool_calls: 30,
     max_rounds: 10,
     max_tokens: 6000,
+  }
+}
+
+///|
+// 恢复会话时还原工作区根目录；克隆目录已不存在则回退到项目根。
+async fn restore_ws_root(
+  ws : @editing.Workspace,
+  saved_root : String,
+  fallback : String,
+) -> Unit {
+  if saved_root == "" {
+    return
+  }
+  if @editing.dir_exists(saved_root) {
+    ws.set_root(saved_root)
+  } else {
+    println(
+      "warning: workspace root \{saved_root} no longer exists; resetting to \{fallback}",
+    )
   }
 }
 
@@ -173,7 +197,8 @@ pub async fn run_chat(
       []
     }
   }
-  let agent = chat_agent(modules, cwd)
+  let ws = @editing.Workspace::new(cwd)
+  let agent = chat_agent(modules, cwd, ws)
   let store_root = session_root(cwd)
   let fresh_session = fn() -> (String, @agent.Session) {
     (
@@ -183,8 +208,11 @@ pub async fn run_chat(
   }
   let resolved = match session_id {
     Some(id) =>
-      match load_session(store_root, id) {
-        Some(saved) => (id, saved)
+      match load_session_with_root(store_root, id) {
+        Some(saved) => {
+          restore_ws_root(ws, saved.ws_root, cwd)
+          (id, saved.session)
+        }
         None => {
           println(
             "warning: session \{id} not found; starting a new conversation",
@@ -194,12 +222,14 @@ pub async fn run_chat(
       }
     None if continue_latest =>
       match latest_session_id(store_root) {
-        Some(id) => {
-          let saved = load_session(store_root, id).unwrap_or(
-            agent.new_session(),
-          )
-          (id, saved)
-        }
+        Some(id) =>
+          match load_session_with_root(store_root, id) {
+            Some(saved) => {
+              restore_ws_root(ws, saved.ws_root, cwd)
+              (id, saved.session)
+            }
+            None => fresh_session()
+          }
         None => fresh_session()
       }
     _ => fresh_session()
@@ -228,6 +258,7 @@ pub async fn run_chat(
             let (new_id, new_session) = fresh_session()
             current_id = new_id
             session = new_session
+            ws.set_root(cwd)
             println("conversation cleared · session \{current_id}")
             continue
           }
@@ -245,7 +276,7 @@ pub async fn run_chat(
                     "\n[compaction failed: \{e.to_string()}]\n",
                   )
               }
-              save_session(store_root, current_id, session)
+              save_session(store_root, current_id, session, ws.get_root())
             }
             let printer = @md_ansi.MdStreamPrinter::new()
             let _ = agent.turn(
@@ -280,7 +311,7 @@ pub async fn run_chat(
             printer.finish()
             @stdio.stdout.write(printer.take_output())
             @stdio.stdout.write("\n")
-            save_session(store_root, current_id, session)
+            save_session(store_root, current_id, session, ws.get_root())
           }
         }
       }

@@ -16,17 +16,19 @@ fn session_path(root : String, id : String) -> String {
 }
 
 ///|
-// 保存会话到磁盘（覆盖同 id 文件）。
+// 保存会话到磁盘（覆盖同 id 文件），并记录当时的工作区根目录。
 pub async fn save_session(
   root : String,
   id : String,
   session : @agent.Session,
+  ws_root : String,
 ) -> Unit {
   @fs.mkdir(root, recursive=true) catch {
     _ => ()
   }
   let payload = Json::object({
     "id": Json::string(id),
+    "ws_root": Json::string(ws_root),
     "messages": session.to_json(),
   }).stringify()
   @fs.write_file(
@@ -41,13 +43,36 @@ pub async fn save_session(
 ///|
 // 读取指定会话；不存在或损坏时返回 None。
 pub async fn load_session(root : String, id : String) -> @agent.Session? {
+  match load_session_with_root(root, id) {
+    Some(saved) => Some(saved.session)
+    None => None
+  }
+}
+
+///|
+// 会话及其当时的工作区根目录。
+pub struct SavedSession {
+  session : @agent.Session
+  ws_root : String
+}
+
+///|
+// 读取会话及其当时的工作区根目录（旧会话没有该字段则返回空字符串）。
+pub async fn load_session_with_root(
+  root : String,
+  id : String,
+) -> SavedSession? {
   let text = @fs.read_file(session_path(root, id)).text() catch {
     _ => return None
   }
   let document = @json.parse(text) catch { _ => return None }
   guard document is Object(fields) else { return None }
   guard fields.get("messages") is Some(msgs) else { return None }
-  Some(@agent.Session::from_json(msgs))
+  let ws_root = match fields.get("ws_root") {
+    Some(String(path)) if path != "" => path
+    _ => ""
+  }
+  Some({ session: @agent.Session::from_json(msgs), ws_root })
 }
 
 ///|
