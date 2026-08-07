@@ -1,6 +1,6 @@
 ///|
-// 会话历史超过该字符数时触发一次上下文压缩。
-let compact_threshold_chars = 20000
+// 会话历史超过该 token 估算值时触发一次上下文压缩。
+let compact_threshold_tokens = 8000
 
 ///|
 fn chat_system_prompt(cwd : String) -> String {
@@ -314,7 +314,7 @@ pub async fn run_chat(
           }
           Prompt => {
             // 上下文过长时先压缩再回答。
-            if session.char_count() > compact_threshold_chars {
+            if session.estimated_tokens() > compact_threshold_tokens {
               @stdio.stdout.write("⋯ 正在压缩对话历史…\n")
               agent.compact(session, api_key, base_url, model) catch {
                 _ =>

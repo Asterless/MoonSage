@@ -277,11 +277,11 @@ async test "Agent::compact summarizes old history" {
       "test-key",
       "http://127.0.0.1:\{port}",
       "test-model",
-      threshold_chars=1,
+      threshold_tokens=1,
     )
     assert_true(session.messages.length() < before)
-    // system + 摘要 + 最近 3 条 = 5 条
-    assert_eq(session.messages.length(), 5)
+    // system + 摘要 + 最近 2 轮(4 条)= 6 条
+    assert_eq(session.messages.length(), 6)
     assert_true(session.messages[1].stringify().contains("摘要内容"))
   }
 }
@@ -351,7 +351,7 @@ async test "compact keeps tool results with their tool_calls message" {
       "test-key",
       "http://127.0.0.1:\{port}",
       "test-model",
-      threshold_chars=1,
+      threshold_tokens=1,
     )
     // 校验：任何 tool 消息前一条必须是带 tool_calls 的 assistant。
     for i = 1; i < session.messages.length(); i = i + 1 {

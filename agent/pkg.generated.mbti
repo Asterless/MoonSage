@@ -24,7 +24,7 @@ pub(all) struct Agent {
   max_rounds : Int
   max_tokens : Int
 }
-pub async fn Agent::compact(Self, Session, String, String, String, threshold_chars? : Int, keep_recent? : Int) -> Unit
+pub async fn Agent::compact(Self, Session, String, String, String, threshold_tokens? : Int, keep_recent_turns? : Int) -> Unit
 pub fn Agent::new_session(Self) -> Session
 pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
 pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, on_thinking? : async (String) -> Unit) -> AgentAnswer
@@ -45,6 +45,7 @@ pub(all) struct Session {
   messages : Array[Json]
 }
 pub fn Session::char_count(Self) -> Int
+pub fn Session::estimated_tokens(Self) -> Int
 pub fn Session::from_json(Json) -> Self
 pub fn Session::to_json(Self) -> Json
 
