@@ -55,7 +55,7 @@ fn parse_audit_options(args : ArrayView[String]) -> AuditOptions raise {
         guard i + 1 < args.length() else {
           fail("--max-calls requires a number")
         }
-        opts.max_calls = parse_int_or(args[i + 1], 30)
+        opts.max_calls = @util.parse_int_or(args[i + 1], 30)
         i += 1
       }
       _ => {
@@ -74,13 +74,6 @@ fn parse_audit_options(args : ArrayView[String]) -> AuditOptions raise {
     )
   }
   opts
-}
-
-///|
-fn parse_int_or(s : String, default : Int) -> Int {
-  @string.parse_int(s) catch {
-    _ => default
-  }
 }
 
 ///|

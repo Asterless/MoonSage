@@ -24,8 +24,6 @@ pub async fn publish_changes(String, String, String, WriteConfirm, String, title
 
 pub fn publish_tools(Workspace) -> Array[@tools.Tool]
 
-pub fn safe_path(String, String) -> String raise
-
 pub fn write_tools(Workspace, WriteConfirm) -> Array[@tools.Tool]
 
 // Errors

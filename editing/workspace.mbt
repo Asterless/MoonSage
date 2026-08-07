@@ -52,7 +52,7 @@ pub async fn Workspace::undo(self : Workspace) -> String {
   match self.undo_stack.pop() {
     None => "nothing to undo"
     Some(record) => {
-      let path = safe_path(self.get_root(), record.path)
+      let path = @util.safe_path(self.get_root(), record.path)
       match record.content {
         Some(content) => {
           @fs.write_file(

@@ -60,16 +60,6 @@ test "manifest_repository extracts metadata.repository" {
 }
 
 ///|
-test "parse_int_or falls back to default" {
-  assert_eq(parse_int_or("42", 0), 42)
-  assert_eq(parse_int_or("0", 9), 0)
-  assert_eq(parse_int_or("-3", 9), -3)
-  assert_eq(parse_int_or("  7 ", 1), 1)
-  assert_eq(parse_int_or("abc", 7), 7)
-  assert_eq(parse_int_or("", 2), 2)
-}
-
-///|
 test "audit tools include write_file only in fix mode" {
   let ro_ctx : AuditContext = {
     project_dir: "C:/p",

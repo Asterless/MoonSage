@@ -57,7 +57,7 @@ fn resolve_clone_target_name(url : String, repo : String) -> String raise {
         None => fail("invalid GitHub URL: \{url}")
       }
     } else {
-      let name = basename(url.trim_end(chars="/").to_owned())
+      let name = @util.basename(url.trim_end(chars="/").to_owned())
       guard valid_component(name) else {
         fail("invalid clone target name derived from URL: \{url}")
       }
@@ -93,9 +93,9 @@ async fn current_repo_owner_name(root : String) -> (String, String) {
 ///|
 async fn clone_repo_tool(ws : Workspace, arguments : String) -> String {
   let document = @json.parse(arguments)
-  let url = json_string_arg(document, "url")
-  let owner = json_string_arg(document, "owner")
-  let repo = json_string_arg(document, "repo")
+  let url = @util.json_string_arg(document, "url")
+  let owner = @util.json_string_arg(document, "owner")
+  let repo = @util.json_string_arg(document, "repo")
   let target_name = resolve_clone_target_name(url, repo)
   let (owner, repo, url) = if url != "" {
     if url.trim().has_prefix("https://github.com/") {
@@ -156,9 +156,9 @@ async fn clone_repo_tool(ws : Workspace, arguments : String) -> String {
 ///|
 async fn create_pr_tool(ws : Workspace, arguments : String) -> String {
   let document = @json.parse(arguments)
-  let title = json_string_arg(document, "title")
-  let body = json_string_arg(document, "body")
-  let branch = json_string_arg(document, "branch")
+  let title = @util.json_string_arg(document, "title")
+  let body = @util.json_string_arg(document, "body")
+  let branch = @util.json_string_arg(document, "branch")
   let (owner, repo) = current_repo_owner_name(ws.get_root())
   let report = if body != "" { body } else { "Automated changes by MoonSage." }
   match
