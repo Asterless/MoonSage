@@ -263,3 +263,136 @@ async test "stream_chat_completion times out when the response is delayed" {
 }
 
 ///|
+// 前 statuses.length() 次请求返回指定 HTTP 码,之后返回正常 SSE;
+// 通过共享计数器暴露实际接收到的请求数,便于断言重试次数。
+async fn mock_llm_server_with_status(
+  group : @async.TaskGroup[Unit],
+  statuses : Array[Int],
+  ok_sse : String,
+  received : Array[Int],
+) -> Int {
+  let server = @http.Server(@socket.Addr::parse("127.0.0.1:0"))
+  group.spawn_bg(no_wait=true) <| () => {
+    let mut index = 0
+    server.run_forever() <| ((_request, body, conn) => {
+      while body.read_some() is Some(_) {
+        ()
+      }
+      received[0] = received[0] + 1
+      if index < statuses.length() {
+        let code = statuses[index]
+        index += 1
+        conn.send_response(code, "transient error")
+      } else {
+        conn
+        ..send_response(200, "OK", extra_headers={
+          "Content-Type": "text/event-stream",
+        })
+        ..write(ok_sse)
+        .flush()
+      }
+    })
+  }
+  server.addr.port()
+}
+
+///|
+async test "stream_chat_completion retries a 500 then recovers" {
+  @async.with_task_group() <| group => {
+    let sse = sse_chunk(content_choice("recovered", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let received : Array[Int] = [0]
+    let port = mock_llm_server_with_status(group, [500], sse, received)
+    let result = stream_chat_completion(
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      [chat_message("user", "hi")],
+      [],
+      max_tokens=64,
+      max_retries=2,
+      retry_delay_ms=50,
+    )
+    assert_eq(result.content, "recovered")
+    assert_eq(received[0], 2)
+  }
+}
+
+///|
+async test "stream_chat_completion retries a 429 then recovers" {
+  @async.with_task_group() <| group => {
+    let sse = sse_chunk(content_choice("ok", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let received : Array[Int] = [0]
+    let port = mock_llm_server_with_status(group, [429], sse, received)
+    let result = stream_chat_completion(
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      [chat_message("user", "hi")],
+      [],
+      max_tokens=64,
+      max_retries=2,
+      retry_delay_ms=50,
+    )
+    assert_eq(result.content, "ok")
+    assert_eq(received[0], 2)
+  }
+}
+
+///|
+async test "stream_chat_completion does not retry a 400" {
+  @async.with_task_group() <| group => {
+    let received : Array[Int] = [0]
+    let port = mock_llm_server_with_status(group, [400], "", received)
+    let raised = try {
+      ignore(
+        stream_chat_completion(
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          [chat_message("user", "hi")],
+          [],
+          max_tokens=64,
+          max_retries=2,
+          retry_delay_ms=50,
+        ),
+      )
+      false
+    } catch {
+      e => e.to_string().contains("HTTP 400")
+    }
+    assert_true(raised)
+    assert_eq(received[0], 1)
+  }
+}
+
+///|
+async test "stream_chat_completion strips retry marker after retries are spent" {
+  @async.with_task_group() <| group => {
+    let received : Array[Int] = [0]
+    let port = mock_llm_server_with_status(group, [503, 503, 503], "", received)
+    let raised = try {
+      ignore(
+        stream_chat_completion(
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          [chat_message("user", "hi")],
+          [],
+          max_tokens=64,
+          max_retries=2,
+          retry_delay_ms=50,
+        ),
+      )
+      false
+    } catch {
+      e => {
+        let message = e.to_string()
+        message.contains("HTTP 503") && !message.contains("retryable:")
+      }
+    }
+    assert_true(raised)
+    assert_eq(received[0], 3)
+  }
+}
