@@ -6,21 +6,37 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Set up MoonBit
-        run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s -- 0.10.5+5e7afb0c0
-          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+      # The project contains Windows-specific code paths, so CI covers
+      # both ubuntu and windows runners.
+      - name: Setup MoonBit
+        uses: chawyehsu/setup-moonup@v1
+        with:
+          moonbit-version: 0.10.5+5e7afb0c0
 
       - name: Install dependencies
         run: moon update
 
       - name: Check
         run: moon check
+
+      # Format consistency: unformatted commits fail CI.
+      - name: Format check
+        run: moon fmt --check
+
+      # Interface consistency: regenerating .mbti must not change anything.
+      - name: Interface consistency
+        run: |
+          moon info
+          git diff --exit-code
 
       - name: Test
         run: moon test
