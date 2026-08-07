@@ -284,10 +284,37 @@ pub async fn Agent::turn(
       on_delta~,
     )
     if result.content != "" {
+      let mut text = result.content
       session.messages.push(@llm.chat_message("assistant", result.content))
-      on_event(AnswerDelta(result.content))
-      trace.push("[final] Model answered from collected evidence")
-      return { text: result.content, trace }
+      if result.finish_reason is Some("length") {
+        // 预算耗尽后的最终回答同样可能超长：续写一次，避免输出截断。
+        trace.push(
+          "[observation] Final answer hit max_tokens; requesting continuation",
+        )
+        session.messages.push(
+          @llm.chat_message(
+            "user", "(System: continue and complete the answer exactly from where it stopped, keeping the same language and format. Output ONLY the plain Markdown answer.)",
+          ),
+        )
+        let cont = @llm.stream_chat_completion(
+          api_key,
+          base_url,
+          model,
+          session.messages,
+          [],
+          max_tokens=self.max_tokens,
+          on_delta~,
+        )
+        if cont.content != "" {
+          text = text + "\n" + cont.content
+          session.messages.push(@llm.chat_message("assistant", cont.content))
+        }
+        trace.push("[final] Model answered from collected evidence (continued)")
+      } else {
+        trace.push("[final] Model answered from collected evidence")
+      }
+      on_event(AnswerDelta(text))
+      return { text, trace }
     }
     fail("model could not answer after exhausting the agent budget")
   }

@@ -246,3 +246,37 @@ async test "Agent::compact summarizes old history" {
     assert_true(session.messages[1].stringify().contains("摘要内容"))
   }
 }
+
+///|
+async test "budget-exhausted final answer continues when truncated" {
+  @async.with_task_group() <| group => {
+    let round1 = sse_chunk(
+        content_choice("部分内容", finish_reason="length"),
+      ) +
+      "data: [DONE]\n"
+    let round2 = sse_chunk(content_choice("续写内容", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [round1, round2])
+    let agent : Agent = {
+      system_prompt: "sys",
+      tools: [],
+      max_tool_calls: 0,
+      max_rounds: 1,
+      max_tokens: 64,
+    }
+    let session = agent.new_session()
+    let answer = agent.turn(
+      session,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      "hi",
+    )
+    assert_eq(answer.text, "部分内容\n续写内容")
+    assert_true(
+      answer.trace.contains(
+        "[final] Model answered from collected evidence (continued)",
+      ),
+    )
+  }
+}

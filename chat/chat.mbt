@@ -46,7 +46,7 @@ fn chat_agent(
     @editing.publish_tools(ws),
     max_tool_calls: 12,
     max_rounds: 6,
-    max_tokens: 1500,
+    max_tokens: 4000,
   }
 }
 
@@ -239,7 +239,12 @@ pub async fn run_chat(
             // 上下文过长时先压缩再回答。
             if session.char_count() > compact_threshold_chars {
               @stdio.stdout.write("[compacting conversation...]\n")
-              agent.compact(session, api_key, base_url, model)
+              agent.compact(session, api_key, base_url, model) catch {
+                e =>
+                  @stdio.stdout.write(
+                    "\n[compaction failed: \{e.to_string()}]\n",
+                  )
+              }
               save_session(store_root, current_id, session)
             }
             let printer = @md_ansi.MdStreamPrinter::new()
