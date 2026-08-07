@@ -44,9 +44,9 @@ fn chat_agent(
     @local.local_tools(ws) +
     @editing.write_tools(ws, @editing.Prompt) +
     @editing.publish_tools(ws),
-    max_tool_calls: 12,
-    max_rounds: 6,
-    max_tokens: 4000,
+    max_tool_calls: 30,
+    max_rounds: 10,
+    max_tokens: 6000,
   }
 }
 

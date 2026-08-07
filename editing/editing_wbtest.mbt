@@ -129,6 +129,51 @@ test "apply_edits_to_file applies multiple edits bottom-up" {
 }
 
 ///|
+test "apply_edits_to_file matches LF old_string against CRLF content" {
+  let content = "pub fn a() {}\r\npub fn b() {}\r\n"
+  let result = apply_edits_to_file(content, [
+    {
+      file: "x",
+      old_string: "pub fn b() {}",
+      new_string: "pub fn c() {}",
+      start_line: 1,
+      end_line: 0,
+    },
+  ])
+  // 输出保留 CRLF，替换文本也统一为 CRLF。
+  assert_eq(result, "pub fn a() {}\r\npub fn c() {}\r\n")
+}
+
+///|
+test "apply_edits_to_file matches CRLF old_string against LF content" {
+  let result = apply_edits_to_file("a\nb\n", [
+    {
+      file: "x",
+      old_string: "a\r\n",
+      new_string: "A\r\n",
+      start_line: 1,
+      end_line: 0,
+    },
+  ])
+  // LF 文件：新文本换行统一为 LF。
+  assert_eq(result, "A\nb\n")
+}
+
+///|
+test "apply_edits_to_file insertion adopts file EOL style" {
+  let result = apply_edits_to_file("a\r\nb\r\n", [
+    {
+      file: "x",
+      old_string: "",
+      new_string: "// note\n",
+      start_line: 1,
+      end_line: 0,
+    },
+  ])
+  assert_eq(result, "// note\r\na\r\nb\r\n")
+}
+
+///|
 async test "multi_edit_tool applies edits atomically with syntax gate" {
   let tmp = @fs.tmpdir(prefix="moonsage-edit-test-")
   let _ = @fs.write_file(

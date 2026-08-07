@@ -28,8 +28,8 @@ test "chat agent combines ask and local tools" {
   assert_true(names.contains("remove"))
   assert_true(names.contains("clone_repo"))
   assert_true(names.contains("create_pr"))
-  assert_eq(agent.max_tool_calls, 12)
-  assert_eq(agent.max_rounds, 6)
+  assert_eq(agent.max_tool_calls, 30)
+  assert_eq(agent.max_rounds, 10)
   assert_true(agent.max_tokens > 0)
 }
 
