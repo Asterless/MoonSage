@@ -47,6 +47,15 @@ fn content_choice(text : String, finish_reason? : String = "") -> Json {
 }
 
 ///|
+fn reasoning_choice(text : String) -> Json {
+  let obj : Map[String, Json] = {
+    "delta": Json::object({ "reasoning_content": Json::string(text) }),
+  }
+  obj["finish_reason"] = Json::null()
+  Json::object(obj)
+}
+
+///|
 fn tool_call_choice(
   index : Int,
   id : String,
@@ -112,6 +121,36 @@ async test "run_llm_agent executes tool calls then returns a streamed answer" {
     assert_eq(answer.text, "Found it")
     assert_true(answer.trace.contains("[tool] search_modules"))
     assert_true(answer.trace.contains("[final] Model returned an answer"))
+  }
+}
+
+///|
+async test "Agent::turn forwards reasoning_content to on_thinking" {
+  @async.with_task_group() <| group => {
+    let round1 = sse_chunk(reasoning_choice("thinking step 1")) +
+      sse_chunk(tool_call_choice(0, "call_1", "search_modules", "")) +
+      sse_chunk(tool_call_choice(0, "", "", "{\"query\":\"http\"}")) +
+      sse_chunk(tool_call_choice(0, "", "", "", finish_reason="tool_calls")) +
+      "data: [DONE]\n"
+    let round2 = sse_chunk(content_choice("done", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [round1, round2])
+    let agent = ask_agent([])
+    let session = agent.new_session()
+    let thinking = StringBuilder::new()
+    let answer = agent.turn(
+      session,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      "find http client",
+      on_thinking=async fn(text) {
+        thinking.write_string(text)
+        @async.sleep(0)
+      },
+    )
+    assert_eq(answer.text, "done")
+    assert_true(thinking.to_string().contains("thinking step 1"))
   }
 }
 

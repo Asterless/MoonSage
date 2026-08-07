@@ -15,7 +15,12 @@ test "parse_stream_chunk extracts deltas and finish reason" {
   )
   assert_eq(
     content,
-    Some({ content: Some("Hi"), tool_calls: [], finish_reason: None }),
+    Some({
+      content: Some("Hi"),
+      reasoning_content: None,
+      tool_calls: [],
+      finish_reason: None,
+    }),
   )
   let tool = parse_stream_chunk(
     "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"search_modules\",\"arguments\":\"{\\\"query\\\":\\\"http\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
@@ -24,6 +29,7 @@ test "parse_stream_chunk extracts deltas and finish reason" {
     tool,
     Some({
       content: None,
+      reasoning_content: None,
       tool_calls: [
         {
           index: 0,
@@ -41,6 +47,22 @@ test "parse_stream_chunk extracts deltas and finish reason" {
       "{\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}",
     ),
     None,
+  )
+}
+
+///|
+test "parse_stream_chunk extracts reasoning_content" {
+  let chunk = parse_stream_chunk(
+    "{\"choices\":[{\"delta\":{\"reasoning_content\":\"think hard\"},\"finish_reason\":null}]}",
+  )
+  assert_eq(
+    chunk,
+    Some({
+      content: None,
+      reasoning_content: Some("think hard"),
+      tool_calls: [],
+      finish_reason: None,
+    }),
   )
 }
 
@@ -173,6 +195,44 @@ async test "stream_chat_completion receives text deltas incrementally" {
     assert_eq(deltas.to_string(), "Hello world")
     assert_eq(result.finish_reason, Some("stop"))
     assert_eq(result.tool_calls.length(), 0)
+  }
+}
+
+///|
+async test "stream_chat_completion assembles and streams reasoning_content" {
+  @async.with_task_group() <| group => {
+    let reasoning_chunk = "data: " +
+      Json::object({
+        "choices": Json::array([
+          Json::object({
+            "delta": Json::object({
+              "reasoning_content": Json::string("let me think"),
+            }),
+            "finish_reason": Json::null(),
+          }),
+        ]),
+      }).stringify() +
+      "\n"
+    let sse = reasoning_chunk +
+      sse_chunk(content_choice("answer", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [sse])
+    let reasoning = StringBuilder::new()
+    let result = stream_chat_completion(
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      [chat_message("user", "hi")],
+      [],
+      max_tokens=64,
+      on_reasoning=async fn(text) {
+        reasoning.write_string(text)
+        @async.sleep(0)
+      },
+    )
+    assert_eq(result.content, "answer")
+    assert_eq(result.reasoning_content, "let me think")
+    assert_eq(reasoning.to_string(), "let me think")
   }
 }
 
