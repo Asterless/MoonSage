@@ -52,4 +52,3 @@ pub fn Session::to_json(Self) -> Json
 // Type aliases
 
 // Traits
-

@@ -31,4 +31,3 @@ pub struct SavedSession {
 // Type aliases
 
 // Traits
-
