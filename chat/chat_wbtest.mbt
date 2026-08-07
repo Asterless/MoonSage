@@ -33,13 +33,14 @@ test "prettify_error strips the Failure wrapper" {
 ///|
 test "chat agent combines ask and local tools" {
   let agent = chat_agent([], "C:/work", @editing.Workspace::new("C:/work"))
-  assert_eq(agent.tools.length(), 13)
+  assert_eq(agent.tools.length(), 14)
   let names = agent.tools.map(fn(t) { t.schema.name })
   assert_true(names.contains("search_modules"))
   assert_true(names.contains("get_module_manifest"))
   assert_true(names.contains("get_module_index"))
   assert_true(names.contains("get_package_docs"))
   assert_true(names.contains("list_project_files"))
+  assert_true(names.contains("grep_files"))
   assert_true(names.contains("read_file"))
   assert_true(names.contains("run_moon"))
   assert_true(names.contains("git_diff"))

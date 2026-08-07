@@ -51,13 +51,30 @@ fn parse_int_or(s : String, default : Int) -> Int {
 }
 
 ///|
+// 列文件上限与 grep 结果上限,防止大仓库把上下文打爆。
+let list_files_max_entries = 2000
+
+///|
+let collect_files_hard_cap = 10000
+
+///|
+let grep_max_matches_default = 200
+
+///|
+let grep_max_line_chars = 200
+
+///|
 async fn collect_project_files(
   dir : String,
   root : String,
   out : Array[String],
+  max : Int,
 ) -> Unit {
   let entries = @fs.readdir(dir, sort=true)
   for entry in entries {
+    if out.length() >= max {
+      return
+    }
     if entry == "_build" ||
       entry == ".git" ||
       entry == ".mooncakes" ||
@@ -66,7 +83,7 @@ async fn collect_project_files(
     }
     let path = dir + "/" + entry
     if @fs.kind(path) is @fs.FileKind::Directory {
-      collect_project_files(path, root, out)
+      collect_project_files(path, root, out, max)
     } else {
       out.push(relative_to_root(root, path))
     }
@@ -74,13 +91,107 @@ async fn collect_project_files(
 }
 
 ///|
+// 简单的通配符匹配:支持 * 与 ?。用于 list_project_files 的 pattern 过滤。
+fn wildcard_match(pattern : String, text : String) -> Bool {
+  match_here(pattern, 0, text, 0)
+}
+
+///|
+fn match_here(pattern : String, pi : Int, text : String, ti : Int) -> Bool {
+  if pi == pattern.length() {
+    return ti == text.length()
+  }
+  if pattern[pi] == '*' {
+    // 跳过连续 *。
+    let mut p = pi
+    while p < pattern.length() && pattern[p] == '*' {
+      p = p + 1
+    }
+    for t = ti; t <= text.length(); t = t + 1 {
+      if match_here(pattern, p, text, t) {
+        return true
+      }
+    }
+    return false
+  }
+  if ti < text.length() && (pattern[pi] == '?' || pattern[pi] == text[ti]) {
+    return match_here(pattern, pi + 1, text, ti + 1)
+  }
+  false
+}
+
+///|
 async fn list_project_files_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
   let sub = json_string_arg(document, "path")
+  let pattern = json_string_arg(document, "pattern")
   let dir = if sub == "" { root } else { safe_path(root, sub) }
   let files : Array[String] = []
-  collect_project_files(dir, root, files)
-  files.to_json().stringify()
+  collect_project_files(dir, root, files, collect_files_hard_cap)
+  let filtered = if pattern != "" {
+    files.filter(fn(f) { wildcard_match(pattern, f) })
+  } else {
+    files
+  }
+  let mut truncated = false
+  let shown = filtered
+  if shown.length() > list_files_max_entries {
+    shown.truncate(list_files_max_entries)
+    truncated = true
+  }
+  Json::object({
+    "files": Json::array(shown.map(Json::string)),
+    "truncated": Json::boolean(truncated),
+  }).stringify()
+}
+
+///|
+async fn grep_files_tool(root : String, arguments : String) -> String {
+  let document = @json.parse(arguments)
+  let pattern = json_string_arg(document, "pattern")
+  let sub = json_string_arg(document, "path")
+  let max_matches = parse_int_or(
+    json_string_arg(document, "max_matches"),
+    grep_max_matches_default,
+  )
+  guard pattern != "" else { fail("pattern is required") }
+  let dir = if sub == "" { root } else { safe_path(root, sub) }
+  let needle = pattern.to_lower()
+  let files : Array[String] = []
+  collect_project_files(dir, root, files, collect_files_hard_cap)
+  let matches : Array[String] = []
+  for file in files {
+    if matches.length() >= max_matches {
+      break
+    }
+    let read_result = Some(@fs.read_file(safe_path(root, file)).text()) catch {
+      _ => None
+    }
+    match read_result {
+      None => ()
+      Some(content) => {
+        let lines = content.split("\n").map(fn(s) { s.to_owned() }).to_array()
+        for i = 0; i < lines.length(); i = i + 1 {
+          if matches.length() >= max_matches {
+            break
+          }
+          if lines[i].to_lower().contains(needle) {
+            let line = lines[i]
+            let shown = if line.length() > grep_max_line_chars {
+              line[:grep_max_line_chars].to_owned() + "…"
+            } else {
+              line
+            }
+            matches.push("\{file}:\{i + 1}: \{shown}")
+          }
+        }
+      }
+    }
+  }
+  Json::object({
+    "matches": Json::array(matches.map(Json::string)),
+    "truncated": Json::boolean(matches.length() >= max_matches),
+  }).stringify()
 }
 
 ///|
@@ -218,11 +329,14 @@ pub fn local_tools(ws : @editing.Workspace) -> Array[@tools.Tool] {
     {
       schema: {
         name: "list_project_files",
-        description: "List files in the project (relative paths), excluding build caches and .git.",
+        description: "List files in the project (relative paths), excluding build caches and .git. Optionally filter by a wildcard pattern (* and ?). Returns {files, truncated}.",
         parameters: @tools.object_schema(
           {
             "path": @tools.string_field(
               "Optional subdirectory to list instead of the project root",
+            ),
+            "pattern": @tools.string_field(
+              "Optional wildcard filter on relative paths, e.g. '*.mbt' or 'src/*.mbt'",
             ),
           },
           [],
@@ -230,6 +344,31 @@ pub fn local_tools(ws : @editing.Workspace) -> Array[@tools.Tool] {
       },
       execute: async fn(arguments) {
         list_project_files_tool(ws.get_root(), arguments) catch {
+          e => @tools.error_json(e.to_string())
+        }
+      },
+    },
+    {
+      schema: {
+        name: "grep_files",
+        description: "Search file contents for a case-insensitive substring across the project; returns matching lines as path:line: text, capped at max_matches.",
+        parameters: @tools.object_schema(
+          {
+            "pattern": @tools.string_field(
+              "Substring to search for (case-insensitive)",
+            ),
+            "path": @tools.string_field(
+              "Optional subdirectory to search instead of the project root",
+            ),
+            "max_matches": @tools.string_field(
+              "Optional maximum number of matches (default 200)",
+            ),
+          },
+          ["pattern"],
+        ),
+      },
+      execute: async fn(arguments) {
+        grep_files_tool(ws.get_root(), arguments) catch {
           e => @tools.error_json(e.to_string())
         }
       },

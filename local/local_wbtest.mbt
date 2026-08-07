@@ -83,11 +83,91 @@ test "json_string_arg reads string fields only" {
 }
 
 ///|
-test "local_tools exposes the four read-only tools" {
+test "local_tools exposes the five read-only tools" {
   let tools = local_tools(@editing.Workspace::new("C:/work/proj"))
-  assert_eq(tools.length(), 4)
+  assert_eq(tools.length(), 5)
   let names = tools.map(fn(t) { t.schema.name })
-  assert_eq(names, ["list_project_files", "read_file", "run_moon", "git_diff"])
+  assert_eq(names, [
+    "list_project_files", "grep_files", "read_file", "run_moon", "git_diff",
+  ])
+}
+
+///|
+test "wildcard_match supports * and ?" {
+  assert_true(wildcard_match("*.mbt", "src/main.mbt"))
+  assert_true(wildcard_match("src/*.mbt", "src/main.mbt"))
+  assert_true(wildcard_match("src/?ain.mbt", "src/main.mbt"))
+  assert_true(wildcard_match("*", "anything"))
+  assert_true(wildcard_match("", ""))
+  assert_eq(wildcard_match("*.mbt", "src/main.txt"), false)
+  assert_eq(wildcard_match("src/*.mbt", "lib/main.mbt"), false)
+  assert_eq(wildcard_match("a?c", "ac"), false)
+  assert_eq(wildcard_match("*.mbt", ""), false)
+}
+
+///|
+async test "list_project_files_tool filters by pattern and reports truncation" {
+  let tmp = @fs.tmpdir(prefix="moonsage-list-test-")
+  let _ = @fs.write_file(
+    tmp + "/a.mbt",
+    "pub fn a() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/b.txt",
+    "hello\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/c.mbt",
+    "pub fn c() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let payload = list_project_files_tool(tmp, "{\"pattern\":\"*.mbt\"}")
+  let doc = @json.parse(payload)
+  guard doc is Object(fields) else { fail("expected object") }
+  let files = match fields.get("files") {
+    Some(Array(items)) => items
+    _ => fail("missing files")
+  }
+  assert_eq(files.length(), 2)
+  let truncated = match fields.get("truncated") {
+    Some(True) => true
+    Some(False) => false
+    _ => fail("missing truncated")
+  }
+  assert_eq(truncated, false)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "grep_files_tool returns path:line matches" {
+  let tmp = @fs.tmpdir(prefix="moonsage-grep-test-")
+  let _ = @fs.write_file(
+    tmp + "/a.mbt",
+    "pub fn alpha() {}\n// alpha note\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/b.txt",
+    "nothing here\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let payload = grep_files_tool(tmp, "{\"pattern\":\"alpha\"}")
+  let doc = @json.parse(payload)
+  guard doc is Object(fields) else { fail("expected object") }
+  let matches = match fields.get("matches") {
+    Some(Array(items)) => items
+    _ => fail("missing matches")
+  }
+  assert_eq(matches.length(), 2)
+  assert_true(matches[0].stringify().contains("a.mbt:1: pub fn alpha"))
+  assert_true(matches[1].stringify().contains("a.mbt:2: // alpha note"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
 }
 
 ///|
