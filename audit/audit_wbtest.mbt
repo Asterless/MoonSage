@@ -30,6 +30,15 @@ test "parse_github_repo extracts owner and repo" {
 }
 
 ///|
+test "parse_github_repo rejects traversal or invalid components" {
+  assert_eq(parse_github_repo("https://github.com/owner/.."), None)
+  assert_eq(parse_github_repo("https://github.com/.."), None)
+  assert_eq(parse_github_repo("https://github.com/o wner/repo"), None)
+  assert_eq(parse_github_repo("https://github.com/owner/..%2e"), None)
+  assert_eq(parse_github_repo("https://github.com/owner/repo\\x"), None)
+}
+
+///|
 fn manifest_repo_checked(manifest : String) -> String {
   manifest_repository(manifest) catch {
     _ => ""
@@ -51,16 +60,6 @@ test "manifest_repository extracts metadata.repository" {
 }
 
 ///|
-test "parse_int_or falls back to default" {
-  assert_eq(parse_int_or("42", 0), 42)
-  assert_eq(parse_int_or("0", 9), 0)
-  assert_eq(parse_int_or("-3", 9), -3)
-  assert_eq(parse_int_or("  7 ", 1), 1)
-  assert_eq(parse_int_or("abc", 7), 7)
-  assert_eq(parse_int_or("", 2), 2)
-}
-
-///|
 test "audit tools include write_file only in fix mode" {
   let ro_ctx : AuditContext = {
     project_dir: "C:/p",
@@ -68,9 +67,11 @@ test "audit tools include write_file only in fix mode" {
     confirm: ConfirmDiff,
   }
   let read_only = audit_tools(ro_ctx)
-  assert_eq(read_only.length(), 4)
+  assert_eq(read_only.length(), 5)
   let names = read_only.map(fn(t) { t.schema.name })
-  assert_eq(names, ["list_project_files", "read_file", "run_moon", "git_diff"])
+  assert_eq(names, [
+    "list_project_files", "grep_files", "read_file", "run_moon", "git_diff",
+  ])
   assert_true(!names.contains("write_file"))
   let fix_ctx : AuditContext = {
     project_dir: "C:/p",
@@ -78,7 +79,7 @@ test "audit tools include write_file only in fix mode" {
     confirm: ConfirmDiff,
   }
   let fix = audit_tools(fix_ctx)
-  assert_eq(fix.length(), 7)
+  assert_eq(fix.length(), 8)
   assert_true(fix.map(fn(t) { t.schema.name }).contains("write_file"))
   assert_true(fix.map(fn(t) { t.schema.name }).contains("multi_edit"))
   assert_true(fix.map(fn(t) { t.schema.name }).contains("remove"))

@@ -1,0 +1,8 @@
+# 统一文本行尾:源码与文档固定 LF,避免 Windows 上 autocrlf 与 moon fmt
+# (输出 LF)相互摩擦导致 git status 持续显示已修改。
+* text=auto
+*.mbt text eol=lf
+*.md text eol=lf
+*.mbti text eol=lf
+
+*.pkg text eol=lf

@@ -1,6 +1,6 @@
 ///|
-// 会话历史超过该字符数时触发一次上下文压缩。
-let compact_threshold_chars = 20000
+// 会话历史超过该 token 估算值时触发一次上下文压缩。
+let compact_threshold_tokens = 8000
 
 ///|
 fn chat_system_prompt(cwd : String) -> String {
@@ -13,6 +13,9 @@ fn chat_system_prompt(cwd : String) -> String {
     #|before it is applied, and changed source files must pass syntax checks.
     #|Use clone_repo to work on a GitHub repository (all file tools switch to
     #|the clone), and create_pr to publish your changes as a pull request.
+    #|create_pr accepts an optional branch name; if the default
+    #|moonsage/fix-<repo> already exists on the remote, pass a new branch
+    #|name. Re-running create_pr after a failed push reuses the local commits.
     #|The local project root is:
     #|
   ) +
@@ -78,6 +81,7 @@ priv enum ChatCommand {
   Clear
   Help
   Prompt
+  Undo
 }
 
 ///|
@@ -86,6 +90,7 @@ fn slash_command(input : String) -> ChatCommand {
     "/exit" | "/quit" | "exit" | "quit" => Exit
     "/clear" => Clear
     "/help" => Help
+    "/undo" => Undo
     _ => Prompt
   }
 }
@@ -96,6 +101,7 @@ fn help_text() -> String {
     #|Commands:
     #|  /help          show this help
     #|  /clear         clear the conversation history
+    #|  /undo          undo the last file edit
     #|  /exit, /quit   leave the chat (exit/quit also work)
     #|
     #|The agent can search Mooncakes packages, inspect and modify the local
@@ -300,9 +306,15 @@ pub async fn run_chat(
             println(help_text())
             continue
           }
+          Undo => {
+            let message = ws.undo()
+            println(message)
+            save_session(store_root, current_id, session, ws.get_root())
+            continue
+          }
           Prompt => {
             // 上下文过长时先压缩再回答。
-            if session.char_count() > compact_threshold_chars {
+            if session.estimated_tokens() > compact_threshold_tokens {
               @stdio.stdout.write("⋯ 正在压缩对话历史…\n")
               agent.compact(session, api_key, base_url, model) catch {
                 _ =>
@@ -314,6 +326,8 @@ pub async fn run_chat(
             }
             let printer = @md_ansi.MdStreamPrinter::new()
             let mut answer_started = false
+            // 思考/推理过程缓冲:在工具调用或最终回答前以暗色块输出。
+            let thinking = StringBuilder::new()
             let _ = agent.turn(
               session,
               api_key,
@@ -321,6 +335,12 @@ pub async fn run_chat(
               model,
               input,
               on_delta=async fn(text) {
+                if thinking.to_string().length() > 0 {
+                  @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
+                  @stdio.stdout.write(thinking.to_string())
+                  @stdio.stdout.write("\u001B[0m\n")
+                  thinking.reset()
+                }
                 if !answer_started {
                   answer_started = true
                   @stdio.stdout.write("\n")
@@ -332,10 +352,22 @@ pub async fn run_chat(
                   @stdio.stdout.write(out)
                 }
               },
+              on_thinking=fn(text) {
+                if text != "" && thinking.to_string().length() < 20000 {
+                  thinking.write_string(text)
+                }
+              },
               on_event=async fn(event) {
                 match event {
-                  @agent.ToolCall(name) =>
+                  @agent.ToolCall(name) => {
+                    if thinking.to_string().length() > 0 {
+                      @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
+                      @stdio.stdout.write(thinking.to_string())
+                      @stdio.stdout.write("\u001B[0m\n")
+                      thinking.reset()
+                    }
                     @stdio.stdout.write("\n▸ \{tool_label(name)} …\n")
+                  }
                   @agent.ToolResult(_) => ()
                   _ => ()
                 }
@@ -345,6 +377,12 @@ pub async fn run_chat(
                 @stdio.stdout.write("✗ \{prettify_error(e.to_string())}\n")
                 continue
               }
+            }
+            if thinking.to_string().length() > 0 {
+              @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
+              @stdio.stdout.write(thinking.to_string())
+              @stdio.stdout.write("\u001B[0m\n")
+              thinking.reset()
             }
             printer.finish()
             @stdio.stdout.write(printer.take_output())

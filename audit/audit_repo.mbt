@@ -1,4 +1,29 @@
 ///|
+// 校验 GitHub 组件(owner/repo):仅允许 [A-Za-z0-9._-],长度 1..100,
+// 拒绝 "." 与 "..",防止异常组件进入克隆 URL。
+fn valid_repo_component(s : String) -> Bool {
+  if s.length() < 1 || s.length() > 100 {
+    return false
+  }
+  if s == "." || s == ".." {
+    return false
+  }
+  for i = 0; i < s.length(); i = i + 1 {
+    let code = s[i].to_int()
+    let ok = (code >= 48 && code <= 57) ||
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      code == 45 ||
+      code == 46 ||
+      code == 95
+    if !ok {
+      return false
+    }
+  }
+  true
+}
+
+///|
 // 从 GitHub repository URL 解析出 (owner, repo)。
 fn parse_github_repo(url : String) -> (String, String)? {
   let u = url.trim()
@@ -12,7 +37,7 @@ fn parse_github_repo(url : String) -> (String, String)? {
   if repo.has_suffix(".git") {
     repo = repo[:repo.length() - 4].to_owned()
   }
-  if owner != "" && repo != "" {
+  if valid_repo_component(owner) && valid_repo_component(repo) {
     Some((owner, repo))
   } else {
     None
@@ -109,15 +134,11 @@ async fn fetch_repo_source(
           "clone", "--depth", "1", "--single-branch", "--branch", branch, url, target,
         ]
       }
-      let (exit, _, err) = @process.collect_output(
-        "git",
-        clone_args,
-        no_console_window=true,
-      )
+      let (exit, err) = @editing.run_cmd_with_timeout(clone_args, 300_000)
       if exit == 0 {
         return locate_project_root(dest_dir)
       }
-      last_err = err.text()
+      last_err = err
       @fs.rmdir(target, recursive=true) catch {
         _ => ()
       }

@@ -1,53 +1,4 @@
 ///|
-test "safe_path allows relative files and blocks traversal" {
-  let root = "C:/work/proj"
-  assert_eq(safe_path(root, "src/a.mbt"), "C:/work/proj/src/a.mbt")
-  assert_eq(safe_path(root, "moon.mod"), "C:/work/proj/moon.mod")
-  let blocked = try {
-    ignore(safe_path(root, "../evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(blocked)
-  let nested = try {
-    ignore(safe_path(root, "src/../../evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(nested)
-  let absolute = try {
-    ignore(safe_path(root, "/etc/passwd"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(absolute)
-  let win_abs = try {
-    ignore(safe_path(root, "C:\\evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(win_abs)
-  let drive = try {
-    ignore(safe_path(root, "C:/evil"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(drive)
-  let empty = try {
-    ignore(safe_path(root, ""))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(empty)
-}
-
-///|
 test "relative_to_root strips project root prefix" {
   assert_eq(relative_to_root("C:/p", "C:/p/src/a.mbt"), "src/a.mbt")
   assert_eq(relative_to_root("C:/p", "C:/other"), "C:/other")
@@ -65,27 +16,149 @@ test "truncate_output keeps long output bounded" {
 }
 
 ///|
-test "parse_int_or falls back to default" {
-  assert_eq(parse_int_or("42", 0), 42)
-  assert_eq(parse_int_or("0", 9), 0)
-  assert_eq(parse_int_or("-3", 9), -3)
-  assert_eq(parse_int_or("  7 ", 1), 1)
-  assert_eq(parse_int_or("abc", 7), 7)
-  assert_eq(parse_int_or("", 2), 2)
-}
-
-///|
-test "json_string_arg reads string fields only" {
-  let doc = @json.parse("{\"path\":\"a.mbt\",\"n\":1}")
-  assert_eq(json_string_arg(doc, "path"), "a.mbt")
-  assert_eq(json_string_arg(doc, "n"), "")
-  assert_eq(json_string_arg(doc, "missing"), "")
-}
-
-///|
-test "local_tools exposes the four read-only tools" {
+test "local_tools exposes the five read-only tools" {
   let tools = local_tools(@editing.Workspace::new("C:/work/proj"))
-  assert_eq(tools.length(), 4)
+  assert_eq(tools.length(), 5)
   let names = tools.map(fn(t) { t.schema.name })
-  assert_eq(names, ["list_project_files", "read_file", "run_moon", "git_diff"])
+  assert_eq(names, [
+    "list_project_files", "grep_files", "read_file", "run_moon", "git_diff",
+  ])
+}
+
+///|
+test "wildcard_match supports * and ?" {
+  assert_true(wildcard_match("*.mbt", "src/main.mbt"))
+  assert_true(wildcard_match("src/*.mbt", "src/main.mbt"))
+  assert_true(wildcard_match("src/?ain.mbt", "src/main.mbt"))
+  assert_true(wildcard_match("*", "anything"))
+  assert_true(wildcard_match("", ""))
+  assert_eq(wildcard_match("*.mbt", "src/main.txt"), false)
+  assert_eq(wildcard_match("src/*.mbt", "lib/main.mbt"), false)
+  assert_eq(wildcard_match("a?c", "ac"), false)
+  assert_eq(wildcard_match("*.mbt", ""), false)
+}
+
+///|
+async test "list_project_files_tool filters by pattern and reports truncation" {
+  let tmp = @fs.tmpdir(prefix="moonsage-list-test-")
+  let _ = @fs.write_file(
+    tmp + "/a.mbt",
+    "pub fn a() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/b.txt",
+    "hello\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/c.mbt",
+    "pub fn c() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let payload = list_project_files_tool(tmp, "{\"pattern\":\"*.mbt\"}")
+  let doc = @json.parse(payload)
+  guard doc is Object(fields) else { fail("expected object") }
+  let files = match fields.get("files") {
+    Some(Array(items)) => items
+    _ => fail("missing files")
+  }
+  assert_eq(files.length(), 2)
+  let truncated = match fields.get("truncated") {
+    Some(True) => true
+    Some(False) => false
+    _ => fail("missing truncated")
+  }
+  assert_eq(truncated, false)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "grep_files_tool returns path:line matches" {
+  let tmp = @fs.tmpdir(prefix="moonsage-grep-test-")
+  let _ = @fs.write_file(
+    tmp + "/a.mbt",
+    "pub fn alpha() {}\n// alpha note\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/b.txt",
+    "nothing here\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let payload = grep_files_tool(tmp, "{\"pattern\":\"alpha\"}")
+  let doc = @json.parse(payload)
+  guard doc is Object(fields) else { fail("expected object") }
+  let matches = match fields.get("matches") {
+    Some(Array(items)) => items
+    _ => fail("missing matches")
+  }
+  assert_eq(matches.length(), 2)
+  assert_true(matches[0].stringify().contains("a.mbt:1: pub fn alpha"))
+  assert_true(matches[1].stringify().contains("a.mbt:2: // alpha note"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+// A command that sleeps long enough to reliably trigger a timeout.
+#cfg(platform="windows")
+fn sleep_long_command() -> (String, Array[String]) {
+  (
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"],
+  )
+}
+
+///|
+#cfg(not(platform="windows"))
+fn sleep_long_command() -> (String, Array[String]) {
+  ("sleep", ["30"])
+}
+
+///|
+test "command_timeout_json reports the deadline" {
+  let payload = command_timeout_json(3000)
+  assert_true(payload.contains("timed out after 3000 ms"))
+  let doc = @json.parse(payload)
+  match doc {
+    Object(fields) =>
+      match fields.get("exit_code") {
+        Some(Number(n, ..)) => assert_eq(n, -1.0)
+        _ => fail("exit_code missing")
+      }
+    _ => fail("expected JSON object")
+  }
+}
+
+///|
+async test "run_command_with_timeout terminates hung commands" {
+  let tmp = @fs.tmpdir(prefix="moonsage-timeout-test-")
+  let (cmd, args) = sleep_long_command()
+  let payload = run_command_with_timeout(cmd, tmp, args, 1000)
+  assert_true(payload.contains("timed out after 1000 ms"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "run_command_with_timeout returns output for quick commands" {
+  let tmp = @fs.tmpdir(prefix="moonsage-runmoon-test-")
+  let payload = run_command_with_timeout("moon", tmp, ["version"], 10000)
+  let doc = @json.parse(payload)
+  match doc {
+    Object(fields) =>
+      match fields.get("exit_code") {
+        Some(Number(n, ..)) => assert_eq(n, 0.0)
+        _ => fail("exit_code missing")
+      }
+    _ => fail("expected JSON object")
+  }
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
 }

@@ -11,6 +11,7 @@ struct ToolCallDelta {
 /// A parsed delta from one streaming chat completion chunk.
 struct StreamChunk {
   content : String?
+  reasoning_content : String?
   tool_calls : Array[ToolCallDelta]
   finish_reason : String?
 } derive(Eq, Debug)
@@ -73,15 +74,23 @@ fn parse_stream_chunk(payload : String) -> StreamChunk? {
     Some(String(s)) => Some(s)
     _ => None
   }
+  // DeepSeek reasoner 系列通过 reasoning_content 增量返回思考过程。
+  let reasoning_content = match delta.get("reasoning_content") {
+    Some(String(s)) => Some(s)
+    _ => None
+  }
   let tool_calls = parse_tool_call_deltas(delta)
   let finish_reason = match choice.get("finish_reason") {
     Some(String(s)) => Some(s)
     _ => None
   }
-  if content is None && tool_calls.is_empty() && finish_reason is None {
+  if content is None &&
+    reasoning_content is None &&
+    tool_calls.is_empty() &&
+    finish_reason is None {
     return None
   }
-  Some({ content, tool_calls, finish_reason })
+  Some({ content, reasoning_content, tool_calls, finish_reason })
 }
 
 ///|
@@ -193,6 +202,7 @@ fn ToolCallAccumulator::finish(
 /// The complete result of a streaming chat completion.
 pub(all) struct StreamResult {
   content : String
+  reasoning_content : String
   tool_calls : Array[ChatToolCall]
   finish_reason : String?
 }
@@ -203,18 +213,20 @@ pub async fn ignore_delta(_ : String) -> Unit {
 }
 
 ///|
-/// Stream a chat completion over HTTP using SSE, invoking `on_delta` with each
-/// incremental text fragment as it arrives. Returns the fully assembled result.
-pub async fn stream_chat_completion(
+// 单次流式请求尝试。失败消息以 "retryable: " 前缀标记可重试错误
+// (网络/连接超时/429/5xx),调用方据此退避重试;已开始接收内容后
+// 的流中断不标记,避免重试导致内容重复。
+async fn attempt_chat_completion(
   api_key : String,
   base_url : String,
   model : String,
   messages : Array[Json],
   tools : Array[Json],
-  max_tokens? : Int = 1200,
-  on_delta? : async (String) -> Unit = ignore_delta,
-  connect_timeout_ms? : Int = 30000,
-  stream_idle_timeout_ms? : Int = 60000,
+  max_tokens : Int,
+  on_delta : async (String) -> Unit,
+  on_reasoning : async (String) -> Unit,
+  connect_timeout_ms : Int,
+  stream_idle_timeout_ms : Int,
 ) -> StreamResult {
   let endpoint = base_url.trim_end(chars="/").to_owned() + "/chat/completions"
   let payload : Map[String, Json] = {
@@ -236,22 +248,33 @@ pub async fn stream_chat_completion(
     @http.post_stream(endpoint, headers~)
   }) catch {
     @async.TimeoutError(_) =>
-      fail("LLM API connect timed out (\{connect_timeout_ms} ms)")
-    err => raise err
+      fail("retryable: LLM API connect timed out (\{connect_timeout_ms} ms)")
+    err => fail("retryable: LLM API connect failed: \{err.to_string()}")
   }
   defer client.close()
   let response = @async.with_timeout(connect_timeout_ms, () => {
     client..write(request.stringify()).end_request()
   }) catch {
     @async.TimeoutError(_) =>
-      fail("LLM API request timed out (\{connect_timeout_ms} ms)")
-    err => raise err
+      fail("retryable: LLM API request timed out (\{connect_timeout_ms} ms)")
+    err => fail("retryable: LLM API request failed: \{err.to_string()}")
   }
   guard response.code >= 200 && response.code < 300 else {
-    let detail = client.read_all().binary().to_string() catch { _ => "" }
-    fail("LLM API returned HTTP \{response.code}: \{detail}")
+    let detail = @async.with_timeout(5000, () => {
+      client.read_all().binary().to_string()
+    }) catch {
+      _ => ""
+    }
+    let retryable = response.code == 429 ||
+      (response.code >= 500 && response.code < 600)
+    if retryable {
+      fail("retryable: LLM API returned HTTP \{response.code}: \{detail}")
+    } else {
+      fail("LLM API returned HTTP \{response.code}: \{detail}")
+    }
   }
   let content = StringBuilder::new()
+  let reasoning = StringBuilder::new()
   let accumulator = ToolCallAccumulator::new()
   let mut finish_reason : String? = None
   for ;; {
@@ -275,6 +298,10 @@ pub async fn stream_chat_completion(
                 content.write_string(text)
                 on_delta(text)
               }
+              if chunk.reasoning_content is Some(text) {
+                reasoning.write_string(text)
+                on_reasoning(text)
+              }
               if chunk.finish_reason is Some(reason) {
                 finish_reason = Some(reason)
               }
@@ -286,9 +313,68 @@ pub async fn stream_chat_completion(
   }
   {
     content: content.to_string(),
+    reasoning_content: reasoning.to_string(),
     tool_calls: accumulator.finish(),
     finish_reason,
   }
+}
+
+///|
+/// Stream a chat completion over HTTP using SSE, invoking `on_delta` with each
+/// incremental text fragment as it arrives. Transient failures (network /
+/// connect timeout / HTTP 429 / HTTP 5xx) are retried with a fixed backoff
+/// until `max_retries` is exhausted; errors raised after streaming has
+/// started are never retried.
+pub async fn stream_chat_completion(
+  api_key : String,
+  base_url : String,
+  model : String,
+  messages : Array[Json],
+  tools : Array[Json],
+  max_tokens? : Int = 1200,
+  on_delta? : async (String) -> Unit = ignore_delta,
+  on_reasoning? : async (String) -> Unit = ignore_delta,
+  connect_timeout_ms? : Int = 30000,
+  stream_idle_timeout_ms? : Int = 60000,
+  max_retries? : Int = 2,
+  retry_delay_ms? : Int = 500,
+) -> StreamResult {
+  let mut retries_left = max_retries
+  let mut result : StreamResult = {
+    content: "",
+    reasoning_content: "",
+    tool_calls: [],
+    finish_reason: None,
+  }
+  let mut done = false
+  while !done {
+    try {
+      result = attempt_chat_completion(
+        api_key, base_url, model, messages, tools, max_tokens, on_delta, on_reasoning,
+        connect_timeout_ms, stream_idle_timeout_ms,
+      )
+      done = true
+    } catch {
+      e => {
+        let message = e.to_string()
+        // Failure 的 to_string 会带源位置与 "FAILED: " 前缀,因此用 contains 判断。
+        let marker = "retryable: "
+        if retries_left > 0 && message.contains(marker) {
+          retries_left = retries_left - 1
+          @async.sleep(retry_delay_ms)
+        } else if message.contains(marker) {
+          // 重试耗尽:剥掉内部标记,避免用户看到 "retryable:" 前缀。
+          match message.find(marker) {
+            Some(idx) => fail(message[idx + marker.length():])
+            None => raise e
+          }
+        } else {
+          raise e
+        }
+      }
+    }
+  }
+  result
 }
 
 ///|

@@ -51,6 +51,25 @@ pub fn Session::char_count(self : Session) -> Int {
 }
 
 ///|
+// 粗略的 token 估算:英文约 4 字符/token,中文等其他字符约 1 字符/token。
+// 用于决定何时压缩上下文,比纯字符数更接近模型计费口径。
+pub fn Session::estimated_tokens(self : Session) -> Int {
+  let mut ascii = 0
+  let mut other = 0
+  for message in self.messages {
+    let text = message.stringify()
+    for i = 0; i < text.length(); i = i + 1 {
+      if text[i].to_int() < 128 {
+        ascii += 1
+      } else {
+        other += 1
+      }
+    }
+  }
+  other + ascii / 4
+}
+
+///|
 pub fn Agent::new_session(self : Agent) -> Session {
   { messages: [@llm.chat_message("system", self.system_prompt)] }
 }
@@ -95,17 +114,25 @@ pub async fn Agent::compact(
   api_key : String,
   base_url : String,
   model : String,
-  threshold_chars? : Int = 20000,
-  keep_recent? : Int = 3,
+  threshold_tokens? : Int = 8000,
+  keep_recent_turns? : Int = 2,
 ) -> Unit {
-  if session.char_count() <= threshold_chars {
+  if session.estimated_tokens() <= threshold_tokens {
     return
   }
-  let keep = if keep_recent < 1 { 1 } else { keep_recent }
-  let mut cut = session.messages.length() - keep
-  // 保留窗口的起点不能是 tool 消息：tool 结果必须跟随其 assistant(tool_calls)，
-  // 否则重建后的历史会被 LLM API 以 400 拒绝（orphaned tool message）。
-  while cut > 1 && message_role(session.messages[cut]) == "tool" {
+  let keep_turns = if keep_recent_turns < 1 { 1 } else { keep_recent_turns }
+  // 按"轮"保留:以 user 消息为轮次边界,从尾部向前保留最近的 keep_turns 轮。
+  // 窗口起点恒为 user 消息,因此 assistant(tool_calls) 与其 tool 结果不会被
+  // 切散,天然避免孤儿 tool 消息导致 API 400。
+  let mut cut = session.messages.length() - 1
+  let mut seen_users = 0
+  while cut > 1 {
+    if message_role(session.messages[cut]) == "user" {
+      seen_users += 1
+      if seen_users >= keep_turns {
+        break
+      }
+    }
     cut = cut - 1
   }
   if cut <= 1 {
@@ -130,13 +157,21 @@ pub async fn Agent::compact(
     max_tokens=self.max_tokens,
     on_delta=@llm.ignore_delta,
   )
-  if summary_result.content == "" {
-    return
-  }
   let new_messages : Array[Json] = [session.messages[0]]
-  new_messages.push(
-    @llm.chat_message("user", "(会话摘要) " + summary_result.content),
-  )
+  if summary_result.content != "" {
+    // 摘要成功:用摘要替换被裁剪的旧历史。
+    new_messages.push(
+      @llm.chat_message("user", "(会话摘要) " + summary_result.content),
+    )
+  } else {
+    // 摘要失败回退:直接丢弃早期轮次,保留最近 keep_recent_turns 轮原文,
+    // 保证长会话仍能继续,而不是无限膨胀。
+    new_messages.push(
+      @llm.chat_message(
+        "user", "(会话历史过长,部分早期消息已被裁剪;以下为最近的对话)",
+      ),
+    )
+  }
   for i = cut; i < session.messages.length(); i = i + 1 {
     new_messages.push(session.messages[i])
   }
@@ -206,6 +241,7 @@ pub async fn Agent::turn(
       tools_json,
       max_tokens=self.max_tokens,
       on_delta=@llm.ignore_delta,
+      on_reasoning=on_thinking,
     )
     if result.finish_reason is Some("length") {
       trace.push("[observation] Model hit max_tokens; answer may be truncated")
@@ -233,6 +269,7 @@ pub async fn Agent::turn(
           [],
           max_tokens=self.max_tokens,
           on_delta~,
+          on_reasoning=on_thinking,
         )
         let text = if cont.content != "" {
           result.content + "\n" + cont.content
@@ -304,6 +341,7 @@ pub async fn Agent::turn(
       [],
       max_tokens=self.max_tokens,
       on_delta~,
+      on_reasoning=on_thinking,
     )
     if result.content != "" {
       let mut text = result.content
@@ -326,6 +364,7 @@ pub async fn Agent::turn(
           [],
           max_tokens=self.max_tokens,
           on_delta~,
+          on_reasoning=on_thinking,
         )
         if cont.content != "" {
           text = text + "\n" + cont.content

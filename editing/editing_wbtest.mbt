@@ -182,7 +182,7 @@ async test "multi_edit_tool applies edits atomically with syntax gate" {
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
   let ok = multi_edit_tool(
-    tmp,
+    Workspace::new(tmp),
     Auto,
     "{\"edits\":[{\"file\":\"a.mbt\",\"old_string\":\"pub fn old() {}\",\"new_string\":\"pub fn new() {}\",\"start_line\":1}]}",
   )
@@ -192,7 +192,7 @@ async test "multi_edit_tool applies edits atomically with syntax gate" {
   let bad = try {
     ignore(
       multi_edit_tool(
-        tmp,
+        Workspace::new(tmp),
         Auto,
         "{\"edits\":[{\"file\":\"a.mbt\",\"old_string\":\"pub fn new() {}\",\"new_string\":\"fn bad( {\",\"start_line\":1}]}",
       ),
@@ -216,10 +216,10 @@ async test "remove_tool deletes files within workspace only" {
     "x",
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
-  let ok = remove_tool(tmp, Auto, "{\"path\":\"gone.mbt\"}")
+  let ok = remove_tool(Workspace::new(tmp), Auto, "{\"path\":\"gone.mbt\"}")
   assert_eq(ok, "removed gone.mbt")
   let raised = try {
-    ignore(remove_tool(tmp, Auto, "{\"path\":\"../outside\"}"))
+    ignore(remove_tool(Workspace::new(tmp), Auto, "{\"path\":\"../outside\"}"))
     false
   } catch {
     _ => true
@@ -234,12 +234,147 @@ async test "remove_tool deletes files within workspace only" {
 async test "write_file_tool creates and overwrites files" {
   let tmp = @fs.tmpdir(prefix="moonsage-write-test-")
   let ok = write_file_tool(
-    tmp,
+    Workspace::new(tmp),
     Auto,
     "{\"path\":\"new.mbt\",\"content\":\"pub fn x() {}\"}",
   )
   assert_eq(ok, "wrote new.mbt")
   assert_true(@fs.read_file(tmp + "/new.mbt").text().contains("pub fn x()"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "write_file_tool rejects invalid syntax without writing" {
+  let tmp = @fs.tmpdir(prefix="moonsage-write-syncheck-test-")
+  let bad = try {
+    ignore(
+      write_file_tool(
+        Workspace::new(tmp),
+        Auto,
+        "{\"path\":\"bad.mbt\",\"content\":\"fn bad( {\"}",
+      ),
+    )
+    false
+  } catch {
+    e => e.to_string().contains("语法检查")
+  }
+  assert_true(bad)
+  // 语法门在写盘前执行,目标文件不应被创建。
+  let created = try (@fs.kind(tmp + "/bad.mbt") is @fs.FileKind::Regular) catch {
+    _ => false
+  }
+  assert_eq(created, false)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "write_file_tool skips syntax gate for non-source files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-write-plain-test-")
+  let ok = write_file_tool(
+    Workspace::new(tmp),
+    Auto,
+    "{\"path\":\"notes.txt\",\"content\":\"any text\\n\"}",
+  )
+  assert_eq(ok, "wrote notes.txt")
+  assert_true(@fs.read_file(tmp + "/notes.txt").text().contains("any text"))
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo restores overwritten files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-overwrite-test-")
+  let ws = Workspace::new(tmp)
+  let _ = @fs.write_file(
+    tmp + "/notes.txt",
+    "old text\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let ok = write_file_tool(
+    ws,
+    Auto,
+    "{\"path\":\"notes.txt\",\"content\":\"new text\"}",
+  )
+  assert_eq(ok, "wrote notes.txt")
+  let msg = ws.undo()
+  assert_eq(msg, "undid edit to notes.txt")
+  assert_eq(@fs.read_file(tmp + "/notes.txt").text(), "old text\n")
+  let again = ws.undo()
+  assert_eq(again, "nothing to undo")
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo removes created files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-create-test-")
+  let ws = Workspace::new(tmp)
+  let ok = write_file_tool(
+    ws,
+    Auto,
+    "{\"path\":\"fresh.txt\",\"content\":\"hello\"}",
+  )
+  assert_eq(ok, "wrote fresh.txt")
+  let msg = ws.undo()
+  assert_eq(msg, "undid creation of fresh.txt")
+  let exists = try (@fs.kind(tmp + "/fresh.txt") is @fs.FileKind::Regular) catch {
+    _ => false
+  }
+  assert_eq(exists, false)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo restores removed files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-remove-test-")
+  let ws = Workspace::new(tmp)
+  let _ = @fs.write_file(
+    tmp + "/del.txt",
+    "keep me\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let ok = remove_tool(ws, Auto, "{\"path\":\"del.txt\"}")
+  assert_eq(ok, "removed del.txt")
+  let msg = ws.undo()
+  assert_eq(msg, "undid edit to del.txt")
+  assert_eq(@fs.read_file(tmp + "/del.txt").text(), "keep me\n")
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "workspace undo restores multi_edit batches per file" {
+  let tmp = @fs.tmpdir(prefix="moonsage-undo-multi-test-")
+  let ws = Workspace::new(tmp)
+  let _ = @fs.write_file(
+    tmp + "/a.txt",
+    "one\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let _ = @fs.write_file(
+    tmp + "/b.txt",
+    "two\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let ok = multi_edit_tool(
+    ws,
+    Auto,
+    "{\"edits\":[{\"file\":\"a.txt\",\"old_string\":\"one\",\"new_string\":\"ONE\",\"start_line\":1},{\"file\":\"b.txt\",\"old_string\":\"two\",\"new_string\":\"TWO\",\"start_line\":1}]}",
+  )
+  assert_true(ok.contains("applied"))
+  assert_eq(ws.undo(), "undid edit to b.txt")
+  assert_eq(@fs.read_file(tmp + "/b.txt").text(), "two\n")
+  assert_eq(ws.undo(), "undid edit to a.txt")
+  assert_eq(@fs.read_file(tmp + "/a.txt").text(), "one\n")
   @fs.rmdir(tmp, recursive=true) catch {
     _ => ()
   }
@@ -342,6 +477,50 @@ async test "clone_repo_tool clones and switches workspace root" {
 }
 
 ///|
+#cfg(platform="windows")
+fn sleep_cmd_for_timeout_test() -> (String, Array[String]) {
+  (
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"],
+  )
+}
+
+///|
+#cfg(not(platform="windows"))
+fn sleep_cmd_for_timeout_test() -> (String, Array[String]) {
+  ("sleep", ["30"])
+}
+
+///|
+async test "run_cmd_with_timeout terminates hung commands" {
+  let (cmd, args) = sleep_cmd_for_timeout_test()
+  let (exit, err) = run_cmd_with_timeout(args, 1000, cmd~)
+  assert_eq(exit, -1)
+  assert_true(err.contains("timed out after 1000 ms"))
+}
+
+///|
+async test "run_cmd_with_timeout returns quick command output" {
+  let (exit, err) = run_cmd_with_timeout(["version"], 10000)
+  assert_eq(exit, 0)
+  assert_eq(err, "")
+}
+
+///|
+async test "run_cmd_with_timeout reports non-zero exits" {
+  let tmp = @fs.tmpdir(prefix="moonsage-cmd-nongit-")
+  let (exit, _) = run_cmd_with_timeout(
+    ["rev-parse", "--git-dir"],
+    5000,
+    cwd=tmp,
+  )
+  assert_true(exit != 0)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
 async test "git_has_changes detects tracked, untracked and clean states" {
   let repo = @fs.tmpdir(prefix="moonsage-has-changes-")
   let _ = @fs.write_file(
@@ -390,6 +569,70 @@ async test "git_has_changes detects tracked, untracked and clean states" {
     assert_true(git_has_changes(repo))
   }
   @fs.rmdir(repo, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "unique_branch_name avoids remote branches" {
+  let src = @fs.tmpdir(prefix="moonsage-unique-src-")
+  let _ = @fs.write_file(
+    src + "/a.mbt",
+    "pub fn a() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=src,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "-A"],
+    cwd=src,
+    no_console_window=true,
+  )
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=src,
+    no_console_window=true,
+  )
+  // 在远程造一个会冲突的分支名。
+  let conflict = @process.collect_output(
+    "git",
+    [
+      "-c", "user.name=t", "user.email=t@t", "commit", "--allow-empty", "-m", "conflict",
+    ],
+    cwd=src,
+    no_console_window=true,
+  )
+  ignore(conflict)
+  let conflict_branch = @process.collect_output(
+    "git",
+    ["branch", "moonsage/fix-x"],
+    cwd=src,
+    no_console_window=true,
+  )
+  ignore(conflict_branch)
+  let ws_base = @fs.tmpdir(prefix="moonsage-unique-ws-")
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 {
+    let ws = Workspace::new(ws_base)
+    let url = src.replace_all(old="\\", new="/")
+    let out = clone_repo_tool(ws, "{\"url\":\"\{url}\"}")
+    assert_true(out.contains("cloned"))
+    let root = ws.get_root()
+    let name = unique_branch_name(root, "moonsage/fix-x")
+    assert_eq(name, "moonsage/fix-x-2")
+    let current = git_text(["branch", "--show-current"], root)
+    assert_true(current != "")
+    assert_eq(remote_default_branch(root, current), current)
+  }
+  @fs.rmdir(src, recursive=true) catch {
+    _ => ()
+  }
+  @fs.rmdir(ws_base, recursive=true) catch {
     _ => ()
   }
 }

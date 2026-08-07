@@ -20,17 +20,19 @@ pub fn pr_commit_email(String, Int) -> String
 
 pub fn pr_title(String, String) -> String
 
-pub async fn publish_changes(String, String, String, WriteConfirm, String, title? : String) -> String?
+pub async fn publish_changes(String, String, String, WriteConfirm, String, title? : String, branch? : String) -> String?
 
 pub fn publish_tools(Workspace) -> Array[@tools.Tool]
 
-pub fn safe_path(String, String) -> String raise
+pub async fn run_cmd_with_timeout(Array[String], Int, cwd? : String, cmd? : String) -> (Int, String)
 
 pub fn write_tools(Workspace, WriteConfirm) -> Array[@tools.Tool]
 
 // Errors
 
 // Types and methods
+type EditRecord
+
 pub(all) struct EditSpec {
   file : String
   old_string : String
@@ -42,11 +44,14 @@ pub(all) struct EditSpec {
 pub(all) struct Workspace {
   root : Array[String]
   base : String
+  undo_stack : Array[EditRecord]
 }
 pub fn Workspace::clone_base(Self) -> String
 pub fn Workspace::get_root(Self) -> String
 pub fn Workspace::new(String) -> Self
+pub fn Workspace::push_undo(Self, String, String?) -> Unit
 pub fn Workspace::set_root(Self, String) -> Unit
+pub async fn Workspace::undo(Self) -> String
 
 pub(all) enum WriteConfirm {
   Prompt
