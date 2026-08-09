@@ -4,6 +4,7 @@ import {
   "moonsage/llm",
   "moonsage/mooncakes",
   "moonbitlang/async",
+  "moonbitlang/async/fs",
   "moonbitlang/core/json",
 }
 

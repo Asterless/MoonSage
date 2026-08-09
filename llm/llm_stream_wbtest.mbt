@@ -273,6 +273,127 @@ async test "stream_chat_completion assembles tool calls from fragments" {
 }
 
 ///|
+async test "stream_chat_completion rejects EOF after a content delta" {
+  @async.with_task_group() <| group => {
+    let port = mock_llm_server(group, [
+      sse_chunk(content_choice("partial answer")),
+    ])
+    let deltas = StringBuilder::new()
+    let raised = try {
+      ignore(
+        stream_chat_completion(
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          [chat_message("user", "hi")],
+          [],
+          max_tokens=64,
+          max_retries=0,
+          on_delta=async fn(text) {
+            deltas.write_string(text)
+            @async.sleep(0)
+          },
+        ),
+      )
+      false
+    } catch {
+      e => e.to_string().contains("stream closed before completion")
+    }
+    assert_true(raised)
+    assert_eq(deltas.to_string(), "partial answer")
+  }
+}
+
+///|
+async test "stream_chat_completion rejects EOF during tool arguments" {
+  @async.with_task_group() <| group => {
+    let partial = sse_chunk(
+      tool_call_choice(0, "call_1", "search_modules", "{\"query\":"),
+    )
+    let port = mock_llm_server(group, [partial])
+    let raised = try {
+      ignore(
+        stream_chat_completion(
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          [chat_message("user", "hi")],
+          [],
+          max_tokens=64,
+          max_retries=0,
+        ),
+      )
+      false
+    } catch {
+      e => e.to_string().contains("stream closed before completion")
+    }
+    assert_true(raised)
+  }
+}
+
+///|
+async test "stream retry suppresses an already emitted prefix" {
+  @async.with_task_group() <| group => {
+    let interrupted = sse_chunk(content_choice("Hello"))
+    let complete = sse_chunk(content_choice("Hello")) +
+      sse_chunk(content_choice(" world")) +
+      sse_chunk(content_choice("", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [interrupted, complete])
+    let deltas = StringBuilder::new()
+    let result = stream_chat_completion(
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      [chat_message("user", "hi")],
+      [],
+      max_tokens=64,
+      max_retries=1,
+      retry_delay_ms=10,
+      on_delta=async fn(text) {
+        deltas.write_string(text)
+        @async.sleep(0)
+      },
+    )
+    assert_eq(result.content, "Hello world")
+    assert_eq(deltas.to_string(), "Hello world")
+    assert_eq(result.finish_reason, Some("stop"))
+  }
+}
+
+///|
+async test "stream retry rejects a shorter completed response" {
+  @async.with_task_group() <| group => {
+    let interrupted = sse_chunk(content_choice("Hello world"))
+    let shorter = sse_chunk(content_choice("Hello")) +
+      sse_chunk(content_choice("", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [interrupted, shorter])
+    let raised = try {
+      ignore(
+        stream_chat_completion(
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          [chat_message("user", "hi")],
+          [],
+          max_tokens=64,
+          max_retries=1,
+          retry_delay_ms=10,
+        ),
+      )
+      false
+    } catch {
+      e =>
+        e
+        .to_string()
+        .contains("retry ended before reproducing the partial response")
+    }
+    assert_true(raised)
+  }
+}
+
+///|
 // 延迟 delay_ms 后才返回 SSE 响应，模拟 LLM 服务响应缓慢/中断。
 async fn mock_llm_server_delayed(
   group : @async.TaskGroup[Unit],

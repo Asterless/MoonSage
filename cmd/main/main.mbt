@@ -6,7 +6,7 @@ fn usage() -> String {
     #|Usage:
     #|  moonsage chat
     #|  moonsage search <keywords>
-    #|  moonsage ask <question>
+    #|  moonsage ask [--stream-json] <question>
     #|  moonsage audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
     #|  moonsage audit --clean
     #|  moonsage --version
@@ -42,11 +42,84 @@ async fn run_search(query : String) -> Unit {
 }
 
 ///|
-async fn run_ask(question : String) -> Unit {
+fn engine_event_json(event : @agent.EngineEvent) -> Json {
+  match event {
+    ThinkingDelta(event) =>
+      Json::object({
+        "type": Json::string("thinking_delta"),
+        "round": Json::number(event.round.to_double()),
+        "text": Json::string(event.text),
+      })
+    ToolStarted(event) =>
+      Json::object({
+        "type": Json::string("tool_started"),
+        "round": Json::number(event.round.to_double()),
+        "call_id": Json::string(event.call_id),
+        "name": Json::string(event.name),
+        "arguments": Json::string(event.arguments),
+      })
+    ToolFinished(event) =>
+      Json::object({
+        "type": Json::string("tool_finished"),
+        "round": Json::number(event.round.to_double()),
+        "call_id": Json::string(event.call_id),
+        "name": Json::string(event.name),
+        "status": Json::string(event.status),
+        "result": Json::string(event.result),
+      })
+    FinalStarted => Json::object({ "type": Json::string("final_started") })
+    FinalDelta(text) =>
+      Json::object({
+        "type": Json::string("final_delta"),
+        "text": Json::string(text),
+      })
+    Retrying(event) =>
+      Json::object({
+        "type": Json::string("retrying"),
+        "attempt": Json::number(event.attempt.to_double()),
+        "reason": Json::string(event.reason),
+      })
+    Warning(message) =>
+      Json::object({
+        "type": Json::string("warning"),
+        "message": Json::string(message),
+      })
+    Error(message) =>
+      Json::object({
+        "type": Json::string("error"),
+        "message": Json::string(message),
+      })
+  }
+}
+
+///|
+async fn write_json_event(event : @agent.EngineEvent) -> Unit {
+  @stdio.stdout.write(engine_event_json(event).stringify() + "\n")
+}
+
+///|
+async fn configured_mcp_tools() -> Array[@tools.Tool] {
+  let raw = @sys.get_env_var("MOONSAGE_MCP").unwrap_or("").trim()
+  if raw == "" {
+    return []
+  }
+  let document = @json.parse(raw)
+  guard @tools.McpServerConfig::from_json(document) is Some(config) else {
+    fail("MOONSAGE_MCP must be a JSON object with name and command")
+  }
+  @tools.mcp_tools(config)
+}
+
+///|
+async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
   let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
   guard key != "" else {
-    @stdio.stderr.write("error: set MOONSAGE_API_KEY before using ask\n") catch {
-      _ => ()
+    if stream_json {
+      write_json_event(Error("set MOONSAGE_API_KEY before using ask"))
+    } else {
+      @stdio.stderr.write("error: set MOONSAGE_API_KEY before using ask\n") catch {
+        _ => ()
+      }
     }
     return
   }
@@ -57,7 +130,51 @@ async fn run_ask(question : String) -> Unit {
   let provider = @llm.provider_from_string(
     @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
   )
-  let modules = @mooncakes.fetch_modules()
+  let modules = @mooncakes.fetch_modules() catch {
+    error => {
+      if stream_json {
+        write_json_event(Error(error.to_string()))
+        return
+      }
+      @stdio.stderr.write("warning: \{error.to_string()}\n") catch {
+        _ => ()
+      }
+      []
+    }
+  }
+  let cwd = @env.current_dir().unwrap_or(".")
+  let project_instructions = @agent.load_project_instructions(cwd)
+  let mcp_tools = configured_mcp_tools() catch {
+    error => {
+      if stream_json {
+        write_json_event(Error(error.to_string()))
+        return
+      } else {
+        @stdio.stderr.write("warning: \{error.to_string()}\n") catch {
+          _ => ()
+        }
+      }
+      []
+    }
+  }
+  if stream_json {
+    ignore(
+      @agent.run_llm_agent(
+        key,
+        base_url,
+        model,
+        modules,
+        question,
+        on_event=async fn(event) { write_json_event(event) },
+        provider~,
+        extra_tools=mcp_tools,
+        project_instructions~,
+      ),
+    ) catch {
+      error => write_json_event(Error(error.to_string()))
+    }
+    return
+  }
   @stdio.stdout.write("MoonSage\n")
   let printer = @md_ansi.MdStreamPrinter::new()
   let answer = @agent.run_llm_agent(
@@ -74,6 +191,8 @@ async fn run_ask(question : String) -> Unit {
       }
     },
     provider~,
+    extra_tools=mcp_tools,
+    project_instructions~,
   )
   printer.finish()
   @stdio.stdout.write(printer.take_output())
@@ -154,7 +273,8 @@ async fn main {
   match matches.subcommand {
     Some(("chat", m)) => run_chat_cmd(m)
     Some(("search", m)) => run_search(join_values(m, "keywords"))
-    Some(("ask", m)) => run_ask(join_values(m, "question"))
+    Some(("ask", m)) =>
+      run_ask(join_values(m, "question"), stream_json=flag_of(m, "stream-json"))
     Some(("audit", m)) => @audit.run_audit(audit_args(m))
     _ => println(usage())
   }

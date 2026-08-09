@@ -23,6 +23,40 @@ moon run cmd/main -- chat --session demo      # resume/create a durable session
 moon run cmd/main -- chat --continue          # resume the most recent session
 ```
 
+For headless automation, `ask --stream-json` writes one JSON event per line
+and never emits ANSI, Markdown, headers, or trace text. Events include
+`thinking_delta`, `tool_started`, `tool_finished`, `retrying`,
+`final_started`, `final_delta`, and `error`:
+
+```powershell
+moon run cmd/main -- ask --stream-json "find an HTTP client"
+```
+
+`ask` can also load one stdio MCP server from `MOONSAGE_MCP`. Its value is a
+JSON object with an explicit executable command; discovered tools are exposed
+to the model as `mcp_<server>_<tool>` to avoid collisions with MoonSage's
+built-in tools. The server is started in a bounded session for discovery and
+for every tool call, then cancelled when the request completes.
+
+```powershell
+$env:MOONSAGE_MCP = '{"name":"files","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","D:/work"]}'
+moon run cmd/main -- ask "inspect the project files"
+```
+
+Only configure MCP commands you trust: a stdio MCP server is a local process
+and has the permissions granted to the MoonSage process.
+
+For independent package investigations, `ask` also gives the model a
+read-only `delegate_task` tool. Multiple adjacent delegations run concurrently
+(at most three at a time), while their results and lifecycle events are
+reported in request order. File, shell, Git, and publishing tools always stay
+serial to preserve confirmation and workspace safety.
+
+MoonSage automatically reads `AGENTS.md` and `CLAUDE.md` from the directory
+where `ask` or `chat` starts. Both files are appended to the system prompt in
+that order and capped at 12,000 bytes each. This lets a repository define its
+own build, test, and editing rules without duplicating them in every request.
+
 In `chat` mode the agent can inspect the local project
 (`list_project_files`, `read_file`, `run_moon`, `git_diff`) and **modify it**
 with `write_file` / `multi_edit` / `remove` — every write asks for your
@@ -81,7 +115,8 @@ configurable confirmation mode (`prompt` per-file, `diff` for a final review,
 or `yes` to skip). Changes are confined to the cloned workspace and never
 touch the user's own files. Fix mode runs in two phases: a read-only
 analysis phase (bounded budget) that lists root causes and concrete fixes,
-then a fix phase that applies them one at a time with `write_file` and
+then a fix phase that applies them one at a time with `multi_edit` (or
+`write_file` for new files and `remove` for deletion) and
 re-runs `moon build` / `moon test` to verify each change before writing the
 report. `--max-calls` (default 30) applies to the fix phase. The MoonBit
 toolchain (`moon`) and `git` must be available on `PATH`. Each run without

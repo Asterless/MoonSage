@@ -9,11 +9,68 @@ fn relative_to_root(root : String, path : String) -> String {
 
 ///|
 fn truncate_output(s : String, max : Int) -> String {
-  if s.length() > max {
-    s[:max].to_owned() + "\n... (truncated)"
-  } else {
-    s
+  if s.length() <= max || max <= 0 {
+    return if max <= 0 { "" } else { s }
   }
+  let marker = "\n... (truncated)\n"
+  let budget = max - marker.length()
+  if budget <= 0 {
+    return marker
+  }
+  let lines = s.split("\n").to_array()
+  let head_budget = budget / 2
+  let tail_budget = budget - head_budget
+  let head : Array[String] = []
+  let mut head_len = 0
+  for line in lines {
+    let extra = line.length() + (if head.length() > 0 { 1 } else { 0 })
+    if head_len + extra > head_budget {
+      break
+    }
+    head.push(line.to_owned())
+    head_len += extra
+  }
+  let tail : Array[String] = []
+  let mut tail_len = 0
+  let mut index = lines.length() - 1
+  while index >= 0 {
+    let line = lines[index]
+    let extra = line.length() + (if tail.length() > 0 { 1 } else { 0 })
+    if tail_len + extra > tail_budget {
+      break
+    }
+    tail.push(line.to_owned())
+    tail_len += extra
+    index -= 1
+  }
+  if head.length() == 0 && lines.length() > 0 {
+    let first = lines[0]
+    head.push(first[:head_budget].to_owned())
+  }
+  if tail.length() == 0 && lines.length() > 0 {
+    let last = lines[lines.length() - 1]
+    let start = if last.length() > tail_budget {
+      last.length() - tail_budget
+    } else {
+      0
+    }
+    tail.push(last[start:].to_owned())
+  }
+  let out = StringBuilder::new()
+  for i = 0; i < head.length(); i = i + 1 {
+    if i > 0 {
+      out.write_char('\n')
+    }
+    out.write_string(head[i])
+  }
+  out.write_string(marker)
+  for i = tail.length() - 1; i >= 0; i = i - 1 {
+    if i < tail.length() - 1 {
+      out.write_char('\n')
+    }
+    out.write_string(tail[i])
+  }
+  out.to_string()
 }
 
 ///|

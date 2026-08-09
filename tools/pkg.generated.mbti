@@ -1,6 +1,10 @@
 // Generated using `moon info`, DON'T EDIT IT
 package "moonsage/tools"
 
+import {
+  "moonbitlang/core/debug",
+}
+
 // Values
 pub fn argument_string(String, String) -> String raise
 
@@ -10,6 +14,8 @@ pub fn error_json(String) -> String
 
 pub fn find_tool(Array[Tool], String) -> Tool?
 
+pub async fn mcp_tools(McpServerConfig) -> Array[Tool]
+
 pub fn object_schema(Map[String, Json], Array[String]) -> Json
 
 pub fn string_field(String) -> Json
@@ -17,6 +23,14 @@ pub fn string_field(String) -> Json
 // Errors
 
 // Types and methods
+pub(all) struct McpServerConfig {
+  name : String
+  command : String
+  args : Array[String]
+  timeout_ms : Int
+} derive(Eq, @debug.Debug)
+pub fn McpServerConfig::from_json(Json) -> Self?
+
 pub(all) struct Tool {
   schema : ToolSchema
   execute : async (String) -> String

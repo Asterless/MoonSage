@@ -3,7 +3,10 @@
 let compact_threshold_tokens = 8000
 
 ///|
-fn chat_system_prompt(cwd : String) -> String {
+fn chat_system_prompt(
+  cwd : String,
+  project_instructions? : String = "",
+) -> String {
   (
     #|You are MoonSage, an interactive agent for the MoonBit ecosystem.
     #|You can search Mooncakes packages with search_modules, and inspect the
@@ -37,7 +40,8 @@ fn chat_system_prompt(cwd : String) -> String {
     #|- Conserve tool calls: never repeat a tool with the same arguments, and
     #|  stop calling tools once you have enough evidence.
     #|- Answer in the user's language with Markdown.
-  )
+  ) +
+  project_instructions
 }
 
 ///|
@@ -45,9 +49,10 @@ fn chat_agent(
   modules : Array[@moonsage.ModuleSummary],
   cwd : String,
   ws : @editing.Workspace,
+  project_instructions? : String = "",
 ) -> @agent.Agent {
   {
-    system_prompt: chat_system_prompt(cwd),
+    system_prompt: chat_system_prompt(cwd, project_instructions~),
     tools: @agent.ask_tools(modules) +
     @local.local_tools(ws) +
     @editing.write_tools(ws, @editing.Prompt) +
@@ -241,7 +246,8 @@ pub async fn run_chat(
     }
   }
   let ws = @editing.Workspace::new(cwd)
-  let agent = chat_agent(modules, cwd, ws)
+  let project_instructions = @agent.load_project_instructions(cwd)
+  let agent = chat_agent(modules, cwd, ws, project_instructions~)
   let store_root = session_root(cwd)
   let fresh_session = fn() -> (String, @agent.Session) {
     (
@@ -358,9 +364,12 @@ pub async fn run_chat(
                   thinking.write_string(text)
                 }
               },
+              context_window_tokens=32768,
+              reserved_output_tokens=6000,
               on_event=async fn(event) {
                 match event {
-                  @agent.ToolCall(name) => {
+                  @agent.ToolStarted(event) => {
+                    let name = event.name
                     if thinking.to_string().length() > 0 {
                       @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
                       @stdio.stdout.write(thinking.to_string())
@@ -369,7 +378,7 @@ pub async fn run_chat(
                     }
                     @stdio.stdout.write("\n▸ \{tool_label(name)} …\n")
                   }
-                  @agent.ToolResult(_) => ()
+                  @agent.ToolFinished(_) => ()
                   _ => ()
                 }
               },

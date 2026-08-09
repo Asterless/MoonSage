@@ -55,6 +55,16 @@ test "chat agent combines ask and local tools" {
 }
 
 ///|
+test "chat prompt appends project instructions" {
+  let prompt = chat_system_prompt(
+    "C:/work",
+    project_instructions="\n<ProjectInstructions>keep edits small</ProjectInstructions>",
+  )
+  assert_true(prompt.contains("The local project root is:\nC:/work"))
+  assert_true(prompt.contains("keep edits small"))
+}
+
+///|
 test "utf8_or_gbk passes valid UTF-8 through unchanged" {
   let utf8 = b"\xe4\xbd\xa0\xe5\xa5\xbd" // 你好
   assert_eq(utf8_or_gbk(utf8, utf8.length()), "你好")

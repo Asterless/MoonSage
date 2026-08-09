@@ -9,6 +9,7 @@ import {
   "moonsage/mooncakes",
   "moonsage/md_ansi",
   "moonsage/agent",
+  "moonsage/tools",
   "moonsage/audit",
   "moonsage/dotenv",
   "moonbitlang/async",

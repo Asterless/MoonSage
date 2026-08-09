@@ -46,7 +46,7 @@
 
 - [x] **11. provider 抽象层**: 支持 Anthropic 协议与 Ollama 本地模型,为多模型路由铺路
   - 完成: 新增 `llm/provider.mbt`(`ProviderKind` 枚举 + Ollama/Anthropic 流解析 + Anthropic 消息/tools 转换);`stream_chat_completion_provider` 按 provider 分发,旧 `stream_chat_completion` 保持兼容;`MOONSAGE_PROVIDER`(openai/anthropic/ollama)贯穿 agent/chat/audit/main;新增 6 个测试,`moon test` 144 全过。
-- [ ] **12. MCP 客户端**: 先 stdio 传输,接入工具注册表
-- [ ] **13. headless / JSON 事件输出**: 基于 `EngineEvent` 提供 stream-json / HTTP 服务模式
-- [ ] **14. 子代理并行**: 审计分析/修复阶段并行化,或引入 Task 工具
-- [ ] **15. 技能/插件加载**: 项目级指令文件与可插拔工具集
+- [x] **12. MCP 客户端**: `MOONSAGE_MCP` configures one explicit stdio server. MoonSage initializes it, discovers `tools/list`, namespaces its tools in the ask registry, and uses bounded `tools/call` sessions.
+- [x] **13. headless / JSON 事件输出**: `ask --stream-json` emits JSON Lines from `EngineEvent`, including tool lifecycle, retries, final output, and failures. Default terminal output is unchanged.
+- [x] **14. 子代理并行**: `ask` exposes a read-only `delegate_task` subagent tool. Adjacent independent delegations run with a bounded concurrency of three while preserving ordered tool results and events.
+- [x] **15. 技能/插件加载**: Loads bounded `AGENTS.md` and `CLAUDE.md` project instructions for ask/chat; MCP supplies the pluggable stdio tool surface.

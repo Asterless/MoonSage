@@ -36,13 +36,24 @@ fn root_command() -> @argparse.Command {
           about="Search keywords.",
         ),
       ]),
-      @argparse.Command("ask", about="Ask a one-shot question.", positionals=[
-        @argparse.PositionArg(
-          "question",
-          num_args=@argparse.ValueRange(lower=0),
-          about="Question text.",
-        ),
-      ]),
+      @argparse.Command(
+        "ask",
+        about="Ask a one-shot question.",
+        flags=[
+          @argparse.FlagArg(
+            "stream-json",
+            long="stream-json",
+            about="Write Agent lifecycle events as JSON Lines.",
+          ),
+        ],
+        positionals=[
+          @argparse.PositionArg(
+            "question",
+            num_args=@argparse.ValueRange(lower=0),
+            about="Question text.",
+          ),
+        ],
+      ),
       @argparse.Command(
         "audit",
         about="Audit a remote Mooncakes package (optionally fix it).",
@@ -67,7 +78,7 @@ fn root_command() -> @argparse.Command {
           @argparse.FlagArg(
             "fix",
             long="fix",
-            about="Apply fixes with write_file.",
+            about="Apply fixes with verified local edits.",
           ),
           @argparse.FlagArg(
             "pr",

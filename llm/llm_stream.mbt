@@ -213,9 +213,38 @@ pub async fn ignore_delta(_ : String) -> Unit {
 }
 
 ///|
-// 单次流式请求尝试。失败消息以 "retryable: " 前缀标记可重试错误
-// (网络/连接超时/429/5xx),调用方据此退避重试;已开始接收内容后
-// 的流中断不标记,避免重试导致内容重复。
+pub async fn ignore_retry(_attempt : Int, _reason : String) -> Unit {
+  @async.sleep(0)
+}
+
+///|
+// Forward only the suffix that has not already been shown by an earlier
+// attempt. A retry must reproduce the emitted prefix exactly; otherwise
+// continuing would splice two different model responses together.
+async fn forward_new_delta(
+  aggregate : String,
+  emitted : StringBuilder,
+  callback : async (String) -> Unit,
+) -> Unit {
+  let previous = emitted.to_string()
+  if aggregate.length() <= previous.length() {
+    guard previous.has_prefix(aggregate) else {
+      fail("LLM API retry diverged from the partial response already emitted")
+    }
+    return
+  }
+  guard aggregate.has_prefix(previous) else {
+    fail("LLM API retry diverged from the partial response already emitted")
+  }
+  let suffix = aggregate[previous.length():].to_owned()
+  emitted.write_string(suffix)
+  callback(suffix)
+}
+
+///|
+// One streaming request attempt. Retryable failures use an internal marker;
+// the caller applies bounded backoff. Partial output is safe to retry because
+// forward_new_delta suppresses the prefix already shown to the user.
 async fn attempt_chat_completion(
   provider : ProviderKind,
   api_key : String,
@@ -228,6 +257,8 @@ async fn attempt_chat_completion(
   on_reasoning : async (String) -> Unit,
   connect_timeout_ms : Int,
   stream_idle_timeout_ms : Int,
+  emitted_content : StringBuilder,
+  emitted_reasoning : StringBuilder,
 ) -> StreamResult {
   let (endpoint, headers) = match provider {
     OpenAi =>
@@ -321,20 +352,31 @@ async fn attempt_chat_completion(
   let reasoning = StringBuilder::new()
   let accumulator = ToolCallAccumulator::new()
   let mut finish_reason : String? = None
+  let mut completed = false
   for ;; {
     let line = @async.with_timeout(stream_idle_timeout_ms, () => {
       client.read_until("\n")
     }) catch {
       @async.TimeoutError(_) =>
-        fail("LLM API stream idle timed out (\{stream_idle_timeout_ms} ms)")
-      err => raise err
+        fail(
+          "retryable: LLM API stream idle timed out (\{stream_idle_timeout_ms} ms)",
+        )
+      err => fail("retryable: LLM API stream read failed: \{err.to_string()}")
     }
     match line {
-      None => break
+      None =>
+        if completed {
+          break
+        } else {
+          fail("retryable: LLM API stream closed before completion")
+        }
       Some(line) =>
         match parse_sse_line(line) {
           Skip => ()
-          Done => break
+          Done => {
+            completed = true
+            break
+          }
           Data(payload) => {
             let chunk = match provider {
               OpenAi => parse_stream_chunk(payload)
@@ -344,14 +386,23 @@ async fn attempt_chat_completion(
             if chunk is Some(chunk) {
               if chunk.content is Some(text) {
                 content.write_string(text)
-                on_delta(text)
+                forward_new_delta(
+                  content.to_string(),
+                  emitted_content,
+                  on_delta,
+                )
               }
               if chunk.reasoning_content is Some(text) {
                 reasoning.write_string(text)
-                on_reasoning(text)
+                forward_new_delta(
+                  reasoning.to_string(),
+                  emitted_reasoning,
+                  on_reasoning,
+                )
               }
               if chunk.finish_reason is Some(reason) {
                 finish_reason = Some(reason)
+                completed = true
               }
               accumulator.add(chunk.tool_calls)
             }
@@ -359,9 +410,15 @@ async fn attempt_chat_completion(
         }
     }
   }
+  let final_content = content.to_string()
+  let final_reasoning = reasoning.to_string()
+  guard final_content == emitted_content.to_string() &&
+    final_reasoning == emitted_reasoning.to_string() else {
+    fail("LLM API retry ended before reproducing the partial response")
+  }
   {
-    content: content.to_string(),
-    reasoning_content: reasoning.to_string(),
+    content: final_content,
+    reasoning_content: final_reasoning,
     tool_calls: accumulator.finish(),
     finish_reason,
   }
@@ -372,7 +429,7 @@ async fn attempt_chat_completion(
 /// incremental text fragment as it arrives. Transient failures (network /
 /// connect timeout / HTTP 429 / HTTP 5xx) are retried with a fixed backoff
 /// until `max_retries` is exhausted; errors raised after streaming has
-/// started are never retried.
+/// started are retried without emitting the same prefix twice.
 pub async fn stream_chat_completion_provider(
   provider : ProviderKind,
   api_key : String,
@@ -383,12 +440,16 @@ pub async fn stream_chat_completion_provider(
   max_tokens? : Int = 1200,
   on_delta? : async (String) -> Unit = ignore_delta,
   on_reasoning? : async (String) -> Unit = ignore_delta,
+  on_retry? : async (Int, String) -> Unit = ignore_retry,
   connect_timeout_ms? : Int = 30000,
   stream_idle_timeout_ms? : Int = 60000,
   max_retries? : Int = 2,
   retry_delay_ms? : Int = 500,
 ) -> StreamResult {
   let mut retries_left = max_retries
+  let mut attempt = 0
+  let emitted_content = StringBuilder::new()
+  let emitted_reasoning = StringBuilder::new()
   let mut result : StreamResult = {
     content: "",
     reasoning_content: "",
@@ -397,10 +458,12 @@ pub async fn stream_chat_completion_provider(
   }
   let mut done = false
   while !done {
+    attempt += 1
     try {
       result = attempt_chat_completion(
         provider, api_key, base_url, model, messages, tools, max_tokens, on_delta,
-        on_reasoning, connect_timeout_ms, stream_idle_timeout_ms,
+        on_reasoning, connect_timeout_ms, stream_idle_timeout_ms, emitted_content,
+        emitted_reasoning,
       )
       done = true
     } catch {
@@ -410,6 +473,11 @@ pub async fn stream_chat_completion_provider(
         let marker = "retryable: "
         if retries_left > 0 && message.contains(marker) {
           retries_left = retries_left - 1
+          let reason = match message.find(marker) {
+            Some(idx) => message[idx + marker.length():].to_owned()
+            None => message
+          }
+          on_retry(attempt, reason)
           @async.sleep(retry_delay_ms)
         } else if message.contains(marker) {
           // 重试耗尽:剥掉内部标记,避免用户看到 "retryable:" 前缀。
@@ -438,6 +506,7 @@ pub async fn stream_chat_completion(
   max_tokens? : Int = 1200,
   on_delta? : async (String) -> Unit = ignore_delta,
   on_reasoning? : async (String) -> Unit = ignore_delta,
+  on_retry? : async (Int, String) -> Unit = ignore_retry,
   connect_timeout_ms? : Int = 30000,
   stream_idle_timeout_ms? : Int = 60000,
   max_retries? : Int = 2,
@@ -453,6 +522,7 @@ pub async fn stream_chat_completion(
     max_tokens~,
     on_delta~,
     on_reasoning~,
+    on_retry~,
     connect_timeout_ms~,
     stream_idle_timeout_ms~,
     max_retries~,
