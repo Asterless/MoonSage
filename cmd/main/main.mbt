@@ -17,6 +17,8 @@ fn usage() -> String {
     #|  MOONSAGE_API_KEY    required for chat/ask/audit
     #|  MOONSAGE_BASE_URL   default: https://api.deepseek.com
     #|  MOONSAGE_MODEL      default: deepseek-chat
+    #|  MOONSAGE_PROVIDER   openai (default), anthropic, or ollama
+    #|  MOONSAGE_MCP        optional stdio MCP server JSON for ask
   )
 }
 

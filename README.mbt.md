@@ -2,8 +2,9 @@
 
 MoonSage is a MoonBit-native tool-calling agent for discovering packages in the
 [Mooncakes](https://mooncakes.io/) registry. It combines deterministic package
-search with an optional DeepSeek-powered agent that can plan multi-step
-research, inspect live manifests, and return cited recommendations.
+search with an optional tool-calling agent that can use OpenAI-compatible,
+Anthropic, or Ollama protocols, plan multi-step research, inspect live
+manifests, and return cited recommendations.
 
 ## Run
 
@@ -31,6 +32,11 @@ and never emits ANSI, Markdown, headers, or trace text. Events include
 ```powershell
 moon run cmd/main -- ask --stream-json "find an HTTP client"
 ```
+
+Tool events include the model round, call ID, tool name, arguments, status,
+and result. Network, MCP configuration, retry exhaustion, and agent failures
+are emitted as `error` events so JSONL consumers do not need to parse terminal
+diagnostics.
 
 `ask` can also load one stdio MCP server from `MOONSAGE_MCP`. Its value is a
 JSON object with an explicit executable command; discovered tools are exposed
@@ -67,7 +73,8 @@ repository into `.moonsage/workspaces/` and switches all file tools to it, and
 and opens a pull request against the repository (with your confirmation).
 Conversations persist under `.moonsage/sessions/` (resumable with `--session`
 or `--continue`); very long conversations are compacted automatically by
-summarizing older history.
+summarizing older history. Use `/help` to list chat commands, `/undo` to revert
+the most recent file edit, and `/exit` or `/quit` to leave the session.
 
 To audit a remote Mooncakes package and (optionally) fix issues it finds:
 
@@ -101,14 +108,20 @@ the audit report as the PR body. The fix phase uses three write tools:
 a `moonc syncheck` gate that rejects edits breaking syntax), and `remove`
 (delete files); all writes are confined to the cloned workspace.
 
+The audit output also includes structured evidence reconstructed from agent
+events. It records every completed tool call and derives verification status
+from the actual `run_moon` exit code. In fix mode, a successful verification
+must occur after the latest successful edit; conflicting model claims are
+reported explicitly.
+
 ## Remote audit
 
 The `audit` command audits a remote package by cloning its GitHub repository
 into a temporary directory (or the `--workspace <dir>` you provide). It
 establishes a `moon build` / `moon test` baseline, then runs a dedicated agent
 that lists/reads files, runs moon commands, and - in fix mode - overwrites
-files and re-runs tests to verify each fix. It finishes with a report in the
-user's language plus a `git diff` of every change.
+files and re-runs tests to verify each fix. It finishes with a Simplified
+Chinese report, structured tool evidence, and a `git diff` of every change.
 
 Audit mode is read-only by default; `--fix` enables file writes with a
 configurable confirmation mode (`prompt` per-file, `diff` for a final review,
@@ -134,15 +147,16 @@ afterwards (`--clean` and `--workspace` cannot be combined).
    multi-module `moon.work` layouts).
 4. Run a dedicated agent (its own budget, default 30 tool calls) with these
    tools: `list_project_files`, `read_file` (with line ranges), `run_moon`
-   (build/test inside the workspace), `git_diff`; `write_file` appears only
-   in `--fix` mode and is guarded against path traversal.
+   (build/test inside the workspace), and `git_diff`; `multi_edit`,
+   `write_file`, and `remove` appear only in `--fix` mode and are guarded
+   against path traversal.
 5. The agent establishes a `moon build` / `moon test` baseline, inspects the
    source, and in fix mode rewrites files and re-runs tests to verify each
    change. When the tool budget runs out, the final request exposes no tools
    so the model must answer with a plain-text report.
-6. The final report is rendered as ANSI in the user's language; in fix mode a
-   `git diff` of every change is printed, and `--workspace` keeps the tree
-   for inspection.
+6. The final report is rendered as ANSI in Simplified Chinese; in fix mode a
+   structured evidence section and `git diff` are printed, and `--workspace`
+   keeps the tree for inspection.
 
 ## Architecture
 
@@ -152,9 +166,12 @@ responsibility and its own tests:
 ```
 moonsage/            domain: models, search, deterministic search agent, response compaction
 moonsage/mooncakes   network: fetch modules / manifests / docs from Mooncakes
-moonsage/llm         LLM streaming protocol (SSE + stream_chat_completion)
-moonsage/tools       tool contract (ToolSchema / Tool / registry), zero project deps
-moonsage/agent       generic LLM agent runtime (loop + budgets + plain-text final answer)
+moonsage/llm         provider adapters, streaming, retries, and delta de-duplication
+moonsage/tools       tool contract, registry, and bounded stdio MCP client
+moonsage/agent       events, budgets, compaction, delegated research, project instructions
+moonsage/chat        durable interactive sessions and terminal workflow
+moonsage/local       read-only project tools and bounded command execution
+moonsage/editing     confirmed edits, syntax gates, repository cloning, and PR tools
 moonsage/audit       remote audit: audit tools, source clone, report rendering
 moonsage/md_ansi     Markdown -> ANSI terminal renderer
 moonsage/dotenv      .env loading
@@ -169,8 +186,13 @@ graph LR
   main --> mooncakes
   main --> md_ansi
   main --> agent
+  main --> chat
   main --> audit
   main --> dotenv
+  main --> tools
+  chat --> agent
+  chat --> local
+  chat --> editing
   audit --> agent
   audit --> tools
   audit --> md_ansi
@@ -199,9 +221,19 @@ Copy-Item .env.example .env
 
 | Variable | Required | Default |
 | --- | --- | --- |
-| `MOONSAGE_API_KEY` | for `ask` | — |
+| `MOONSAGE_API_KEY` | for `chat`, `ask`, and `audit` | — |
 | `MOONSAGE_BASE_URL` | no | `https://api.deepseek.com` |
 | `MOONSAGE_MODEL` | no | `deepseek-chat` |
+| `MOONSAGE_PROVIDER` | no | `openai` |
+| `MOONSAGE_MCP` | no | empty |
+
+`MOONSAGE_PROVIDER` accepts `openai`, `anthropic`, or `ollama` and selects the
+wire protocol used by `chat`, `ask`, and `audit`. `MOONSAGE_MCP` is a JSON
+object for one trusted stdio server and is loaded by `ask`; it accepts `name`,
+`command`, optional string-array `args`, and optional positive `timeout_ms`.
+The CLI currently requires `MOONSAGE_API_KEY` to be non-empty; use any
+non-empty placeholder when connecting to an unauthenticated local Ollama
+server.
 
 ## Agent loop
 
@@ -216,10 +248,11 @@ rounds, twelve total tool calls, and four package-document reads:
 6. Feed tool observations back to the model.
 7. Return an answer in the user's language with Mooncakes documentation URLs.
 
-Mooncakes requests use `moonbitlang/async/http`. The `ask` command streams
-chat completions directly from any OpenAI-compatible API (e.g. DeepSeek) over
-SSE (`text/event-stream`): it reads the response body incrementally, parses
-each `data:` delta, and assembles text and tool calls as they arrive. No
+Mooncakes requests use `moonbitlang/async/http`. The LLM layer streams OpenAI,
+Anthropic, or Ollama responses directly, applies connection and idle timeouts,
+and retries transient failures. When a retry follows partial output, it must
+reproduce the emitted prefix exactly; MoonSage forwards only the new suffix
+and rejects divergent responses instead of splicing them together. No
 third-party LLM SDK is required, and runtime execution does not depend on curl
 or another external program.
 
