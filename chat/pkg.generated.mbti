@@ -3,6 +3,7 @@ package "moonsage/chat"
 
 import {
   "moonsage/agent",
+  "moonsage/llm",
 }
 
 // Values
@@ -14,7 +15,7 @@ pub async fn load_session(String, String) -> @agent.Session?
 
 pub async fn load_session_with_root(String, String) -> SavedSession?
 
-pub async fn run_chat(String, String, String, String, String?, Bool) -> Unit
+pub async fn run_chat(String, String, String, String, String?, Bool, provider? : @llm.ProviderKind) -> Unit
 
 pub async fn save_session(String, String, @agent.Session, String) -> Unit
 

@@ -125,6 +125,174 @@ async test "run_llm_agent executes tool calls then returns a streamed answer" {
 }
 
 ///|
+async test "Agent runs delegated tasks concurrently and preserves result order" {
+  @async.with_task_group() <| group => {
+    let delegated_round = sse_chunk(
+        tool_call_choice(0, "call_a", "delegate_task", "{\"task\":\"a\"}"),
+      ) +
+      sse_chunk(
+        tool_call_choice(
+          1,
+          "call_b",
+          "delegate_task",
+          "{\"task\":\"b\"}",
+          finish_reason="tool_calls",
+        ),
+      ) +
+      "data: [DONE]\n"
+    let answer_round = sse_chunk(
+        content_choice("combined", finish_reason="stop"),
+      ) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [delegated_round, answer_round])
+    let mut active = 0
+    let mut max_active = 0
+    let delegate : @tools.Tool = {
+      schema: {
+        name: "delegate_task",
+        description: "d",
+        parameters: Json::object({}),
+      },
+      execute: async fn(arguments) {
+        active += 1
+        if active > max_active {
+          max_active = active
+        }
+        if arguments.contains("a") {
+          @async.sleep(40)
+        } else {
+          @async.sleep(10)
+        }
+        active -= 1
+        arguments
+      },
+    }
+    let agent : Agent = {
+      system_prompt: "test",
+      tools: [delegate],
+      max_tool_calls: 4,
+      max_rounds: 2,
+      max_tokens: 64,
+    }
+    let events : Array[EngineEvent] = []
+    let answer = agent.turn(
+      agent.new_session(),
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      "delegate",
+      on_event=async fn(event) {
+        events.push(event)
+        @async.sleep(0)
+      },
+    )
+    assert_eq(answer.text, "combined")
+    assert_eq(max_active, 2)
+    let finished = events.filter_map(fn(event) {
+      match event {
+        ToolFinished(value) => Some(value.call_id)
+        _ => None
+      }
+    })
+    assert_eq(finished, ["call_a", "call_b"])
+  }
+}
+
+///|
+async test "Agent does not execute a tool from an interrupted stream" {
+  @async.with_task_group() <| group => {
+    let partial = sse_chunk(
+      tool_call_choice(0, "call_1", "probe", "{\"value\":"),
+    )
+    let port = mock_llm_server(group, [partial, partial, partial])
+    let executions : Array[Int] = []
+    let probe : @tools.Tool = {
+      schema: { name: "probe", description: "d", parameters: Json::object({}) },
+      execute: async fn(_arguments : String) {
+        executions.push(1)
+        @async.sleep(0)
+        "ok"
+      },
+    }
+    let agent : Agent = {
+      system_prompt: "test",
+      tools: [probe],
+      max_tool_calls: 1,
+      max_rounds: 1,
+      max_tokens: 64,
+    }
+    let raised = try {
+      ignore(
+        agent.turn(
+          agent.new_session(),
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          "run probe",
+        ),
+      )
+      false
+    } catch {
+      e => e.to_string().contains("stream closed before completion")
+    }
+    assert_true(raised)
+    assert_eq(executions.length(), 0)
+  }
+}
+
+///|
+async test "Agent callback preserves completed tool events before failure" {
+  @async.with_task_group() <| group => {
+    let tool_round = sse_chunk(tool_call_choice(0, "call_1", "probe", "{}")) +
+      sse_chunk(tool_call_choice(0, "", "", "", finish_reason="tool_calls")) +
+      "data: [DONE]\n"
+    let interrupted = sse_chunk(content_choice("partial"))
+    let port = mock_llm_server(group, [
+      tool_round, interrupted, interrupted, interrupted,
+    ])
+    let probe : @tools.Tool = {
+      schema: { name: "probe", description: "d", parameters: Json::object({}) },
+      execute: async fn(_arguments : String) {
+        @async.sleep(0)
+        "{\"ok\":true}"
+      },
+    }
+    let agent : Agent = {
+      system_prompt: "test",
+      tools: [probe],
+      max_tool_calls: 2,
+      max_rounds: 2,
+      max_tokens: 64,
+    }
+    let events : Array[EngineEvent] = []
+    let raised = try {
+      ignore(
+        agent.turn(
+          agent.new_session(),
+          "test-key",
+          "http://127.0.0.1:\{port}",
+          "test-model",
+          "run probe",
+          on_event=async fn(event) {
+            events.push(event)
+            @async.sleep(0)
+          },
+        ),
+      )
+      false
+    } catch {
+      e => e.to_string().contains("stream closed before completion")
+    }
+    assert_true(raised)
+    assert_true(
+      events.any(fn(event) {
+        event is ToolFinished({ call_id: "call_1", status: "ok", .. })
+      }),
+    )
+  }
+}
+
+///|
 async test "Agent::turn forwards reasoning_content to on_thinking" {
   @async.with_task_group() <| group => {
     let round1 = sse_chunk(reasoning_choice("thinking step 1")) +
@@ -242,10 +410,61 @@ async test "Agent::turn emits tool and answer events" {
       },
     )
     assert_eq(answer.text, "Found it")
-    assert_eq(events.length(), 3)
-    assert_true(events[0] is ToolCall("search_modules"))
-    assert_true(events[1] is ToolResult("search_modules"))
-    assert_true(events[2] is AnswerDelta("Found it"))
+    assert_eq(events.length(), 4)
+    match events[0] {
+      ToolStarted(event) => {
+        assert_eq(event.call_id, "call_1")
+        assert_eq(event.name, "search_modules")
+        assert_true(event.arguments.contains("http"))
+      }
+      _ => fail("expected ToolStarted")
+    }
+    match events[1] {
+      ToolFinished(event) => {
+        assert_eq(event.call_id, "call_1")
+        assert_eq(event.name, "search_modules")
+        assert_eq(event.status, "ok")
+        assert_true(event.result.contains("owner/http-client"))
+      }
+      _ => fail("expected ToolFinished")
+    }
+    assert_true(events[2] is FinalStarted)
+    assert_true(events[3] is FinalDelta("Found it"))
+    assert_eq(answer.events, events)
+  }
+}
+
+///|
+test "tool result status recognizes MCP isError results" {
+  assert_eq(tool_result_status("{\"isError\":true,\"content\":[]}"), "error")
+  assert_eq(tool_result_status("{\"isError\":false,\"content\":[]}"), "ok")
+}
+
+///|
+async test "Agent emits a retry event for an interrupted stream" {
+  @async.with_task_group() <| group => {
+    let partial = sse_chunk(content_choice("Hello"))
+    let complete = sse_chunk(
+        content_choice("Hello world", finish_reason="stop"),
+      ) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [partial, complete])
+    let events : Array[EngineEvent] = []
+    let answer = run_llm_agent(
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      [],
+      "say hello",
+      on_event=async fn(event) {
+        events.push(event)
+        @async.sleep(0)
+      },
+    )
+    assert_eq(answer.text, "Hello world")
+    assert_true(events.any(fn(event) { event is Retrying({ attempt: 1, .. }) }))
+    assert_true(events.any(fn(event) { event is FinalStarted }))
+    assert_true(events.any(fn(event) { event is FinalDelta("Hello world") }))
   }
 }
 
@@ -283,6 +502,44 @@ async test "Agent::compact summarizes old history" {
     // system + 摘要 + 最近 2 轮(4 条)= 6 条
     assert_eq(session.messages.length(), 6)
     assert_true(session.messages[1].stringify().contains("摘要内容"))
+  }
+}
+
+///|
+async test "Agent::turn compacts before a budgeted request" {
+  @async.with_task_group() <| group => {
+    let summary = sse_chunk(content_choice("summary", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let answer = sse_chunk(content_choice("done", finish_reason="stop")) +
+      "data: [DONE]\n"
+    let port = mock_llm_server(group, [summary, answer])
+    let agent : Agent = {
+      system_prompt: "sys",
+      tools: [],
+      max_tool_calls: 5,
+      max_rounds: 3,
+      max_tokens: 64,
+    }
+    let session = agent.new_session()
+    for i = 0; i < 8; i = i + 1 {
+      session.messages.push(
+        @llm.chat_message("user", "old request " + i.to_string()),
+      )
+      session.messages.push(
+        @llm.chat_message("assistant", "old result " + i.to_string()),
+      )
+    }
+    let result = agent.turn(
+      session,
+      "test-key",
+      "http://127.0.0.1:\{port}",
+      "test-model",
+      "current request",
+      context_window_tokens=200,
+      reserved_output_tokens=64,
+    )
+    assert_eq(result.text, "done")
+    assert_true(session.messages[1].stringify().contains("summary"))
   }
 }
 
@@ -369,5 +626,46 @@ fn is_assistant_with_tool_calls(message : Json) -> Bool {
       fields.get("role") is Some(String("assistant")) &&
       fields.get("tool_calls") is Some(Array(_))
     _ => false
+  }
+}
+
+///|
+test "project instructions are bounded and tagged by source" {
+  let rendered = bounded_project_instructions(
+    "follow the repository rules", "AGENTS.md",
+  )
+  assert_true(rendered.contains("<ProjectInstructions source=\"AGENTS.md\">"))
+  assert_true(rendered.contains("follow the repository rules"))
+  let large = StringBuilder::new()
+  let mut count = 0
+  while count < max_project_instruction_bytes + 1 {
+    large.write_char('x')
+    count += 1
+  }
+  assert_true(
+    bounded_project_instructions(large.to_string(), "CLAUDE.md").contains(
+      "[project instructions truncated]",
+    ),
+  )
+}
+
+///|
+async test "project instruction loader combines AGENTS and CLAUDE files" {
+  let root = @fs.tmpdir(prefix="moonsage-instructions-test-")
+  @fs.write_file(
+    root + "/AGENTS.md",
+    "use MoonBit conventions",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  @fs.write_file(
+    root + "/CLAUDE.md",
+    "run focused tests",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let instructions = load_project_instructions(root)
+  assert_true(instructions.contains("use MoonBit conventions"))
+  assert_true(instructions.contains("run focused tests"))
+  @fs.rmdir(root, recursive=true) catch {
+    _ => ()
   }
 }

@@ -67,7 +67,7 @@ moon run cmd/main -- audit moonbit-community/cmark --fix --yes
 moon run cmd/main -- audit moonbit-community/cmark --fix --workspace ./audit-ws
 ```
 
-`audit` 流程：解析 manifest → `git clone --depth 1` 源码 → 定位项目根 → 专用 Agent（独立预算，默认 30 次工具调用）检查/修复 → 输出中文报告与 `git diff`。工具包括 `list_project_files` / `read_file` / `run_moon` / `git_diff`，`--fix` 时追加 `write_file`（带路径穿越防护与三种确认模式）。改动只发生在克隆的工作区内，不会触碰你自己的文件。
+`audit` 流程：解析 manifest → `git clone --depth 1` 源码 → 定位项目根 → 专用 Agent（独立预算，默认 30 次工具调用）检查/修复 → 输出中文报告与 `git diff`。工具包括 `list_project_files` / `read_file` / `run_moon` / `git_diff`，`--fix` 时追加 `multi_edit` / `write_file` / `remove`（带路径穿越防护与三种确认模式）。已有文件优先使用局部 `multi_edit`，改动只发生在克隆的工作区内。
 
 ## 配置
 

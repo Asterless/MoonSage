@@ -2,6 +2,8 @@
 package "moonsage/agent"
 
 import {
+  "moonbitlang/core/debug",
+  "moonsage/llm",
   "moonsage/tools",
 }
 
@@ -12,7 +14,9 @@ pub fn ask_tools(Array[@moonsage.ModuleSummary]) -> Array[@tools.Tool]
 
 pub async fn ignore_event(EngineEvent) -> Unit
 
-pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
+pub async fn load_project_instructions(String) -> String
+
+pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, provider? : @llm.ProviderKind, extra_tools? : Array[@tools.Tool], project_instructions? : String) -> AgentAnswer
 
 // Errors
 
@@ -24,22 +28,33 @@ pub(all) struct Agent {
   max_rounds : Int
   max_tokens : Int
 }
-pub async fn Agent::compact(Self, Session, String, String, String, threshold_tokens? : Int, keep_recent_turns? : Int) -> Unit
+pub async fn Agent::compact(Self, Session, String, String, String, threshold_tokens? : Int, keep_recent_turns? : Int, provider? : @llm.ProviderKind) -> Unit
 pub fn Agent::new_session(Self) -> Session
-pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit) -> AgentAnswer
-pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, on_thinking? : async (String) -> Unit) -> AgentAnswer
+pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, provider? : @llm.ProviderKind, context_window_tokens? : Int, reserved_output_tokens? : Int) -> AgentAnswer
+pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, on_thinking? : async (String) -> Unit, provider? : @llm.ProviderKind, context_window_tokens? : Int, reserved_output_tokens? : Int) -> AgentAnswer
 
 pub struct AgentAnswer {
   text : String
   trace : Array[String]
+  events : Array[EngineEvent]
 }
+pub fn AgentAnswer::new(String, Array[String], Array[EngineEvent]) -> Self
 
 pub(all) enum EngineEvent {
-  ThinkingDelta(String)
-  ToolCall(String)
-  ToolResult(String)
-  AnswerDelta(String)
-}
+  ThinkingDelta(ThinkingDeltaEvent)
+  ToolStarted(ToolStartedEvent)
+  ToolFinished(ToolFinishedEvent)
+  FinalStarted
+  FinalDelta(String)
+  Retrying(RetryEvent)
+  Warning(String)
+  Error(String)
+} derive(Eq, @debug.Debug)
+
+pub(all) struct RetryEvent {
+  attempt : Int
+  reason : String
+} derive(Eq, @debug.Debug)
 
 pub(all) struct Session {
   messages : Array[Json]
@@ -48,6 +63,26 @@ pub fn Session::char_count(Self) -> Int
 pub fn Session::estimated_tokens(Self) -> Int
 pub fn Session::from_json(Json) -> Self
 pub fn Session::to_json(Self) -> Json
+
+pub(all) struct ThinkingDeltaEvent {
+  round : Int
+  text : String
+} derive(Eq, @debug.Debug)
+
+pub(all) struct ToolFinishedEvent {
+  round : Int
+  call_id : String
+  name : String
+  status : String
+  result : String
+} derive(Eq, @debug.Debug)
+
+pub(all) struct ToolStartedEvent {
+  round : Int
+  call_id : String
+  name : String
+  arguments : String
+} derive(Eq, @debug.Debug)
 
 // Type aliases
 

@@ -89,6 +89,146 @@ test "audit tools include write_file only in fix mode" {
 }
 
 ///|
+fn audit_answer(
+  text : String,
+  events : Array[@agent.EngineEvent],
+) -> @agent.AgentAnswer {
+  @agent.AgentAnswer::new(text, [], events)
+}
+
+///|
+test "audit evidence rejects a claimed verification with failing exit code" {
+  let answer = audit_answer("## 审计报告\n测试通过", [
+    @agent.ToolStarted({
+      round: 0,
+      call_id: "run-1",
+      name: "run_moon",
+      arguments: "{\"args\":\"test\"}",
+    }),
+    @agent.ToolFinished({
+      round: 0,
+      call_id: "run-1",
+      name: "run_moon",
+      status: "ok",
+      result: "{\"exit_code\":1,\"stdout\":\"\",\"stderr\":\"failed\"}",
+    }),
+  ])
+  let evidence = build_audit_evidence(None, answer, false)
+  assert_true(evidence.verification_ran)
+  assert_true(!evidence.verified)
+  assert_eq(evidence.conflicts.length(), 1)
+  assert_true(evidence.conflicts[0].contains("exit code was 1"))
+}
+
+///|
+test "audit evidence requires a successful post-fix verification" {
+  let answer = audit_answer("## 审计报告", [
+    @agent.ToolStarted({
+      round: 0,
+      call_id: "write-1",
+      name: "write_file",
+      arguments: "{\"path\":\"main.mbt\"}",
+    }),
+    @agent.ToolFinished({
+      round: 0,
+      call_id: "write-1",
+      name: "write_file",
+      status: "ok",
+      result: "applied",
+    }),
+  ])
+  let evidence = build_audit_evidence(None, answer, true)
+  assert_true(!evidence.verification_ran)
+  assert_true(!evidence.verified)
+  assert_true(evidence.conflicts[0].contains("No post-fix"))
+}
+
+///|
+test "audit evidence verifies a successful post-fix moon command" {
+  let answer = audit_answer("## 审计报告", [
+    @agent.ToolStarted({
+      round: 0,
+      call_id: "edit-1",
+      name: "multi_edit",
+      arguments: "{\"edits\":[]}",
+    }),
+    @agent.ToolFinished({
+      round: 0,
+      call_id: "edit-1",
+      name: "multi_edit",
+      status: "ok",
+      result: "applied",
+    }),
+    @agent.ToolStarted({
+      round: 1,
+      call_id: "run-1",
+      name: "run_moon",
+      arguments: "{\"args\":\"test\"}",
+    }),
+    @agent.ToolFinished({
+      round: 1,
+      call_id: "run-1",
+      name: "run_moon",
+      status: "ok",
+      result: "{\"exit_code\":0}",
+    }),
+  ])
+  let evidence = build_audit_evidence(None, answer, true)
+  assert_true(evidence.verification_ran)
+  assert_true(evidence.verified)
+  assert_eq(evidence.conflicts.length(), 0)
+}
+
+///|
+test "audit evidence invalidates verification after a later edit" {
+  let answer = audit_answer("## 审计报告", [
+    @agent.ToolStarted({
+      round: 0,
+      call_id: "edit-1",
+      name: "multi_edit",
+      arguments: "{}",
+    }),
+    @agent.ToolFinished({
+      round: 0,
+      call_id: "edit-1",
+      name: "multi_edit",
+      status: "ok",
+      result: "applied",
+    }),
+    @agent.ToolStarted({
+      round: 1,
+      call_id: "run-1",
+      name: "run_moon",
+      arguments: "{\"args\":\"test\"}",
+    }),
+    @agent.ToolFinished({
+      round: 1,
+      call_id: "run-1",
+      name: "run_moon",
+      status: "ok",
+      result: "{\"exit_code\":0}",
+    }),
+    @agent.ToolStarted({
+      round: 2,
+      call_id: "edit-2",
+      name: "write_file",
+      arguments: "{}",
+    }),
+    @agent.ToolFinished({
+      round: 2,
+      call_id: "edit-2",
+      name: "write_file",
+      status: "ok",
+      result: "applied",
+    }),
+  ])
+  let evidence = build_audit_evidence(None, answer, true)
+  assert_true(!evidence.verification_ran)
+  assert_true(!evidence.verified)
+  assert_true(evidence.conflicts[0].contains("No post-fix"))
+}
+
+///|
 test "parse_audit_options defaults and flags" {
   let defaults = parse_audit_options(["owner/mod"]) catch {
     _ => audit_default_options()
@@ -216,8 +356,10 @@ test "pr title branch and email builders" {
 }
 
 ///|
-test "fix phase prompt requires write_file and analysis stays read-only" {
+test "fix phase prompt prefers local edits and analysis stays read-only" {
+  assert_true(audit_fix_prompt().contains("Prefer multi_edit"))
   assert_true(audit_fix_prompt().contains("write_file"))
+  assert_true(audit_fix_prompt().contains("remove"))
   assert_true(audit_fix_prompt().contains("## 审计报告"))
   assert_true(!audit_analysis_prompt().contains("write_file"))
   assert_true(audit_analysis_prompt().length() > 0)

@@ -12,6 +12,150 @@ priv struct AuditOptions {
 }
 
 ///|
+pub(all) struct AuditToolRecord {
+  phase : String
+  round : Int
+  call_id : String
+  name : String
+  arguments : String
+  status : String
+  result : String
+}
+
+///|
+pub(all) struct AuditEvidence {
+  tools : Array[AuditToolRecord]
+  verification_ran : Bool
+  verified : Bool
+  conflicts : Array[String]
+}
+
+///|
+fn tool_exit_code(result : String) -> Int? {
+  let document = @json.parse(result) catch { _ => return None }
+  guard document is Object(fields) else { return None }
+  match fields.get("exit_code") {
+    Some(Number(n, ..)) => Some(n.to_int())
+    _ => None
+  }
+}
+
+///|
+fn collect_tool_records(
+  answer : @agent.AgentAnswer,
+  phase : String,
+) -> Array[AuditToolRecord] {
+  let started : Map[String, @agent.ToolStartedEvent] = Map([])
+  let records : Array[AuditToolRecord] = []
+  for event in answer.events {
+    match event {
+      @agent.ToolStarted(item) => started[item.call_id] = item
+      @agent.ToolFinished(item) => {
+        let begin = started.get(item.call_id)
+        records.push({
+          phase,
+          round: item.round,
+          call_id: item.call_id,
+          name: item.name,
+          arguments: match begin {
+            Some(value) => value.arguments
+            None => ""
+          },
+          status: item.status,
+          result: item.result,
+        })
+      }
+      _ => ()
+    }
+  }
+  records
+}
+
+///|
+fn report_claims_verification(text : String) -> Bool {
+  let lower = text.to_lower()
+  text.contains("测试通过") ||
+  text.contains("验证通过") ||
+  lower.contains("tests pass") ||
+  lower.contains("verified")
+}
+
+///|
+pub fn build_audit_evidence(
+  baseline : @agent.AgentAnswer?,
+  answer : @agent.AgentAnswer,
+  fix_mode : Bool,
+) -> AuditEvidence {
+  let mut tools : Array[AuditToolRecord] = []
+  match baseline {
+    Some(value) => tools = tools + collect_tool_records(value, "baseline")
+    None => ()
+  }
+  tools = tools +
+    collect_tool_records(answer, if fix_mode { "fix" } else { "audit" })
+  let mut modified = false
+  let mut verification_ran = false
+  let mut verification_succeeded = false
+  let mut last_verification_exit : Int? = None
+  for tool in tools {
+    if (
+        tool.name == "write_file" ||
+        tool.name == "multi_edit" ||
+        tool.name == "remove"
+      ) &&
+      tool.status == "ok" {
+      modified = true
+      verification_ran = false
+      verification_succeeded = false
+      last_verification_exit = None
+    }
+    if tool.name == "run_moon" && (!fix_mode || modified) {
+      verification_ran = true
+      last_verification_exit = tool_exit_code(tool.result)
+      verification_succeeded = last_verification_exit is Some(0)
+    }
+  }
+  let verified = if fix_mode {
+    modified && verification_ran && verification_succeeded
+  } else {
+    verification_ran && verification_succeeded
+  }
+  let conflicts : Array[String] = []
+  if fix_mode && modified && !verification_ran {
+    conflicts.push("No post-fix moon verification command was run.")
+  } else if fix_mode && modified && verification_ran && !verification_succeeded {
+    conflicts.push("The post-fix moon verification command failed.")
+  }
+  if report_claims_verification(answer.text) &&
+    last_verification_exit is Some(code) &&
+    code != 0 {
+    conflicts.push(
+      "The model report claims verification succeeded, but the recorded exit code was \{code}.",
+    )
+  }
+  { tools, verification_ran, verified, conflicts }
+}
+
+///|
+async fn print_audit_evidence(evidence : AuditEvidence) -> Unit {
+  @stdio.stdout.write("\n--- structured evidence ---\n")
+  for tool in evidence.tools {
+    @stdio.stdout.write(
+      "[\{tool.phase}] round=\{tool.round} \{tool.name} call_id=\{tool.call_id} status=\{tool.status} args=\{tool.arguments}\n",
+    )
+    if tool.name == "run_moon" {
+      @stdio.stdout.write(tool.result + "\n")
+    }
+  }
+  @stdio.stdout.write(
+    "verification_ran=\{evidence.verification_ran} verified=\{evidence.verified}\n",
+  )
+  for conflict in evidence.conflicts {
+    @stdio.stdout.write("CONFLICT: \{conflict}\n")
+  }
+}
+
+///|
 fn audit_default_options() -> AuditOptions {
   {
     name: "",
@@ -81,13 +225,13 @@ fn audit_system_prompt() -> String {
   (
     #|You are MoonSage's remote audit agent. A MoonBit project has been
     #|downloaded to a working directory. You can list files, read files, run
-    #|moon commands (build/test), and - only in fix mode - overwrite files.
+    #|moon commands (build/test), and - only in fix mode - edit files.
     #|
     #|Workflow:
     #|1. Run `moon build` and `moon test` first to establish a baseline and
     #|   record any failures.
     #|2. Inspect the relevant source and test files to find root causes.
-    #|3. In fix mode, apply minimal fixes with write_file, then re-run the
+    #|3. In fix mode, apply minimal fixes with multi_edit, then re-run the
     #|   relevant moon command to confirm each fix.
     #|4. Finish with a report written in Simplified Chinese (简体中文) listing
     #|   (file and line), what was fixed, test results before/after, and any
@@ -104,11 +248,14 @@ fn audit_system_prompt() -> String {
     #|  analysis narrative in the final reply - the report is all that is
     #|  shown to the user.
     #|- In fix mode, analyzing without writing counts as failure: you MUST
-    #|  actually call write_file to apply each fix, then re-run the relevant
+    #|  actually call multi_edit/write_file/remove to apply each fix, then
+    #|  re-run the relevant
     #|  moon command to verify it, before writing the report.
     #|- In fix mode, fix issues one at a time as you find them: apply the fix
     #|  and verify it immediately, instead of reading every file first.
-    #|- A fix ONLY counts when you actually call the write_file tool. Never
+    #|- Prefer multi_edit for existing files. Use write_file only to add a
+    #|  small new file, and remove only when deletion is required. A fix ONLY
+    #|  counts when one of these tools succeeds. Never
     #|  write code patches, tool invocations or XML into the report text.
   )
 }
@@ -144,12 +291,12 @@ fn audit_fix_prompt() -> String {
   (
     #|You are MoonSage's fix agent. A MoonBit project has been downloaded and
     #|analyzed; the analysis with concrete fixes is in the user's question.
-    #|Your ONLY job is to APPLY those fixes with write_file, one issue at a
+    #|Your ONLY job is to APPLY those fixes with the editing tools, one issue at a
     #|time, and verify each with `moon build` / `moon test`.
     #|
     #|Workflow:
     #|1. Take the first issue from the analysis.
-    #|2. Call write_file immediately to apply its fix - do not re-read the
+    #|2. Call multi_edit immediately for an existing file - do not re-read the
     #|   whole project or re-diagnose.
     #|3. Re-run the relevant moon command to confirm the fix.
     #|4. Move to the next issue and repeat.
@@ -158,9 +305,9 @@ fn audit_fix_prompt() -> String {
     #|   problems that remain.
     #|
     #|Rules:
-    #|- write_file is available and is the ONLY way to modify files. You MUST
-    #|  call it for every fix; analyzing or recommending without writing
-    #|  counts as failure.
+    #|- Prefer multi_edit for precise changes to existing files. Use
+    #|  write_file only for a small new file, and remove only for deletion.
+    #|  Analyzing or recommending without a successful edit counts as failure.
     #|- Fix one issue at a time and verify it immediately.
     #|- Never claim a fix works without running moon build/test afterwards.
     #|- Never write code patches, tool invocations or XML into the report
@@ -182,7 +329,8 @@ fn audit_analysis_question() -> String {
 fn audit_fix_question(findings : String) -> String {
   (
     #|The analysis below lists the issues and concrete fixes. Apply them now
-    #|with write_file, verifying each with moon build/test, then write the
+    #|with multi_edit/write_file/remove, verifying each with moon build/test,
+    #|then write the
     #|final report in Simplified Chinese starting with "## 审计报告".
     #|
     #|## 分析结果
@@ -204,6 +352,8 @@ async fn run_audit_agent(
   question : String,
   max_tool_calls~ : Int,
   max_rounds~ : Int,
+  on_event? : async (@agent.EngineEvent) -> Unit = @agent.ignore_event,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> @agent.AgentAnswer {
   let agent : @agent.Agent = {
     system_prompt: audit_system_prompt(),
@@ -212,7 +362,16 @@ async fn run_audit_agent(
     max_rounds,
     max_tokens: 6000,
   }
-  agent.run(api_key, base_url, model, question)
+  agent.run(
+    api_key,
+    base_url,
+    model,
+    question,
+    on_event~,
+    provider~,
+    context_window_tokens=32768,
+    reserved_output_tokens=6000,
+  )
 }
 
 ///|
@@ -222,6 +381,8 @@ async fn run_analysis_agent(
   base_url : String,
   model : String,
   ctx : AuditContext,
+  on_event? : async (@agent.EngineEvent) -> Unit = @agent.ignore_event,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> @agent.AgentAnswer {
   let ro_ctx : AuditContext = {
     project_dir: ctx.project_dir,
@@ -235,7 +396,16 @@ async fn run_analysis_agent(
     max_rounds: 4,
     max_tokens: 4000,
   }
-  agent.run(api_key, base_url, model, audit_analysis_question())
+  agent.run(
+    api_key,
+    base_url,
+    model,
+    audit_analysis_question(),
+    on_event~,
+    provider~,
+    context_window_tokens=32768,
+    reserved_output_tokens=4000,
+  )
 }
 
 ///|
@@ -248,6 +418,8 @@ async fn run_fix_agent(
   findings : String,
   max_tool_calls~ : Int,
   max_rounds~ : Int,
+  on_event? : async (@agent.EngineEvent) -> Unit = @agent.ignore_event,
+  provider? : @llm.ProviderKind = @llm.OpenAi,
 ) -> @agent.AgentAnswer {
   let agent : @agent.Agent = {
     system_prompt: audit_fix_prompt(),
@@ -256,7 +428,16 @@ async fn run_fix_agent(
     max_rounds,
     max_tokens: 6000,
   }
-  agent.run(api_key, base_url, model, audit_fix_question(findings))
+  agent.run(
+    api_key,
+    base_url,
+    model,
+    audit_fix_question(findings),
+    on_event~,
+    provider~,
+    context_window_tokens=32768,
+    reserved_output_tokens=6000,
+  )
 }
 
 ///|
@@ -320,6 +501,9 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
+  let provider = @llm.provider_from_string(
+    @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
+  )
 
   @stdio.stdout.write("MoonSage audit\n")
   @stdio.stdout.write("Fetching manifest for \{opts.name}...\n")
@@ -387,8 +571,23 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       )
     }
     @stdio.stdout.write("Phase 1/2: analyzing the project...\n")
-    let analysis = run_analysis_agent(key, base_url, model, ctx) catch {
+    let analysis_events : Array[@agent.EngineEvent] = []
+    let analysis = run_analysis_agent(
+      key,
+      base_url,
+      model,
+      ctx,
+      on_event=fn(event) { analysis_events.push(event) },
+      provider~,
+    ) catch {
       e => {
+        print_audit_evidence(
+          build_audit_evidence(
+            None,
+            @agent.AgentAnswer::new("", [], analysis_events),
+            false,
+          ),
+        )
         if opts.clean {
           remove_workspace_dir(workspace)
         }
@@ -397,6 +596,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       }
     }
     @stdio.stdout.write("Phase 2/2: applying fixes...\n")
+    let fix_events : Array[@agent.EngineEvent] = []
     let answer = run_fix_agent(
       key,
       base_url,
@@ -405,8 +605,17 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       analysis.text,
       max_tool_calls=opts.max_calls,
       max_rounds=opts.max_rounds,
+      on_event=fn(event) { fix_events.push(event) },
+      provider~,
     ) catch {
       e => {
+        print_audit_evidence(
+          build_audit_evidence(
+            Some(analysis),
+            @agent.AgentAnswer::new("", [], fix_events),
+            true,
+          ),
+        )
         if opts.clean {
           remove_workspace_dir(workspace)
         }
@@ -415,6 +624,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       }
     }
     print_agent_report(answer.text)
+    print_audit_evidence(build_audit_evidence(Some(analysis), answer, true))
     @stdio.stdout.write("\n=== changes ===\n")
     @stdio.stdout.write(@local.git_diff(project_dir, None))
     if opts.pr {
@@ -448,6 +658,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       @stdio.stdout.write(event + "\n")
     }
   } else {
+    let audit_events : Array[@agent.EngineEvent] = []
     let answer = run_audit_agent(
       key,
       base_url,
@@ -456,8 +667,17 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       audit_question_text(),
       max_tool_calls=opts.max_calls,
       max_rounds=opts.max_rounds,
+      on_event=fn(event) { audit_events.push(event) },
+      provider~,
     ) catch {
       e => {
+        print_audit_evidence(
+          build_audit_evidence(
+            None,
+            @agent.AgentAnswer::new("", [], audit_events),
+            false,
+          ),
+        )
         if opts.clean {
           remove_workspace_dir(workspace)
         }
@@ -466,6 +686,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       }
     }
     print_agent_report(answer.text)
+    print_audit_evidence(build_audit_evidence(None, answer, false))
     @stdio.stdout.write("\n")
     for event in answer.trace {
       @stdio.stdout.write(event + "\n")

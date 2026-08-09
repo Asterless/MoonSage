@@ -16,6 +16,40 @@ test "truncate_output keeps long output bounded" {
 }
 
 ///|
+test "truncate_output preserves the head and tail" {
+  let output = truncate_output(
+    "first passed line\n" +
+    "middle output that can be discarded\n" +
+    "last failure summary",
+    64,
+  )
+  assert_true(output.has_prefix("first passed line"))
+  assert_true(output.contains("last failure summary"))
+  assert_true(output.contains("truncated"))
+}
+
+///|
+test "truncate_output preserves long single-line output" {
+  let output = truncate_output(
+    "first-error-" + "x".repeat(200) + "-last-error",
+    64,
+  )
+  assert_true(output.has_prefix("first-error-"))
+  assert_true(output.contains("-last-error"))
+  assert_true(output.contains("truncated"))
+}
+
+///|
+test "truncate_output keeps Unicode and CRLF content valid" {
+  let output = truncate_output(
+    "开始 😊\r\n" + "中间输出\r\n" + "末尾失败汇总",
+    64,
+  )
+  assert_true(output.contains("开始 😊"))
+  assert_true(output.contains("末尾失败汇总"))
+}
+
+///|
 test "local_tools exposes the five read-only tools" {
   let tools = local_tools(@editing.Workspace::new("C:/work/proj"))
   assert_eq(tools.length(), 5)

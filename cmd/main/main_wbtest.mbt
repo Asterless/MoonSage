@@ -24,6 +24,37 @@ test "cli parses subcommands" {
 }
 
 ///|
+test "ask accepts stream-json and serializes structured tool events" {
+  let root = root_command()
+  let parsed = root.parse(
+    argv=["ask", "--stream-json", "find", "http"],
+    env=Map([]),
+  )
+  guard parsed.subcommand is Some(("ask", ask)) else {
+    assert_true(false)
+    return
+  }
+  assert_true(flag_of(ask, "stream-json"))
+  assert_eq(join_values(ask, "question"), "find http")
+  let line = engine_event_json(
+    @agent.ToolFinished({
+      round: 2,
+      call_id: "call_1",
+      name: "run_moon",
+      status: "ok",
+      result: "{\"exit_code\":0}",
+    }),
+  ).stringify()
+  assert_eq(
+    line, "{\"type\":\"tool_finished\",\"round\":2,\"call_id\":\"call_1\",\"name\":\"run_moon\",\"status\":\"ok\",\"result\":\"{\\\"exit_code\\\":0}\"}",
+  )
+  assert_eq(
+    engine_event_json(@agent.Error("missing API key")).stringify(),
+    "{\"type\":\"error\",\"message\":\"missing API key\"}",
+  )
+}
+
+///|
 test "audit args reconstruct raw arguments" {
   let root = root_command()
   let parsed = root.parse(

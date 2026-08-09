@@ -1,7 +1,6 @@
 import {
   "moonbitlang/core/json",
-}
-
-import {
   "moonbitlang/async",
-} for "wbtest"
+  "moonbitlang/async/process",
+  "moonbitlang/async/stdio",
+}
