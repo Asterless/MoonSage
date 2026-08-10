@@ -56,6 +56,17 @@ test "render_list_and_quote" {
 }
 
 ///|
+test "stream holds incomplete markdown until a stable block boundary" {
+  let p = MdStreamPrinter::new()
+  p.feed("**bo")
+  assert_eq(p.take_output(), "")
+  p.feed("ld**\n\n")
+  let out = p.take_output()
+  assert_true(out.contains("\u001B[1mbold\u001B[22m"))
+  assert_false(out.contains("**"))
+}
+
+///|
 test "stream_flushes_blocks_on_blank_line" {
   let p = MdStreamPrinter::new()
   p.feed("第一段")

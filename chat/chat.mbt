@@ -3,6 +3,12 @@
 let compact_threshold_tokens = 8000
 
 ///|
+let chat_context_window_tokens = 32768
+
+///|
+let chat_reserved_output_tokens = 6000
+
+///|
 fn chat_system_prompt(
   cwd : String,
   project_instructions? : String = "",
@@ -64,6 +70,17 @@ fn chat_agent(
 }
 
 ///|
+/// Build the shared conversational agent used by alternate frontends.
+pub fn create_agent(
+  modules : Array[@moonsage.ModuleSummary],
+  cwd : String,
+  ws : @editing.Workspace,
+  project_instructions? : String = "",
+) -> @agent.Agent {
+  chat_agent(modules, cwd, ws, project_instructions~)
+}
+
+///|
 // 恢复会话时还原工作区根目录；克隆目录已不存在则回退到项目根。
 async fn restore_ws_root(
   ws : @editing.Workspace,
@@ -85,8 +102,8 @@ priv enum ChatCommand {
   Exit
   Clear
   Help
-  Prompt
   Undo
+  Prompt
 }
 
 ///|
@@ -137,6 +154,11 @@ fn tool_label(name : String) -> String {
 }
 
 ///|
+pub fn tool_display_name(name : String) -> String {
+  tool_label(name)
+}
+
+///|
 // 把 Failure(...)@moonsage FAILED: 前缀剥掉，只留人话错误信息。
 fn prettify_error(message : String) -> String {
   let parts = message.split("FAILED: ").to_array()
@@ -150,6 +172,11 @@ fn prettify_error(message : String) -> String {
   } else {
     message
   }
+}
+
+///|
+pub fn friendly_error(message : String) -> String {
+  prettify_error(message)
 }
 
 ///|
@@ -364,8 +391,8 @@ pub async fn run_chat(
                   thinking.write_string(text)
                 }
               },
-              context_window_tokens=32768,
-              reserved_output_tokens=6000,
+              context_window_tokens=chat_context_window_tokens,
+              reserved_output_tokens=chat_reserved_output_tokens,
               on_event=async fn(event) {
                 match event {
                   @agent.ToolStarted(event) => {

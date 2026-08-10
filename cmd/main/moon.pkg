@@ -6,6 +6,7 @@ import {
   "moonsage/llm",
   "moonsage",
   "moonsage/chat",
+  "moonsage/tui",
   "moonsage/mooncakes",
   "moonsage/md_ansi",
   "moonsage/agent",

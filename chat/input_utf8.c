@@ -8,8 +8,8 @@
 #endif
 
 // Convert bytes encoded in the system ANSI codepage (GBK/CP936 on Chinese
-// Windows) to UTF-8. The MoonBit side only calls this after UTF-8 decoding
-// fails, so the input is expected to be a legacy codepage sequence.
+// Windows) to UTF-8. The line-oriented chat uses this only after UTF-8
+// decoding fails.
 MOONBIT_FFI_EXPORT moonbit_bytes_t moonsage_gbk_to_utf8(
   moonbit_bytes_t input,
   int32_t offset,
@@ -20,16 +20,8 @@ MOONBIT_FFI_EXPORT moonbit_bytes_t moonsage_gbk_to_utf8(
     return moonbit_make_bytes(0, 0);
   }
   const char *data = (const char *)input + offset;
-  int wide_len = MultiByteToWideChar(
-    CP_ACP,
-    0,
-    data,
-    len,
-    NULL,
-    0
-  );
+  int wide_len = MultiByteToWideChar(CP_ACP, 0, data, len, NULL, 0);
   if (wide_len <= 0) {
-    // Conversion failed (unmappable bytes): return the input unchanged.
     moonbit_bytes_t fallback = moonbit_make_bytes(len, 0);
     memcpy(fallback, data, (size_t)len);
     return fallback;
@@ -42,25 +34,11 @@ MOONBIT_FFI_EXPORT moonbit_bytes_t moonsage_gbk_to_utf8(
   }
   MultiByteToWideChar(CP_ACP, 0, data, len, wide, wide_len);
   int utf8_len = WideCharToMultiByte(
-    CP_UTF8,
-    0,
-    wide,
-    wide_len,
-    NULL,
-    0,
-    NULL,
-    NULL
+    CP_UTF8, 0, wide, wide_len, NULL, 0, NULL, NULL
   );
   moonbit_bytes_t result = moonbit_make_bytes(utf8_len, 0);
   WideCharToMultiByte(
-    CP_UTF8,
-    0,
-    wide,
-    wide_len,
-    (char *)result,
-    utf8_len,
-    NULL,
-    NULL
+    CP_UTF8, 0, wide, wide_len, (char *)result, utf8_len, NULL, NULL
   );
   free(wide);
   return result;

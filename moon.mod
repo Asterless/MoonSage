@@ -27,4 +27,6 @@ import {
   "moonbitlang/x@0.4.47",
   "moonbitlang/async@0.20.3",
   "moonbit-community/cmark@0.4.4",
+  "mizchi/tui@0.10.0",
+  "moonbit-community/rabbita@0.14.2",
 }

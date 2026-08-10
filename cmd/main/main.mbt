@@ -5,6 +5,7 @@ fn usage() -> String {
     #|
     #|Usage:
     #|  moonsage chat
+    #|  moonsage tui
     #|  moonsage search <keywords>
     #|  moonsage ask [--stream-json] <question>
     #|  moonsage audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
@@ -14,7 +15,7 @@ fn usage() -> String {
     #|Run `moonsage --help` for the full option reference.
     #|
     #|Environment:
-    #|  MOONSAGE_API_KEY    required for chat/ask/audit
+    #|  MOONSAGE_API_KEY    required for chat/tui/ask/audit
     #|  MOONSAGE_BASE_URL   default: https://api.deepseek.com
     #|  MOONSAGE_MODEL      default: deepseek-chat
     #|  MOONSAGE_PROVIDER   openai (default), anthropic, or ollama
@@ -206,10 +207,16 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
 }
 
 ///|
-async fn run_chat_cmd(m : @argparse.Matches) -> Unit {
+async fn run_conversation_cmd(
+  m : @argparse.Matches,
+  terminal_ui : Bool,
+) -> Unit {
   let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
   guard key != "" else {
-    @stdio.stderr.write("error: set MOONSAGE_API_KEY before using chat\n") catch {
+    let command = if terminal_ui { "tui" } else { "chat" }
+    @stdio.stderr.write(
+      "error: set MOONSAGE_API_KEY before using " + command + "\n",
+    ) catch {
       _ => ()
     }
     return
@@ -227,15 +234,27 @@ async fn run_chat_cmd(m : @argparse.Matches) -> Unit {
     _ => None
   }
   let continue_latest = flag_of(m, "continue")
-  @chat.run_chat(
-    key,
-    base_url,
-    model,
-    cwd,
-    session_id,
-    continue_latest,
-    provider~,
-  )
+  if terminal_ui {
+    @tui.run_tui(
+      key,
+      base_url,
+      model,
+      cwd,
+      session_id,
+      continue_latest,
+      provider~,
+    )
+  } else {
+    @chat.run_chat(
+      key,
+      base_url,
+      model,
+      cwd,
+      session_id,
+      continue_latest,
+      provider~,
+    )
+  }
 }
 
 ///|
@@ -273,7 +292,8 @@ async fn main {
     return
   }
   match matches.subcommand {
-    Some(("chat", m)) => run_chat_cmd(m)
+    Some(("chat", m)) => run_conversation_cmd(m, false)
+    Some(("tui", m)) => run_conversation_cmd(m, true)
     Some(("search", m)) => run_search(join_values(m, "keywords"))
     Some(("ask", m)) =>
       run_ask(join_values(m, "question"), stream_json=flag_of(m, "stream-json"))

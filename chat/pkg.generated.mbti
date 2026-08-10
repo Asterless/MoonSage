@@ -3,10 +3,15 @@ package "moonsage/chat"
 
 import {
   "moonsage/agent",
+  "moonsage/editing",
   "moonsage/llm",
 }
 
 // Values
+pub fn create_agent(Array[@moonsage.ModuleSummary], String, @editing.Workspace, project_instructions? : String) -> @agent.Agent
+
+pub fn friendly_error(String) -> String
+
 pub fn generated_session_id(Int64) -> String
 
 pub async fn latest_session_id(String) -> String?
@@ -21,6 +26,8 @@ pub async fn save_session(String, String, @agent.Session, String) -> Unit
 
 pub fn session_root(String) -> String
 
+pub fn tool_display_name(String) -> String
+
 // Errors
 
 // Types and methods
@@ -32,4 +39,3 @@ pub struct SavedSession {
 // Type aliases
 
 // Traits
-

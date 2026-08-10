@@ -13,7 +13,25 @@ fn root_command() -> @argparse.Command {
     subcommands=[
       @argparse.Command(
         "chat",
-        about="Start an interactive streaming conversation; exit with /exit or /quit.",
+        about="Start the classic line-oriented chat; exit with /exit or /quit.",
+        options=[
+          @argparse.OptionArg(
+            "session",
+            long="session",
+            about="Resume or create this durable session id.",
+          ),
+        ],
+        flags=[
+          @argparse.FlagArg(
+            "continue",
+            long="continue",
+            about="Resume the most recent durable session.",
+          ),
+        ],
+      ),
+      @argparse.Command(
+        "tui",
+        about="Start the interactive terminal UI; exit with /exit or /quit.",
         options=[
           @argparse.OptionArg(
             "session",

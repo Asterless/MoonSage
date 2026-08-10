@@ -9,6 +9,8 @@ test "cli parses subcommands" {
   let root = root_command()
   let chat = root.parse(argv=["chat"], env=Map([]))
   assert_true(chat.subcommand is Some(("chat", _)))
+  let tui = root.parse(argv=["tui"], env=Map([]))
+  assert_true(tui.subcommand is Some(("tui", _)))
   let search = root.parse(argv=["search", "http", "client"], env=Map([]))
   guard search.subcommand is Some(("search", sm)) else {
     assert_true(false)
@@ -96,4 +98,14 @@ test "cli parses chat session options" {
   }
   assert_eq(values_of(m, "session"), ["demo"])
   assert_true(flag_of(m, "continue"))
+  let tui = root.parse(
+    argv=["tui", "--session", "visual", "--continue"],
+    env=Map([]),
+  )
+  guard tui.subcommand is Some(("tui", tm)) else {
+    assert_true(false)
+    return
+  }
+  assert_eq(values_of(tm, "session"), ["visual"])
+  assert_true(flag_of(tm, "continue"))
 }

@@ -14,14 +14,17 @@ moonsage search "json parser"                    # built binary (moon build)
 ```
 
 `search` does not require an LLM key. To use the agent, configure an API key
-and run `ask` for a one-shot question, or `chat` for an interactive streaming
-conversation that keeps its history until you leave with `/exit` or `/quit`:
+and run `ask` for a one-shot question, `chat` for the classic line-oriented
+conversation, or `tui` for the enhanced terminal interface:
 
 ```powershell
 moon run cmd/main -- ask "帮我找一个适合 native 后端的 HTTP 客户端"
 moon run cmd/main -- chat
 moon run cmd/main -- chat --session demo      # resume/create a durable session
 moon run cmd/main -- chat --continue          # resume the most recent session
+moon run cmd/main -- tui
+moon run cmd/main -- tui --session demo       # same durable session store
+moon run cmd/main -- tui --continue
 ```
 
 For headless automation, `ask --stream-json` writes one JSON event per line
@@ -73,8 +76,9 @@ repository into `.moonsage/workspaces/` and switches all file tools to it, and
 and opens a pull request against the repository (with your confirmation).
 Conversations persist under `.moonsage/sessions/` (resumable with `--session`
 or `--continue`); very long conversations are compacted automatically by
-summarizing older history. Use `/help` to list chat commands, `/undo` to revert
-the most recent file edit, and `/exit` or `/quit` to leave the session.
+summarizing older history. `chat` preserves the classic stdin/stdout line
+workflow. The separate `tui` frontend adds inline Unicode editing, a slash
+command menu, richer status information, and terminal Markdown rendering.
 
 To audit a remote Mooncakes package and (optionally) fix issues it finds:
 
@@ -169,7 +173,9 @@ moonsage/mooncakes   network: fetch modules / manifests / docs from Mooncakes
 moonsage/llm         provider adapters, streaming, retries, and delta de-duplication
 moonsage/tools       tool contract, registry, and bounded stdio MCP client
 moonsage/agent       events, budgets, compaction, delegated research, project instructions
-moonsage/chat        durable interactive sessions and terminal workflow
+moonsage/chat        classic line chat, durable sessions, and shared agent setup
+moonsage/tui         enhanced terminal UI and input event handling
+moonsage/frontend    Rabbita web frontend and static host page
 moonsage/local       read-only project tools and bounded command execution
 moonsage/editing     confirmed edits, syntax gates, repository cloning, and PR tools
 moonsage/audit       remote audit: audit tools, source clone, report rendering
@@ -187,12 +193,18 @@ graph LR
   main --> md_ansi
   main --> agent
   main --> chat
+  main --> tui
   main --> audit
   main --> dotenv
   main --> tools
+  frontend --> rabbita
   chat --> agent
   chat --> local
   chat --> editing
+  tui --> chat
+  tui --> agent
+  tui --> local
+  tui --> editing
   audit --> agent
   audit --> tools
   audit --> md_ansi

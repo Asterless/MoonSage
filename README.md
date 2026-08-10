@@ -6,7 +6,9 @@ MoonSage 是一个面向 [Mooncakes](https://mooncakes.io/)（MoonBit 包生态�
 
 - **search** — 无需 LLM，用关键词对 Mooncakes 全量元数据做确定性搜索与排序，输出带来源链接的推荐。
 - **ask** — 支持 OpenAI 兼容、Anthropic 与 Ollama 协议的单次 Agent 问答；可搜索包、读取实时 API 文档、并行委派独立研究，并以终端 Markdown 或 JSON Lines 输出结果。
-- **chat** — 可恢复的交互会话，能够检查和编辑本地 MoonBit 项目、运行验证、克隆 GitHub 仓库并在确认后创建 PR。
+- **chat** — 经典行输入交互会话，保留标准终端输入输出行为，并支持会话恢复与本地项目工具。
+- **tui** — 独立的增强终端界面，提供内联编辑、斜杠命令菜单、状态信息与 Markdown ANSI 渲染。
+- **frontend** — 基于 Rabbita 的简洁 Web 前端，提供会话导航、消息流、中文输入与命令菜单。
 - **audit** — 远程审计：克隆指定包源码，建立 `moon build` / `moon test` 基线，由专用 Agent 检查代码；`--fix` 模式下可自动修复并重跑验证，最后输出报告、结构化证据与 `git diff`。
 
 ## 环境要求
@@ -31,6 +33,8 @@ Copy-Item .env.example .env
 moon run cmd/main -- search "json parser"          # 确定性搜索（无需 Key）
 moon run cmd/main -- ask "帮我找一个 HTTP 客户端"   # LLM Agent
 moon run cmd/main -- chat                           # 交互式本地 Agent
+moon run cmd/main -- tui                            # 增强终端界面
+moon build frontend --target js --release           # Rabbita Web 前端
 ```
 
 ## 命令
@@ -77,6 +81,18 @@ moon run cmd/main -- chat --continue       # 恢复最近会话
 ```
 
 `chat` 提供项目文件搜索、读取、`moon` 命令、Git diff 和受确认保护的写入工具。使用 `/help` 查看命令，`/undo` 撤销最近一次文件编辑，`/exit` 或 `/quit` 离开会话。会话保存在 `.moonsage/sessions/`，长会话会在保留完整最近轮次的前提下自动压缩。`ask` 与 `chat` 都会读取启动目录下的 `AGENTS.md` 和 `CLAUDE.md`，按此顺序加入系统提示，每个文件最多读取 12,000 字节。
+
+### tui — 增强终端界面
+
+```powershell
+moon run cmd/main -- tui
+moon run cmd/main -- tui --session demo   # 创建或恢复指定会话
+moon run cmd/main -- tui --continue       # 恢复最近会话
+```
+
+`tui` 与 `chat` 共用 Agent、工具与持久会话，但界面实现完全独立。`chat` 继续使用经典的逐行 stdin/stdout 交互；`tui` 提供中文内联输入、字符级编辑、输入 `/` 后的命令菜单、更多状态信息及 Markdown 终端渲染。
+
+`frontend` 是浏览器端 Rabbita 界面，当前用本地演示响应验证交互；构建后可用 `py -3 -m http.server 8765` 提供静态页面。
 
 ### audit — 远程审计与自动修复
 
@@ -133,7 +149,9 @@ moonsage/mooncakes   网络层：拉取 modules / manifest / docs
 moonsage/llm         多 provider LLM 流式协议、SSE 解析、重试与增量去重
 moonsage/tools       工具契约、注册表与 stdio MCP 客户端
 moonsage/agent       通用 Agent 运行时：事件、预算、压缩、子代理、项目指令
-moonsage/chat        可持久化交互会话与终端流程
+moonsage/chat        经典行输入会话、持久化与共享 Agent 配置
+moonsage/tui         独立增强终端界面与输入事件处理
+moonsage/frontend    Rabbita Web 前端与静态页面
 moonsage/local       本地项目只读工具与命令执行
 moonsage/editing     受确认和语法检查保护的编辑、克隆与 PR 工具
 moonsage/audit       远程审计：审计工具、源码克隆、报告渲染

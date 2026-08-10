@@ -25,4 +25,3 @@ pub fn valid_module_name(String) -> Bool
 // Type aliases
 
 // Traits
-
