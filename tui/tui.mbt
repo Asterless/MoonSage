@@ -472,8 +472,8 @@ extern "C" fn windows_tui_read_event() -> String = "moonsage_tui_read_event"
 
 ///|
 #cfg(platform="windows")
-fn start_chat_input() -> Unit {
-  ignore(windows_tui_input_start())
+fn start_chat_input() -> Bool {
+  windows_tui_input_start() == 0
 }
 
 ///|
@@ -491,8 +491,9 @@ async fn read_chat_input() -> String {
 
 ///|
 #cfg(not(platform="windows"))
-fn start_chat_input() -> Unit {
+fn start_chat_input() -> Bool {
   @termui.enable_raw_mode()
+  true
 }
 
 ///|
@@ -611,7 +612,12 @@ async fn run_tui_session(
   @termui.print_raw(
     startup_info(width, model, provider, current_id, ws.get_root(), session),
   )
-  start_chat_input()
+  guard start_chat_input() else {
+    @termui.print_raw(
+      "Unable to initialize interactive input. Run MoonSage in a terminal, or use `moonsage chat` for redirected input.\n",
+    )
+    return
+  }
   @termui.print_raw(composer.draw_frame())
   while running {
     let raw = read_chat_input()
@@ -806,7 +812,12 @@ async fn run_tui_session(
             } noraise {
               _ => ()
             }
-            start_chat_input()
+            if !start_chat_input() {
+              @termui.print_raw(
+                "Unable to restore interactive input; leaving the TUI.\n",
+              )
+              running = false
+            }
             if !thinking.is_empty() {
               @termui.print_raw(
                 "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
