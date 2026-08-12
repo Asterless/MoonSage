@@ -515,6 +515,13 @@ async fn read_chat_input() -> String {
 }
 
 ///|
+fn finish_chat_input(composer : ChatComposer) -> Unit {
+  @termui.print_raw(composer.clear_frame())
+  stop_chat_input()
+  @termui.print_raw("\u001b[?25h")
+}
+
+///|
 pub async fn run_tui(
   api_key : String,
   base_url : String,
@@ -619,223 +626,233 @@ async fn run_tui_session(
     return
   }
   @termui.print_raw(composer.draw_frame())
-  while running {
-    let raw = read_chat_input()
-    let (next_width, _) = @termui.get_terminal_size()
-    if next_width != composer.width {
-      composer.resize(next_width)
-    }
-    match composer.handle_input(raw) {
-      Quit => running = false
-      Ignored => ()
-      Changed => @termui.print_raw(composer.draw_frame())
-      Submit => {
-        let input = composer.input.get_text().trim().to_owned()
-        composer.input.set_text("")
-        composer.selected_command = 0
-        @termui.print_raw(composer.clear_frame())
-        if input == "" {
-          @termui.print_raw("\u001b[90mType a message first\u001b[0m\n")
-          @termui.print_raw(composer.draw_frame())
-          continue
-        }
-        match slash_command(input) {
-          Exit => running = false
-          Clear => {
-            let (new_id, new_session) = fresh_session()
-            current_id = new_id
-            session = new_session
-            ws.set_root(cwd)
-            @termui.print_raw(
-              "\u001b[90mNew conversation  ·  Session " +
-              current_id +
-              "\u001b[0m\n",
-            )
+  try {
+    while running {
+      let raw = read_chat_input()
+      let (next_width, _) = @termui.get_terminal_size()
+      if next_width != composer.width {
+        composer.resize(next_width)
+      }
+      match composer.handle_input(raw) {
+        Quit => running = false
+        Ignored => ()
+        Changed => @termui.print_raw(composer.draw_frame())
+        Submit => {
+          let input = composer.input.get_text().trim().to_owned()
+          composer.input.set_text("")
+          composer.selected_command = 0
+          @termui.print_raw(composer.clear_frame())
+          if input == "" {
+            @termui.print_raw("\u001b[90mType a message first\u001b[0m\n")
+            @termui.print_raw(composer.draw_frame())
+            continue
           }
-          Help => @termui.print_raw(help_text() + "\n")
-          Undo => {
-            @termui.print_raw(ws.undo() + "\n")
-            @chat.save_session(store_root, current_id, session, ws.get_root())
-          }
-          Status =>
-            @termui.print_raw(
-              chat_status_text(
-                model,
-                provider,
-                current_id,
-                ws.get_root(),
-                session,
-              ) +
-              "\n",
-            )
-          Context => @termui.print_raw(context_text(session) + "\n")
-          Compact => {
-            let before = session.estimated_tokens()
-            if before < 256 {
+          match slash_command(input) {
+            Exit => running = false
+            Clear => {
+              let (new_id, new_session) = fresh_session()
+              current_id = new_id
+              session = new_session
+              ws.set_root(cwd)
               @termui.print_raw(
-                "Context is already compact (" +
-                before.to_string() +
-                " tokens)\n",
+                "\u001b[90mNew conversation  ·  Session " +
+                current_id +
+                "\u001b[0m\n",
               )
-            } else {
+            }
+            Help => @termui.print_raw(help_text() + "\n")
+            Undo => {
+              @termui.print_raw(ws.undo() + "\n")
+              @chat.save_session(store_root, current_id, session, ws.get_root())
+            }
+            Status =>
+              @termui.print_raw(
+                chat_status_text(
+                  model,
+                  provider,
+                  current_id,
+                  ws.get_root(),
+                  session,
+                ) +
+                "\n",
+              )
+            Context => @termui.print_raw(context_text(session) + "\n")
+            Compact => {
+              let before = session.estimated_tokens()
+              if before < 256 {
+                @termui.print_raw(
+                  "Context is already compact (" +
+                  before.to_string() +
+                  " tokens)\n",
+                )
+              } else {
+                try
+                  agent.compact(
+                    session,
+                    api_key,
+                    base_url,
+                    model,
+                    threshold_tokens=before - 1,
+                    provider~,
+                  )
+                catch {
+                  e =>
+                    @termui.print_raw(
+                      "Compaction failed: " +
+                      @chat.friendly_error(e.to_string()) +
+                      "\n",
+                    )
+                } noraise {
+                  _ => {
+                    let after = session.estimated_tokens()
+                    @termui.print_raw(
+                      "Context compacted: " +
+                      before.to_string() +
+                      " -> " +
+                      after.to_string() +
+                      " estimated tokens\n",
+                    )
+                    @chat.save_session(
+                      store_root,
+                      current_id,
+                      session,
+                      ws.get_root(),
+                    )
+                  }
+                }
+              }
+            }
+            Tools => @termui.print_raw(agent_tools_text(agent) + "\n")
+            Diff => {
+              let diff = @local.git_diff(ws.get_root(), None) catch {
+                e => "Unable to read diff: " + e.to_string()
+              }
+              if diff.trim() == "" {
+                @termui.print_raw("Workspace has no tracked changes.\n")
+              } else {
+                @termui.print_raw(diff + "\n")
+              }
+            }
+            Model =>
+              @termui.print_raw(
+                "Model     " +
+                model +
+                "\nProvider  " +
+                @llm.provider_to_string(provider) +
+                "\n",
+              )
+            Cwd => @termui.print_raw("Workspace  " + ws.get_root() + "\n")
+            Prompt => {
+              @termui.print_raw("\u001b[36;1m>\u001b[0m  " + input + "\n")
+              if session.estimated_tokens() > compact_threshold_tokens {
+                @termui.print_raw(
+                  "\u001b[90mCompacting conversation…\u001b[0m\n",
+                )
+                agent.compact(session, api_key, base_url, model, provider~) catch {
+                  _ =>
+                    @termui.print_raw("Context compaction failed; continuing\n")
+                }
+                @chat.save_session(
+                  store_root,
+                  current_id,
+                  session,
+                  ws.get_root(),
+                )
+              }
+              let printer = @md_ansi.MdStreamPrinter::new()
+              let thinking = StringBuilder::new()
+              let mut answer_started = false
+              // Tool confirmations read canonical lines from stdin. Leave raw
+              // mode while the agent may invoke a write or publish tool.
+              stop_chat_input()
               try
-                agent.compact(
+                agent.turn(
                   session,
                   api_key,
                   base_url,
                   model,
-                  threshold_tokens=before - 1,
+                  input,
+                  on_delta=fn(text) {
+                    if !thinking.is_empty() {
+                      @termui.print_raw(
+                        "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
+                      )
+                      thinking.reset()
+                    }
+                    if !answer_started {
+                      answer_started = true
+                      @termui.print_raw("\u001b[36;1mMoonSage\u001b[0m\n")
+                    }
+                    printer.feed(text)
+                    let out = printer.take_output()
+                    if out != "" {
+                      @termui.print_raw(out)
+                    }
+                  },
+                  on_thinking=fn(text) {
+                    if text != "" && thinking.to_string().length() < 20000 {
+                      thinking.write_string(text)
+                    }
+                  },
+                  context_window_tokens=chat_context_window_tokens,
+                  reserved_output_tokens=chat_reserved_output_tokens,
+                  on_event=fn(event) {
+                    match event {
+                      @agent.ToolStarted(event) => {
+                        if !thinking.is_empty() {
+                          @termui.print_raw(
+                            "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
+                          )
+                          thinking.reset()
+                        }
+                        @termui.print_raw(
+                          "\u001b[90mRunning " +
+                          @chat.tool_display_name(event.name) +
+                          "…\u001b[0m\n",
+                        )
+                      }
+                      @agent.ToolFinished(_) => ()
+                      _ => ()
+                    }
+                  },
                   provider~,
                 )
               catch {
                 e =>
                   @termui.print_raw(
-                    "Compaction failed: " +
-                    @chat.friendly_error(e.to_string()) +
-                    "\n",
+                    "Error: " + @chat.friendly_error(e.to_string()) + "\n",
                   )
               } noraise {
-                _ => {
-                  let after = session.estimated_tokens()
-                  @termui.print_raw(
-                    "Context compacted: " +
-                    before.to_string() +
-                    " -> " +
-                    after.to_string() +
-                    " estimated tokens\n",
-                  )
-                  @chat.save_session(
-                    store_root,
-                    current_id,
-                    session,
-                    ws.get_root(),
-                  )
-                }
+                _ => ()
               }
-            }
-          }
-          Tools => @termui.print_raw(agent_tools_text(agent) + "\n")
-          Diff => {
-            let diff = @local.git_diff(ws.get_root(), None) catch {
-              e => "Unable to read diff: " + e.to_string()
-            }
-            if diff.trim() == "" {
-              @termui.print_raw("Workspace has no tracked changes.\n")
-            } else {
-              @termui.print_raw(diff + "\n")
-            }
-          }
-          Model =>
-            @termui.print_raw(
-              "Model     " +
-              model +
-              "\nProvider  " +
-              @llm.provider_to_string(provider) +
-              "\n",
-            )
-          Cwd => @termui.print_raw("Workspace  " + ws.get_root() + "\n")
-          Prompt => {
-            @termui.print_raw("\u001b[36;1m>\u001b[0m  " + input + "\n")
-            if session.estimated_tokens() > compact_threshold_tokens {
-              @termui.print_raw(
-                "\u001b[90mCompacting conversation…\u001b[0m\n",
-              )
-              agent.compact(session, api_key, base_url, model, provider~) catch {
-                _ =>
-                  @termui.print_raw("Context compaction failed; continuing\n")
+              if !start_chat_input() {
+                @termui.print_raw(
+                  "Unable to restore interactive input; leaving the TUI.\n",
+                )
+                running = false
               }
+              if !thinking.is_empty() {
+                @termui.print_raw(
+                  "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
+                )
+              }
+              printer.finish()
+              @termui.print_raw(printer.take_output() + "\n")
               @chat.save_session(store_root, current_id, session, ws.get_root())
             }
-            let printer = @md_ansi.MdStreamPrinter::new()
-            let thinking = StringBuilder::new()
-            let mut answer_started = false
-            // Tool confirmations read canonical lines from stdin. Leave raw
-            // mode while the agent may invoke a write or publish tool.
-            stop_chat_input()
-            try
-              agent.turn(
-                session,
-                api_key,
-                base_url,
-                model,
-                input,
-                on_delta=fn(text) {
-                  if !thinking.is_empty() {
-                    @termui.print_raw(
-                      "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
-                    )
-                    thinking.reset()
-                  }
-                  if !answer_started {
-                    answer_started = true
-                    @termui.print_raw("\u001b[36;1mMoonSage\u001b[0m\n")
-                  }
-                  printer.feed(text)
-                  let out = printer.take_output()
-                  if out != "" {
-                    @termui.print_raw(out)
-                  }
-                },
-                on_thinking=fn(text) {
-                  if text != "" && thinking.to_string().length() < 20000 {
-                    thinking.write_string(text)
-                  }
-                },
-                context_window_tokens=chat_context_window_tokens,
-                reserved_output_tokens=chat_reserved_output_tokens,
-                on_event=fn(event) {
-                  match event {
-                    @agent.ToolStarted(event) => {
-                      if !thinking.is_empty() {
-                        @termui.print_raw(
-                          "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
-                        )
-                        thinking.reset()
-                      }
-                      @termui.print_raw(
-                        "\u001b[90mRunning " +
-                        @chat.tool_display_name(event.name) +
-                        "…\u001b[0m\n",
-                      )
-                    }
-                    @agent.ToolFinished(_) => ()
-                    _ => ()
-                  }
-                },
-                provider~,
-              )
-            catch {
-              e =>
-                @termui.print_raw(
-                  "Error: " + @chat.friendly_error(e.to_string()) + "\n",
-                )
-            } noraise {
-              _ => ()
-            }
-            if !start_chat_input() {
-              @termui.print_raw(
-                "Unable to restore interactive input; leaving the TUI.\n",
-              )
-              running = false
-            }
-            if !thinking.is_empty() {
-              @termui.print_raw(
-                "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
-              )
-            }
-            printer.finish()
-            @termui.print_raw(printer.take_output() + "\n")
-            @chat.save_session(store_root, current_id, session, ws.get_root())
           }
-        }
-        if running {
-          composer.set_runtime_status(model, provider, current_id, session)
-          @termui.print_raw(composer.draw_frame())
+          if running {
+            composer.set_runtime_status(model, provider, current_id, session)
+            @termui.print_raw(composer.draw_frame())
+          }
         }
       }
     }
+  } catch {
+    e => {
+      finish_chat_input(composer)
+      raise e
+    }
   }
-  @termui.print_raw(composer.clear_frame())
-  stop_chat_input()
-  @termui.print_raw("\u001b[?25h")
+  finish_chat_input(composer)
 }
