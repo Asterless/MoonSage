@@ -4,16 +4,20 @@ fn demo_reply(prompt : String) -> String {
 }
 
 ///|
-fn request_agent(emit : Emit[Msg], prompt : String) -> Cmd {
-  @rabbita.delay(emit(AgentReplied(demo_reply(prompt))), 650)
+fn request_agent(emit : Emit[Msg], session_id : String, prompt : String) -> Cmd {
+  @rabbita.delay(emit(AgentReplied(session_id, demo_reply(prompt))), 650)
 }
 
 ///|
-fn simulate_failure(emit : Emit[Msg], prompt : String) -> Cmd {
+fn simulate_failure(
+  emit : Emit[Msg],
+  session_id : String,
+  prompt : String,
+) -> Cmd {
   @rabbita.delay(
     emit(
       AgentFailed(
-        prompt, "演示适配器主动返回了一个可重试错误。",
+        session_id, prompt, "演示适配器主动返回了一个可重试错误。",
       ),
     ),
     650,

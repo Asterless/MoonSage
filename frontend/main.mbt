@@ -27,6 +27,7 @@ struct Message {
 
 ///|
 struct Session {
+  id : String
   title : String
   detail : String
   messages : Array[Message]
@@ -35,8 +36,8 @@ struct Session {
 ///|
 enum RequestState {
   Idle
-  Sending(String)
-  Failed(String, String)
+  Sending(String, String)
+  Failed(String, String, String)
 } derive(Eq)
 
 ///|
@@ -54,8 +55,8 @@ enum Msg {
   DraftChanged(String)
   UsePrompt(String)
   Submit
-  AgentReplied(String)
-  AgentFailed(String, String)
+  AgentReplied(String, String)
+  AgentFailed(String, String, String)
   Retry
   RunCommand(String)
   SelectSession(Int)
@@ -94,11 +95,13 @@ fn initial_model() -> Model {
     draft: "",
     sessions: [
       {
+        id: "welcome",
         title: "欢迎使用 MoonSage",
         detail: "刚刚",
         messages: welcome_messages(),
       },
       {
+        id: "tui-refactor",
         title: "MoonBit TUI 重构",
         detail: "昨天",
         messages: [
@@ -109,6 +112,7 @@ fn initial_model() -> Model {
         ],
       },
       {
+        id: "http-research",
         title: "HTTP 客户端调研",
         detail: "周一",
         messages: [
@@ -146,6 +150,25 @@ fn set_active_messages(model : Model, messages : Array[Message]) -> Model {
   let sessions = Array::copy(model.sessions)
   let session = sessions[model.active_session]
   sessions[model.active_session] = { ..session, messages, }
+  { ..model, sessions, }
+}
+
+///|
+fn append_session_message(
+  model : Model,
+  session_id : String,
+  message : Message,
+) -> Model {
+  let sessions = Array::copy(model.sessions)
+  for index, session in sessions {
+    if session.id == session_id {
+      sessions[index] = {
+        ..session,
+        messages: append_message(session.messages, message),
+      }
+      break
+    }
+  }
   { ..model, sessions, }
 }
 
@@ -193,7 +216,7 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
       ({ ..model, draft: value, command_open: false }, @rabbita.none)
     Submit => {
       let text = model.draft.trim().to_owned()
-      if text == "" || model.request is Sending(_) {
+      if text == "" || model.request is Sending(_, _) {
         (model, @rabbita.none)
       } else if text == "/new" {
         update(model, NewSession, emit)
@@ -203,13 +226,19 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
           @rabbita.none,
         )
       } else if text == "/fail" {
+        let session_id = model.sessions[model.active_session].id
         let next = set_active_messages(
           model,
           append_message(active_messages(model), { role: "user", text }),
         )
         (
-          { ..next, draft: "", command_open: false, request: Sending(text) },
-          simulate_failure(emit, text),
+          {
+            ..next,
+            draft: "",
+            command_open: false,
+            request: Sending(session_id, text),
+          },
+          simulate_failure(emit, session_id, text),
         )
       } else {
         match command_answer(text) {
@@ -223,47 +252,51 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
               @rabbita.none,
             )
           None => {
+            let session_id = model.sessions[model.active_session].id
             let next = set_active_messages(
               model,
               append_message(active_messages(model), { role: "user", text }),
             )
             (
-              { ..next, draft: "", command_open: false, request: Sending(text) },
-              request_agent(emit, text),
+              {
+                ..next,
+                draft: "",
+                command_open: false,
+                request: Sending(session_id, text),
+              },
+              request_agent(emit, session_id, text),
             )
           }
         }
       }
     }
-    AgentReplied(answer) => {
-      let next = set_active_messages(
-        model,
-        append_message(active_messages(model), {
-          role: "assistant",
-          text: answer,
-        }),
-      )
+    AgentReplied(session_id, answer) => {
+      let next = append_session_message(model, session_id, {
+        role: "assistant",
+        text: answer,
+      })
       ({ ..next, request: Idle }, @rabbita.none)
     }
-    AgentFailed(prompt, reason) =>
-      ({ ..model, request: Failed(prompt, reason) }, @rabbita.none)
+    AgentFailed(session_id, prompt, reason) =>
+      ({ ..model, request: Failed(session_id, prompt, reason) }, @rabbita.none)
     Retry =>
       match model.request {
-        Failed(prompt, _) =>
-          ({ ..model, request: Sending(prompt) }, request_agent(emit, prompt))
+        Failed(session_id, prompt, _) =>
+          (
+            { ..model, request: Sending(session_id, prompt) },
+            request_agent(emit, session_id, prompt),
+          )
         _ => (model, @rabbita.none)
       }
     RunCommand(command) => update({ ..model, draft: command }, Submit, emit)
     SelectSession(index) =>
-      (
-        { ..model, active_session: index, request: Idle, command_open: false },
-        @rabbita.none,
-      )
+      ({ ..model, active_session: index, command_open: false }, @rabbita.none)
     ToggleSidebar =>
       ({ ..model, sidebar_open: !model.sidebar_open }, @rabbita.none)
     NewSession => {
       let sessions = Array::copy(model.sessions)
       sessions.push({
+        id: "session-\{sessions.length()}",
         title: "新会话",
         detail: "刚刚",
         messages: [
@@ -278,7 +311,7 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
           draft: "",
           sessions,
           active_session: sessions.length() - 1,
-          request: Idle,
+          request: model.request,
           command_open: false,
           sidebar_open: @dom.window().inner_width() > 720,
         },
@@ -399,12 +432,12 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
 fn request_state_view(request : RequestState, emit : Emit[Msg]) -> Html {
   match request {
     Idle => div(class="request-placeholder", "")
-    Sending(_) =>
+    Sending(_, _) =>
       div(class="request-state sending", [
         span(class="typing-dots", [span(""), span(""), span("")]),
         span("MoonSage 正在思考"),
       ])
-    Failed(_, reason) =>
+    Failed(_, _, reason) =>
       div(class="request-state failed", [
         div([span(class="request-title", "请求失败"), p(reason)]),
         button(class="retry-button", on_click=emit(Retry), "重试"),
