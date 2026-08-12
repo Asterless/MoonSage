@@ -743,6 +743,9 @@ async fn run_tui_session(
             let printer = @md_ansi.MdStreamPrinter::new()
             let thinking = StringBuilder::new()
             let mut answer_started = false
+            // Tool confirmations read canonical lines from stdin. Leave raw
+            // mode while the agent may invoke a write or publish tool.
+            stop_chat_input()
             try
               agent.turn(
                 session,
@@ -803,6 +806,7 @@ async fn run_tui_session(
             } noraise {
               _ => ()
             }
+            start_chat_input()
             if !thinking.is_empty() {
               @termui.print_raw(
                 "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
