@@ -24,3 +24,16 @@ test "async replies stay with their originating session" {
     }),
   )
 }
+
+///|
+test "Agent responses decode success and service errors" {
+  assert_eq(
+    decode_agent_response("{\"answer\":\"真实回答\"}"),
+    Ok("真实回答"),
+  )
+  assert_eq(
+    decode_agent_response("{\"error\":\"missing key\"}"),
+    Err("missing key"),
+  )
+  assert_true(decode_agent_response("not json") is Err(_))
+}

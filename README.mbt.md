@@ -19,6 +19,7 @@ conversation, or `tui` for the enhanced terminal interface:
 
 ```powershell
 moon run cmd/main -- ask "帮我找一个适合 native 后端的 HTTP 客户端"
+moon run cmd/main -- ask --input-file prompt.txt
 moon run cmd/main -- chat
 moon run cmd/main -- chat --session demo      # resume/create a durable session
 moon run cmd/main -- chat --continue          # resume the most recent session

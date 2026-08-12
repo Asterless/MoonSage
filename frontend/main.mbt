@@ -72,7 +72,6 @@ let commands : Array[(String, String)] = [
   ("/status", "查看运行状态"),
   ("/model", "查看当前模型"),
   ("/about", "了解 MoonSage"),
-  ("/fail", "模拟请求失败"),
 ]
 
 ///|
@@ -84,7 +83,7 @@ fn welcome_messages() -> Array[Message] {
     },
     {
       role: "assistant",
-      text: "当前连接的是本地演示适配器。后续接入 Agent API 时，界面状态与消息渲染无需重写。",
+      text: "当前界面通过同源服务连接 MoonSage Agent。模型与密钥配置保留在服务端，不会发送到浏览器。",
     },
   ]
 }
@@ -118,7 +117,7 @@ fn initial_model() -> Model {
         messages: [
           {
             role: "assistant",
-            text: "真实 Agent API 尚未接入，前端通信边界已预留。",
+            text: "Agent API 已接入同源服务端点，支持保留当前会话上下文。",
           },
         ],
       },
@@ -173,6 +172,16 @@ fn append_session_message(
 }
 
 ///|
+fn session_messages(model : Model, session_id : String) -> Array[Message] {
+  for session in model.sessions {
+    if session.id == session_id {
+      return session.messages
+    }
+  }
+  []
+}
+
+///|
 fn append_exchange(model : Model, prompt : String, answer : String) -> Model {
   let messages = append_message(
     append_message(active_messages(model), { role: "user", text: prompt }),
@@ -186,15 +195,15 @@ fn command_answer(command : String) -> String? {
   match command {
     "/help" =>
       Some(
-        "## 可用命令\n\n- `/new` 新会话\n- `/clear` 清空消息\n- `/status` 运行状态\n- `/model` 当前模型\n- `/about` 关于 MoonSage\n- `/fail` 测试错误状态",
+        "## 可用命令\n\n- `/new` 新会话\n- `/clear` 清空消息\n- `/status` 运行状态\n- `/model` 当前模型\n- `/about` 关于 MoonSage",
       )
     "/status" =>
       Some(
-        "## 运行状态\n\n- 前端：Rabbita 0.14.2\n- 目标：JavaScript\n- 连接：本地演示适配器\n- 状态：就绪",
+        "## 运行状态\n\n- 前端：Rabbita 0.14.2\n- 目标：JavaScript\n- 连接：MoonSage Agent API\n- 状态：就绪",
       )
     "/model" =>
       Some(
-        "当前使用 `MoonSage Demo`。真实模型将在接入 Agent API 后显示。",
+        "当前模型由服务端 `MOONSAGE_MODEL` 配置，API Key 不会暴露到浏览器。",
       )
     "/about" =>
       Some(
@@ -225,21 +234,6 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
           set_active_messages({ ..model, draft: "", command_open: false }, []),
           @rabbita.none,
         )
-      } else if text == "/fail" {
-        let session_id = model.sessions[model.active_session].id
-        let next = set_active_messages(
-          model,
-          append_message(active_messages(model), { role: "user", text }),
-        )
-        (
-          {
-            ..next,
-            draft: "",
-            command_open: false,
-            request: Sending(session_id, text),
-          },
-          simulate_failure(emit, session_id, text),
-        )
       } else {
         match command_answer(text) {
           Some(answer) =>
@@ -264,7 +258,12 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
                 command_open: false,
                 request: Sending(session_id, text),
               },
-              request_agent(emit, session_id, text),
+              request_agent(
+                emit,
+                session_id,
+                text,
+                next.sessions[next.active_session].messages,
+              ),
             )
           }
         }
@@ -284,7 +283,12 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
         Failed(session_id, prompt, _) =>
           (
             { ..model, request: Sending(session_id, prompt) },
-            request_agent(emit, session_id, prompt),
+            request_agent(
+              emit,
+              session_id,
+              prompt,
+              session_messages(model, session_id),
+            ),
           )
         _ => (model, @rabbita.none)
       }
@@ -422,7 +426,7 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
     nav(class="session-list", rows),
     div(class="sidebar-footer", [
       span(class="footer-avatar", "M"),
-      div(class="footer-copy", [span("本地演示"), span("连接正常")]),
+      div(class="footer-copy", [span("Agent API"), span("同源连接")]),
       span(class="online-dot", ""),
     ]),
   ])

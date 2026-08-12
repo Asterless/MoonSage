@@ -207,6 +207,17 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
 }
 
 ///|
+async fn ask_question(m : @argparse.Matches) -> String {
+  match values_of(m, "input-file") {
+    [path, ..] => {
+      let bytes = @fs.read_file(path).binary()
+      @utf8.decode(bytes)
+    }
+    _ => join_values(m, "question")
+  }
+}
+
+///|
 async fn run_conversation_cmd(
   m : @argparse.Matches,
   terminal_ui : Bool,
@@ -296,7 +307,7 @@ async fn main {
     Some(("tui", m)) => run_conversation_cmd(m, true)
     Some(("search", m)) => run_search(join_values(m, "keywords"))
     Some(("ask", m)) =>
-      run_ask(join_values(m, "question"), stream_json=flag_of(m, "stream-json"))
+      run_ask(ask_question(m), stream_json=flag_of(m, "stream-json"))
     Some(("audit", m)) => @audit.run_audit(audit_args(m))
     _ => println(usage())
   }

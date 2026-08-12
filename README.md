@@ -32,6 +32,7 @@ Copy-Item .env.example .env
 # 3. 运行
 moon run cmd/main -- search "json parser"          # 确定性搜索（无需 Key）
 moon run cmd/main -- ask "帮我找一个 HTTP 客户端"   # LLM Agent
+moon run cmd/main -- ask --input-file prompt.txt    # 从 UTF-8 文件读取问题
 moon run cmd/main -- chat                           # 交互式本地 Agent
 moon run cmd/main -- tui                            # 增强终端界面
 moon build frontend --target js --release           # Rabbita Web 前端
@@ -92,7 +93,7 @@ moon run cmd/main -- tui --continue       # 恢复最近会话
 
 `tui` 与 `chat` 共用 Agent、工具与持久会话，但界面实现完全独立。`chat` 继续使用经典的逐行 stdin/stdout 交互；`tui` 提供中文内联输入、字符级编辑、输入 `/` 后的命令菜单、更多状态信息及 Markdown 终端渲染。
 
-`frontend` 是浏览器端 Rabbita 界面，当前用本地演示响应验证交互；构建后可用 `py -3 -m http.server 8765` 提供静态页面。
+`frontend` 是浏览器端 Rabbita 界面，通过同源 `/api/agent` 端点连接 MoonSage Agent。运行 `moon build frontend --target js --release` 后使用 `node frontend/dev_server.mjs` 启动；服务端沿用 `MOONSAGE_API_KEY`、`MOONSAGE_BASE_URL`、`MOONSAGE_MODEL` 与 `MOONSAGE_PROVIDER`，不会把密钥暴露到浏览器。
 
 ### audit — 远程审计与自动修复
 

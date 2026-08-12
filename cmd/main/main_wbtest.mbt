@@ -57,6 +57,40 @@ test "ask accepts stream-json and serializes structured tool events" {
 }
 
 ///|
+async test "ask reads a UTF-8 input file" {
+  let root = @fs.tmpdir(prefix="moonsage-ask-input-")
+  let path = root + "/prompt.txt"
+  @fs.write_file(
+    path,
+    "检查 async 包的 API\n并给出建议",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let matches = root_command().parse(argv=["ask", "--input-file", path])
+  guard matches.subcommand is Some(("ask", ask)) else {
+    fail("ask subcommand was not parsed")
+  }
+  assert_eq(ask_question(ask), "检查 async 包的 API\n并给出建议")
+  @fs.rmdir(root, recursive=true)
+}
+
+///|
+async test "ask decodes externally written UTF-8 bytes" {
+  let root = @fs.tmpdir(prefix="moonsage-ask-utf8-")
+  let path = root + "/prompt.txt"
+  @fs.write_file(
+    path,
+    b"\xe5\x8f\xaa\xe5\x9b\x9e\xe5\xa4\x8d\xef\xbc\x9aAPI\xe9\x93\xbe\xe8\xb7\xaf\xe6\x88\x90\xe5\x8a\x9f",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let matches = root_command().parse(argv=["ask", "--input-file", path])
+  guard matches.subcommand is Some(("ask", ask)) else {
+    fail("ask subcommand was not parsed")
+  }
+  assert_eq(ask_question(ask), "只回复：API链路成功")
+  @fs.rmdir(root, recursive=true)
+}
+
+///|
 test "audit args reconstruct raw arguments" {
   let root = root_command()
   let parsed = root.parse(

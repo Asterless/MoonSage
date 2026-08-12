@@ -57,6 +57,13 @@ fn root_command() -> @argparse.Command {
       @argparse.Command(
         "ask",
         about="Ask a one-shot question.",
+        options=[
+          @argparse.OptionArg(
+            "input-file",
+            long="input-file",
+            about="Read the UTF-8 question from a file instead of command-line arguments.",
+          ),
+        ],
         flags=[
           @argparse.FlagArg(
             "stream-json",

@@ -14,9 +14,11 @@ import {
   "moonsage/audit",
   "moonsage/dotenv",
   "moonbitlang/async",
+  "moonbitlang/async/fs",
   "moonbitlang/async/stdio",
   "moonbitlang/core/argparse",
   "moonbitlang/core/env",
+  "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/json",
   "moonbitlang/x/sys",
 }
