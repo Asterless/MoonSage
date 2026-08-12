@@ -4,7 +4,7 @@
 
 ```powershell
 moon build frontend --target js --release
-py -3 -m http.server 8765
+node frontend/dev_server.mjs
 ```
 
 浏览器打开 <http://127.0.0.1:8765/frontend/>。入口页面是 `index.html`，样式在 `styles.css`；后续接入真实 Agent 时，只需将 `Submit` 分支替换为 HTTP/WebSocket 命令。
