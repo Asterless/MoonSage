@@ -96,6 +96,7 @@ fn markdown_block_views(
       let source = node.v.code
         .fold(init=StringBuilder::new(), (output, line) => {
           output.write_string(line.v)
+          output.write_char('\n')
           output
         })
         .to_string()

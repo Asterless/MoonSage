@@ -76,7 +76,7 @@ test "Markdown renders common syntax and removes unsafe HTML" {
   let rendered = @rabbita.render_to_string(fn() {
     Val::constant(
       markdown_view(
-        "## 标题\n\n**粗体**、`code` 和 [链接](https://example.com)\n\n1. 第一项\n2. 第二项\n\n<script>alert(1)</script>",
+        "## 标题\n\n**粗体**、`code` 和 [链接](https://example.com)\n\n1. 第一项\n2. 第二项\n\n```moonbit\nlet first = 1\nlet second = 2\n```\n\n<script>alert(1)</script>",
       ),
     )
   })
@@ -84,6 +84,7 @@ test "Markdown renders common syntax and removes unsafe HTML" {
   assert_true(rendered.contains("<strong>粗体</strong>"))
   assert_true(rendered.contains("<code>code</code>"))
   assert_true(rendered.contains("<ol start=\"1\">"))
+  assert_true(rendered.contains("let first = 1\nlet second = 2\n"))
   assert_true(rendered.contains("href=\"https://example.com\""))
   assert_true(!rendered.contains("<script>"))
 }
