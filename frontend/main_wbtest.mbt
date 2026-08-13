@@ -88,3 +88,42 @@ test "Markdown renders common syntax and removes unsafe HTML" {
   assert_true(rendered.contains("href=\"https://example.com\""))
   assert_true(!rendered.contains("<script>"))
 }
+
+///|
+#warnings("-alert_unstable")
+test "Markdown recovers strong emphasis missed at text boundaries" {
+  let rendered = @rabbita.render_to_string(fn() {
+    Val::constant(
+      markdown_view(
+        "正文**重点**正文\n\n**状态：**正常\n\n** 带空格的重点 **\n\n****双层强调****\n\n\\**转义星号**\n\n`**代码保持原样**`",
+      ),
+    )
+  })
+  assert_true(rendered.contains("正文<strong>重点</strong>正文"))
+  assert_true(rendered.contains("<strong>状态：</strong>正常"))
+  assert_true(rendered.contains("<strong> 带空格的重点 </strong>"))
+  assert_true(
+    rendered.contains("<strong><strong>双层强调</strong></strong>"),
+  )
+  assert_true(rendered.contains("*<em>转义星号</em>"))
+  assert_true(!rendered.contains("<strong>转义星号</strong>"))
+  assert_true(rendered.contains("<code>**代码保持原样**</code>"))
+}
+
+///|
+#warnings("-alert_unstable")
+test "Markdown renders tables, thematic breaks, and break types" {
+  let rendered = @rabbita.render_to_string(fn() {
+    Val::constant(
+      markdown_view(
+        "| 名称 | 状态 |\n| --- | --- |\n| Markdown | 正常 |\n\n****\n\n软\n换行\n\n硬换行  \n保留",
+      ),
+    )
+  })
+  assert_true(rendered.contains("<table>"))
+  assert_true(rendered.contains("<th>名称</th>"))
+  assert_true(rendered.contains("<td>正常</td>"))
+  assert_true(rendered.contains("<hr>"))
+  assert_true(rendered.contains("<p>软 换行</p>"))
+  assert_true(rendered.contains("硬换行<br>保留"))
+}

@@ -155,7 +155,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--sage); outl
 .message-text { margin: 0; color: var(--text-soft); line-height: 1.75; white-space: pre-wrap; text-wrap: pretty; }
 .message.user .message-body { padding: 0; }
 .message.user .message-text { padding: 11px 14px; border: 1px solid #3b3d35; border-radius: 8px 8px 2px 8px; background: var(--surface-raised); color: var(--text); }
-.markdown { white-space: normal; }
+.markdown { overflow-wrap: anywhere; white-space: normal; }
 .markdown h2, .markdown h3 { margin: 0 0 10px; color: var(--text); line-height: 1.3; font-weight: 700; }
 .markdown h2 { font-size: 19px; }
 .markdown h3 { font-size: 15px; }
@@ -173,6 +173,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--sage); outl
 .markdown a:hover { text-decoration-color: currentColor; }
 .markdown blockquote { margin: 13px 0; padding: 2px 0 2px 14px; border-left: 2px solid var(--border-strong); color: var(--text-muted); }
 .markdown blockquote p { margin-bottom: 0; }
+.markdown hr { margin: 20px 0; border: 0; border-top: 1px solid var(--border); }
+.markdown-table-scroll { max-width: 100%; margin: 14px 0; overflow-x: auto; }
+.markdown table { width: 100%; min-width: 420px; border-collapse: collapse; color: var(--text-soft); font-size: 13px; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 9px 11px; text-align: left; vertical-align: top; }
+.markdown th { background: var(--surface-raised); color: var(--text); font-weight: 700; }
+.markdown tbody tr:nth-child(even) { background: var(--surface-subtle); }
 
 .prompt-suggestions { max-width: 720px; margin: -5px 0 31px 40px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .prompt-chip { min-width: 0; min-height: 60px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; background: transparent; color: #bdbbb3; text-align: left; font-size: 12px; transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease; }

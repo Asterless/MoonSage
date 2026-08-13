@@ -1,15 +1,54 @@
 ///|
+fn text_with_strong_fallback(source : String) -> Array[Html] {
+  match source.find("**") {
+    None => [@html.text(source)]
+    Some(open) => {
+      let content_start = open + 2
+      let remainder = source[content_start:].to_owned()
+      match remainder.find("**") {
+        None => [@html.text(source)]
+        Some(relative_close) => {
+          let close = content_start + relative_close
+          let content = source[content_start:close].to_owned()
+          if content.trim().is_empty() {
+            [@html.text(source)]
+          } else {
+            let output : Array[Html] = []
+            let before = source[:open].to_owned()
+            if !before.is_empty() {
+              output.push(@html.text(before))
+            }
+            output.push(@html.strong([@html.text(content)]))
+            let after = source[close + 2:].to_owned()
+            if !after.is_empty() {
+              output + text_with_strong_fallback(after)
+            } else {
+              output
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+///|
 fn inline_markdown_view(
   inline : @cmark.Inline,
   definitions : Map[String, @cmark.LabelDef],
 ) -> Array[Html] {
   match inline {
-    Text(node) => [@html.text(node.v)]
+    Text(node) => text_with_strong_fallback(node.v)
     Inlines(node) =>
       node.v.fold(init=[], (output, child) => {
         output + inline_markdown_view(child, definitions)
       })
-    Break(_) => [@html.br()]
+    Break(node) =>
+      if node.v.ty == Hard {
+        [@html.br()]
+      } else {
+        [@html.text(" ")]
+      }
     CodeSpan(node) => [@html.code(node.v.code())]
     Emphasis(node) =>
       [@html.em(inline_markdown_view(node.v.inline, definitions))]
@@ -59,6 +98,54 @@ fn inline_markdown_view(
       [@html.del(inline_markdown_view(node.v.0, definitions))]
     ExtMathSpan(node) => [@html.code(class="math", node.v.tex())]
   }
+}
+
+///|
+fn markdown_table_cells_view(
+  cells : @cmark.Seq[(@cmark.Inline, @cmark.TableCellLayout)],
+  header : Bool,
+  definitions : Map[String, @cmark.LabelDef],
+) -> Array[Html] {
+  cells
+  .map(cell => {
+    let children = inline_markdown_view(cell.0, definitions)
+    if header {
+      @html.th(children)
+    } else {
+      @html.td(children)
+    }
+  })
+  .to_array()
+}
+
+///|
+fn markdown_table_view(
+  table : @cmark.Table,
+  definitions : Map[String, @cmark.LabelDef],
+) -> Html {
+  let header_rows : Array[Html] = []
+  let data_rows : Array[Html] = []
+  for row in table.rows {
+    match row.0.v {
+      Header(cells) =>
+        header_rows.push(
+          @html.tr(markdown_table_cells_view(cells, true, definitions)),
+        )
+      Data(cells) =>
+        data_rows.push(
+          @html.tr(markdown_table_cells_view(cells, false, definitions)),
+        )
+      Sep(_) => ()
+    }
+  }
+  let sections : Array[Html] = []
+  if !header_rows.is_empty() {
+    sections.push(@html.thead(header_rows))
+  }
+  if !data_rows.is_empty() {
+    sections.push(@html.tbody(data_rows))
+  }
+  @html.div(class="markdown-table-scroll", [@html.table(sections)])
 }
 
 ///|
@@ -112,7 +199,8 @@ fn markdown_block_views(
       }
     }
     ThematicBreak(_) => [@html.hr()]
-    ExtTable(_) | ExtFootnoteDefinition(_) => []
+    ExtTable(node) => [markdown_table_view(node.v, definitions)]
+    ExtFootnoteDefinition(_) => []
   }
 }
 
