@@ -10,6 +10,7 @@ test "async replies stay with their originating session" {
     request: Idle,
     command_open: false,
     sidebar_open: true,
+    workspace: initial_workspace(),
   }
   let updated = append_session_message(model, "origin", {
     role: "assistant",
@@ -37,6 +38,7 @@ test "stream events only update their originating request" {
     request: Sending("origin", "question", "正在分析问题", "first"),
     command_open: false,
     sidebar_open: true,
+    workspace: initial_workspace(),
   }
   let emit : Emit[Msg] = Emit(_ => @rabbita.none)
   let (streamed, _) = update(model, AgentDelta("origin", " second"), emit)
@@ -112,6 +114,25 @@ test "Markdown recovers strong emphasis missed at text boundaries" {
 
 ///|
 #warnings("-alert_unstable")
+test "Markdown keeps empty star runs without hiding later emphasis" {
+  let rendered = @rabbita.render_to_string(fn() {
+    Val::constant(
+      markdown_view(
+        "****\n\n前缀****后缀\n\n**** 保留，后面 **重点**\n\n**第一** 和 **第二**\n\n结尾 **",
+      ),
+    )
+  })
+  assert_true(rendered.contains("<hr>"))
+  assert_true(rendered.contains("前缀****后缀"))
+  assert_true(rendered.contains("**** 保留，后面 <strong>重点</strong>"))
+  assert_true(
+    rendered.contains("<strong>第一</strong> 和 <strong>第二</strong>"),
+  )
+  assert_true(rendered.contains("结尾 **"))
+}
+
+///|
+#warnings("-alert_unstable")
 test "Markdown renders tables, thematic breaks, and break types" {
   let rendered = @rabbita.render_to_string(fn() {
     Val::constant(
@@ -126,4 +147,47 @@ test "Markdown renders tables, thematic breaks, and break types" {
   assert_true(rendered.contains("<hr>"))
   assert_true(rendered.contains("<p>软 换行</p>"))
   assert_true(rendered.contains("硬换行<br>保留"))
+}
+
+///|
+test "workspace decodes files and git status" {
+  assert_eq(
+    decode_workspace_tree(
+      "{\"root\":\"demo\",\"files\":[\"main.mbt\",\"src/lib.mbt\"]}",
+    ),
+    Some(("demo", ["main.mbt", "src/lib.mbt"])),
+  )
+  let workspace = initial_workspace()
+  guard apply_workspace_status(
+      workspace, "{\"branch\":\"codex/workspace\",\"changes\":[{\"path\":\"main.mbt\",\"index\":\"M\",\"worktree\":\" \",\"staged\":true,\"unstaged\":false,\"untracked\":false}]}",
+    )
+    is Some(updated) else {
+    fail("expected workspace status")
+  }
+  assert_eq(updated.branch, "codex/workspace")
+  assert_eq(updated.changes.length(), 1)
+  assert_true(updated.changes[0].staged)
+}
+
+///|
+test "workspace protects unsaved editor state from stale saves" {
+  let workspace = {
+    ..initial_workspace(),
+    selected_path: "main.mbt",
+    content: "newer",
+    saved_content: "old",
+    loading: true,
+  }
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  guard workspace_update(
+      workspace,
+      WorkspaceFileSaved("main.mbt", "older request"),
+      emit,
+    )
+    is Some((updated, _)) else {
+    fail("expected workspace update")
+  }
+  assert_eq(updated.content, "newer")
+  assert_eq(updated.saved_content, "old")
+  assert_true(workspace_changed(updated))
 }

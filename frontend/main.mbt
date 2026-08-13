@@ -14,8 +14,10 @@ using @html {
   main_,
   nav,
   p,
+  pre,
   section,
   span,
+  textarea,
   ul,
 }
 
@@ -48,6 +50,7 @@ struct Model {
   request : RequestState
   command_open : Bool
   sidebar_open : Bool
+  workspace : WorkspaceModel
 } derive(Eq)
 
 ///|
@@ -64,6 +67,26 @@ enum Msg {
   SelectSession(Int)
   ToggleSidebar
   NewSession
+  ToggleWorkspace
+  WorkspaceTabSelected(String)
+  WorkspaceTreeReceived(String)
+  WorkspaceFilterChanged(String)
+  WorkspaceSelectFile(String)
+  WorkspaceFileReceived(String, String)
+  WorkspaceContentChanged(String)
+  WorkspaceSaveFile
+  WorkspaceFileSaved(String, String)
+  WorkspaceStatusReceived(String)
+  WorkspaceDiffScopeChanged(String)
+  WorkspaceDiffReceived(String, String, String)
+  WorkspaceRefresh
+  WorkspaceStage(String)
+  WorkspaceUnstage(String)
+  WorkspaceGitActionReceived(String, String)
+  WorkspaceCommitMessageChanged(String)
+  WorkspaceCommit
+  WorkspaceCommitReceived(String)
+  WorkspaceFailed(String)
 } derive(Eq)
 
 ///|
@@ -128,6 +151,7 @@ fn initial_model() -> Model {
     request: Idle,
     command_open: false,
     sidebar_open: @dom.window().inner_width() > 720,
+    workspace: initial_workspace(),
   }
 }
 
@@ -216,7 +240,11 @@ fn command_answer(command : String) -> String? {
 }
 
 ///|
-fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
+fn update_conversation(
+  model : Model,
+  msg : Msg,
+  emit : Emit[Msg],
+) -> (Model, Cmd) {
   match msg {
     DraftChanged(value) =>
       (
@@ -375,10 +403,20 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
           request: model.request,
           command_open: false,
           sidebar_open: @dom.window().inner_width() > 720,
+          workspace: model.workspace,
         },
         @rabbita.none,
       )
     }
+    _ => (model, @rabbita.none)
+  }
+}
+
+///|
+fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
+  match workspace_update(model.workspace, msg, emit) {
+    Some((workspace, command)) => ({ ..model, workspace, }, command)
+    None => update_conversation(model, msg, emit)
   }
 }
 
@@ -541,6 +579,11 @@ fn app() -> Val[Html] {
     } else {
       "shell sidebar-closed"
     }
+    let shell_class = if model.workspace.open {
+      shell_class + " workspace-open"
+    } else {
+      shell_class
+    }
     let sending = model.request is Sending(_, _, _, _)
     div(class=shell_class, [
       session_view(model, emit),
@@ -572,6 +615,18 @@ fn app() -> Val[Html] {
             span(class="topbar-dot", ""),
             span("就绪"),
           ]),
+          button(
+            class=if model.workspace.open {
+              "workspace-toggle active"
+            } else {
+              "workspace-toggle"
+            },
+            type_="button",
+            title="切换工作区",
+            attrs=@html.Attrs::build().aria_label("切换工作区"),
+            on_click=emit(ToggleWorkspace),
+            "</>",
+          ),
         ]),
         section(class="message-scroll", [
           div(class="message-column", [
@@ -633,6 +688,11 @@ fn app() -> Val[Html] {
           ),
         ]),
       ]),
+      if model.workspace.open {
+        workspace_view(model.workspace, emit)
+      } else {
+        div(class="workspace-placeholder", "")
+      },
     ])
   })
 }

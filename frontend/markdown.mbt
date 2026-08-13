@@ -1,29 +1,60 @@
 ///|
+fn star_run_end(source : String, start : Int) -> Int {
+  for index = start; index < source.length() && source[index] == '*'; {
+    continue index + 1
+  } nobreak {
+    index
+  }
+}
+
+///|
 fn text_with_strong_fallback(source : String) -> Array[Html] {
   match source.find("**") {
     None => [@html.text(source)]
     Some(open) => {
-      let content_start = open + 2
-      let remainder = source[content_start:].to_owned()
-      match remainder.find("**") {
-        None => [@html.text(source)]
-        Some(relative_close) => {
-          let close = content_start + relative_close
-          let content = source[content_start:close].to_owned()
-          if content.trim().is_empty() {
-            [@html.text(source)]
-          } else {
-            let output : Array[Html] = []
-            let before = source[:open].to_owned()
-            if !before.is_empty() {
-              output.push(@html.text(before))
-            }
-            output.push(@html.strong([@html.text(content)]))
-            let after = source[close + 2:].to_owned()
-            if !after.is_empty() {
-              output + text_with_strong_fallback(after)
+      let run_end = star_run_end(source, open)
+      if run_end - open > 2 {
+        let output : Array[Html] = []
+        let literal = source[:run_end].to_owned()
+        if !literal.is_empty() {
+          output.push(@html.text(literal))
+        }
+        let after = source[run_end:].to_owned()
+        if after.is_empty() {
+          output
+        } else {
+          output + text_with_strong_fallback(after)
+        }
+      } else {
+        let content_start = open + 2
+        let remainder = source[content_start:].to_owned()
+        match remainder.find("**") {
+          None => [@html.text(source)]
+          Some(relative_close) => {
+            let close = content_start + relative_close
+            let content = source[content_start:close].to_owned()
+            if content.trim().is_empty() {
+              let output : Array[Html] = []
+              output.push(@html.text(source[:close + 2].to_owned()))
+              let after = source[close + 2:].to_owned()
+              if after.is_empty() {
+                output
+              } else {
+                output + text_with_strong_fallback(after)
+              }
             } else {
-              output
+              let output : Array[Html] = []
+              let before = source[:open].to_owned()
+              if !before.is_empty() {
+                output.push(@html.text(before))
+              }
+              output.push(@html.strong([@html.text(content)]))
+              let after = source[close + 2:].to_owned()
+              if !after.is_empty() {
+                output + text_with_strong_fallback(after)
+              } else {
+                output
+              }
             }
           }
         }

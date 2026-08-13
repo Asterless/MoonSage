@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
-import { buildAgentPrompt, eventForAgentOutput, parseAgentEvents, resolveRequestPath, serve } from "./dev_server.mjs";
+import { buildAgentPrompt, eventForAgentOutput, parseAgentEvents, parseGitStatus, resolveRequestPath, resolveWorkspacePath, serve } from "./dev_server.mjs";
+
+const execFileAsync = promisify(execFile);
 
 test("resolves files inside the workspace", () => {
   assert.equal(resolveRequestPath("/frontend/index.html"), join(import.meta.dirname, "index.html"));
@@ -18,6 +24,27 @@ test("rejects Windows backslash traversal", { skip: process.platform !== "win32"
 
 test("rejects malformed URL encoding", () => {
   assert.equal(resolveRequestPath("/frontend/%zz"), null);
+});
+
+test("resolves only relative workspace paths", () => {
+  const workspace = join(tmpdir(), "moonsage-workspace");
+  assert.equal(resolveWorkspacePath(workspace, "src/main.mbt"), join(workspace, "src/main.mbt"));
+  assert.equal(resolveWorkspacePath(workspace, "../secret.txt"), null);
+  assert.equal(resolveWorkspacePath(workspace, "/absolute.txt"), null);
+  assert.equal(resolveWorkspacePath(workspace, ".env"), null);
+  assert.equal(resolveWorkspacePath(workspace, ".git/config"), null);
+  assert.equal(resolveWorkspacePath(workspace, ".moonsage/sessions/private.json"), null);
+  if (process.platform === "win32") {
+    assert.equal(resolveWorkspacePath(workspace, "C:/Windows/System32/config"), null);
+  }
+});
+
+test("parses staged, unstaged, and untracked git status", () => {
+  assert.deepEqual(parseGitStatus("M  staged.mbt\0 M working.mbt\0?? new.mbt\0"), [
+    { path: "staged.mbt", index: "M", worktree: " ", staged: true, unstaged: false, untracked: false },
+    { path: "working.mbt", index: " ", worktree: "M", staged: false, unstaged: true, untracked: false },
+    { path: "new.mbt", index: "?", worktree: "?", staged: false, unstaged: true, untracked: true },
+  ]);
 });
 
 test("builds a bounded conversation transcript", () => {
@@ -144,5 +171,111 @@ test("streams answer deltas before the agent process finishes", async () => {
     await reader.cancel();
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("workspace API edits files and completes a git workflow", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "moonsage-workspace-"));
+  await execFileAsync("git", ["init"], { cwd: workspaceRoot });
+  await execFileAsync("git", ["config", "user.name", "MoonSage Test"], { cwd: workspaceRoot });
+  await execFileAsync("git", ["config", "user.email", "test@moonsage.local"], { cwd: workspaceRoot });
+  await writeFile(join(workspaceRoot, "main.mbt"), "fn main {\n  println(1)\n}\n", "utf8");
+  await writeFile(join(workspaceRoot, ".env"), "SECRET=hidden\n", "utf8");
+  await mkdir(join(workspaceRoot, ".moonsage"));
+  await writeFile(join(workspaceRoot, ".moonsage", "session.json"), "{}\n", "utf8");
+  await execFileAsync("git", ["add", "main.mbt"], { cwd: workspaceRoot });
+  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: workspaceRoot });
+  const server = serve({ listenPort: 0, workspaceRoot });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const api = "http://127.0.0.1:" + port + "/api/workspace";
+  try {
+    const tree = await (await fetch(api + "/tree")).json();
+    assert.deepEqual(tree.files, ["main.mbt"]);
+    await rm(join(workspaceRoot, ".env"));
+    await rm(join(workspaceRoot, ".moonsage"), { recursive: true });
+
+    const opened = await (await fetch(api + "/file?path=main.mbt")).json();
+    assert.match(opened.content, /println\(1\)/);
+
+    const saved = await fetch(api + "/file", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "main.mbt", content: "fn main {\n  println(2)\n}\n" }),
+    });
+    assert.equal(saved.status, 200);
+    assert.match(await readFile(join(workspaceRoot, "main.mbt"), "utf8"), /println\(2\)/);
+
+    await writeFile(join(workspaceRoot, "new.mbt"), "let answer = 42\n", "utf8");
+    const status = await (await fetch(api + "/git/status")).json();
+    assert.equal(status.changes.length, 2);
+
+    const workingDiff = await (await fetch(api + "/git/diff?scope=working")).json();
+    assert.match(workingDiff.diff, /println\(2\)/);
+    assert.match(workingDiff.diff, /new\.mbt/);
+
+    const stage = await fetch(api + "/git/stage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: ["main.mbt", "new.mbt"] }),
+    });
+    assert.equal(stage.status, 200);
+    const stagedDiff = await (await fetch(api + "/git/diff?scope=staged")).json();
+    assert.match(stagedDiff.diff, /println\(2\)/);
+    assert.match(stagedDiff.diff, /new\.mbt/);
+
+    const unstage = await fetch(api + "/git/unstage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: ["new.mbt"] }),
+    });
+    assert.equal(unstage.status, 200);
+    await fetch(api + "/git/stage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: ["new.mbt"] }),
+    });
+
+    const commit = await fetch(api + "/git/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "update workspace" }),
+    });
+    const committed = await commit.json();
+    assert.equal(commit.status, 200, committed.error);
+    assert.deepEqual(committed.changes, []);
+
+    const traversal = await fetch(api + "/file?path=../secret.txt");
+    assert.equal(traversal.status, 400);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("workspace API unstages files before the first commit", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "moonsage-unborn-"));
+  await execFileAsync("git", ["init"], { cwd: workspaceRoot });
+  await writeFile(join(workspaceRoot, "first.mbt"), "let answer = 42\n", "utf8");
+  await execFileAsync("git", ["add", "first.mbt"], { cwd: workspaceRoot });
+  const server = serve({ listenPort: 0, workspaceRoot });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const api = "http://127.0.0.1:" + port + "/api/workspace";
+  try {
+    const response = await fetch(api + "/git/unstage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: ["first.mbt"] }),
+    });
+    const status = await response.json();
+    assert.equal(response.status, 200, status.error);
+    assert.equal(status.changes.length, 1);
+    assert.equal(status.changes[0].path, "first.mbt");
+    assert.equal(status.changes[0].staged, false);
+    assert.equal(status.changes[0].untracked, true);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
