@@ -574,21 +574,23 @@ fn app() -> Val[Html] {
           ]),
         ]),
         section(class="message-scroll", [
-          if content.length() == 0 {
-            div(class="empty-state", [
-              div(class="empty-mark", "M"),
-              h1("开始新的对话"),
-              p("描述任务，或输入 / 查看命令。"),
-            ])
-          } else {
-            div(content)
-          },
-          if active.messages.length() == 2 && model.active_session == 0 {
-            prompt_suggestions(emit)
-          } else {
-            div(class="prompt-placeholder", "")
-          },
-          request_state_view(model.request, active.id, emit),
+          div(class="message-column", [
+            if content.length() == 0 {
+              div(class="empty-state", [
+                div(class="empty-mark", "M"),
+                h1("开始新的对话"),
+                p("描述任务，或输入 / 查看命令。"),
+              ])
+            } else {
+              div(content)
+            },
+            if active.messages.length() == 2 && model.active_session == 0 {
+              prompt_suggestions(emit)
+            } else {
+              div(class="prompt-placeholder", "")
+            },
+            request_state_view(model.request, active.id, emit),
+          ]),
         ]),
         section(class="composer-area", [
           if model.command_open && !sending {
