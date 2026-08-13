@@ -36,7 +36,7 @@ struct Session {
 ///|
 enum RequestState {
   Idle
-  Sending(String, String)
+  Sending(String, String, String, String)
   Failed(String, String, String)
 } derive(Eq)
 
@@ -55,7 +55,9 @@ enum Msg {
   DraftChanged(String)
   UsePrompt(String)
   Submit
-  AgentReplied(String, String)
+  AgentStatus(String, String)
+  AgentDelta(String, String)
+  AgentFinished(String, String)
   AgentFailed(String, String, String)
   Retry
   RunCommand(String)
@@ -225,7 +227,7 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
       ({ ..model, draft: value, command_open: false }, @rabbita.none)
     Submit => {
       let text = model.draft.trim().to_owned()
-      if text == "" || model.request is Sending(_, _) {
+      if text == "" || model.request is Sending(_, _, _, _) {
         (model, @rabbita.none)
       } else if text == "/new" {
         update(model, NewSession, emit)
@@ -256,7 +258,7 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
                 ..next,
                 draft: "",
                 command_open: false,
-                request: Sending(session_id, text),
+                request: Sending(session_id, text, "正在连接 Agent", ""),
               },
               request_agent(
                 emit,
@@ -269,20 +271,75 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
         }
       }
     }
-    AgentReplied(session_id, answer) => {
-      let next = append_session_message(model, session_id, {
-        role: "assistant",
-        text: answer,
-      })
-      ({ ..next, request: Idle }, @rabbita.none)
-    }
+    AgentStatus(session_id, status) =>
+      match model.request {
+        Sending(request_session, prompt, _, answer) if request_session ==
+          session_id =>
+          (
+            {
+              ..model,
+              request: Sending(request_session, prompt, status, answer),
+            },
+            @rabbita.none,
+          )
+        _ => (model, @rabbita.none)
+      }
+    AgentDelta(session_id, delta) =>
+      match model.request {
+        Sending(request_session, prompt, status, answer) if request_session ==
+          session_id =>
+          (
+            {
+              ..model,
+              request: Sending(request_session, prompt, status, answer + delta),
+            },
+            @rabbita.none,
+          )
+        _ => (model, @rabbita.none)
+      }
+    AgentFinished(session_id, prompt) =>
+      match model.request {
+        Sending(request_session, request_prompt, _, answer) if request_session ==
+          session_id &&
+          request_prompt == prompt =>
+          if answer.trim() == "" {
+            (
+              {
+                ..model,
+                request: Failed(
+                  session_id, prompt, "Agent 没有返回内容。",
+                ),
+              },
+              @rabbita.none,
+            )
+          } else {
+            let next = append_session_message(model, session_id, {
+              role: "assistant",
+              text: answer,
+            })
+            ({ ..next, request: Idle }, @rabbita.none)
+          }
+        _ => (model, @rabbita.none)
+      }
     AgentFailed(session_id, prompt, reason) =>
-      ({ ..model, request: Failed(session_id, prompt, reason) }, @rabbita.none)
+      match model.request {
+        Sending(request_session, request_prompt, _, _) if request_session ==
+          session_id &&
+          request_prompt == prompt =>
+          (
+            { ..model, request: Failed(session_id, prompt, reason) },
+            @rabbita.none,
+          )
+        _ => (model, @rabbita.none)
+      }
     Retry =>
       match model.request {
         Failed(session_id, prompt, _) =>
           (
-            { ..model, request: Sending(session_id, prompt) },
+            {
+              ..model,
+              request: Sending(session_id, prompt, "正在重新连接", ""),
+            },
             request_agent(
               emit,
               session_id,
@@ -339,7 +396,7 @@ fn message_view(message : Message) -> Html {
       span(class="message-avatar", "M"),
       div(class="message-content", [
         span(class="message-label", label),
-        div(class="message-text markdown", markdown_view(message.text)),
+        markdown_view(message.text),
       ]),
     ])
   }
@@ -433,19 +490,43 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
 }
 
 ///|
-fn request_state_view(request : RequestState, emit : Emit[Msg]) -> Html {
+fn request_state_view(
+  request : RequestState,
+  active_session_id : String,
+  emit : Emit[Msg],
+) -> Html {
   match request {
     Idle => div(class="request-placeholder", "")
-    Sending(_, _) =>
-      div(class="request-state sending", [
-        span(class="typing-dots", [span(""), span(""), span("")]),
-        span("MoonSage 正在思考"),
-      ])
-    Failed(_, _, reason) =>
-      div(class="request-state failed", [
-        div([span(class="request-title", "请求失败"), p(reason)]),
-        button(class="retry-button", on_click=emit(Retry), "重试"),
-      ])
+    Sending(session_id, _, status, answer) =>
+      if session_id != active_session_id {
+        div(class="request-placeholder", "")
+      } else {
+        div(class="streaming-response", [
+          if answer == "" {
+            div(class="request-state sending", [
+              span(class="typing-dots", [span(""), span(""), span("")]),
+              span(status),
+            ])
+          } else {
+            div([
+              message_view({ role: "assistant", text: answer }),
+              div(class="streaming-status", [
+                span(class="topbar-dot", ""),
+                span(status),
+              ]),
+            ])
+          },
+        ])
+      }
+    Failed(session_id, _, reason) =>
+      if session_id != active_session_id {
+        div(class="request-placeholder", "")
+      } else {
+        div(class="request-state failed", [
+          div([span(class="request-title", "请求失败"), p(reason)]),
+          button(class="retry-button", on_click=emit(Retry), "重试"),
+        ])
+      }
   }
 }
 
@@ -460,7 +541,7 @@ fn app() -> Val[Html] {
     } else {
       "shell sidebar-closed"
     }
-    let sending = model.request is Sending(_)
+    let sending = model.request is Sending(_, _, _, _)
     div(class=shell_class, [
       session_view(model, emit),
       if model.sidebar_open {
@@ -507,7 +588,7 @@ fn app() -> Val[Html] {
           } else {
             div(class="prompt-placeholder", "")
           },
-          request_state_view(model.request, emit),
+          request_state_view(model.request, active.id, emit),
         ]),
         section(class="composer-area", [
           if model.command_open && !sending {

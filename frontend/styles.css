@@ -155,11 +155,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--sage); outl
 .markdown h3 { font-size: 15px; }
 .markdown p { margin: 0 0 12px; }
 .markdown p:last-child { margin-bottom: 0; }
-.markdown ul { margin: 0 0 12px; padding-left: 19px; color: var(--text-soft); }
+.markdown ul, .markdown ol { margin: 0 0 12px; padding-left: 22px; color: var(--text-soft); }
 .markdown li { margin: 5px 0; padding-left: 3px; }
 .markdown li::marker { color: var(--coral); }
 .markdown pre { margin: 13px 0; overflow-x: auto; padding: 13px 15px; border: 1px solid var(--border); border-radius: 7px; background: #0d0d0b; color: #d5e6ca; font: 12px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.markdown code { font: inherit; }
+.markdown code { border-radius: 4px; padding: 2px 5px; background: #0d0d0b; color: #d5e6ca; font: 0.9em/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.markdown pre code { padding: 0; background: transparent; color: inherit; font: inherit; }
+.markdown strong { color: var(--text); font-weight: 700; }
+.markdown em { color: var(--text); }
+.markdown a { color: var(--sage-strong); text-decoration-color: #78866e; text-underline-offset: 3px; }
+.markdown a:hover { text-decoration-color: currentColor; }
+.markdown blockquote { margin: 13px 0; padding: 2px 0 2px 14px; border-left: 2px solid var(--border-strong); color: var(--text-muted); }
+.markdown blockquote p { margin-bottom: 0; }
 
 .prompt-suggestions { max-width: 720px; margin: -5px 0 31px 40px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .prompt-chip { min-width: 0; min-height: 60px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; background: transparent; color: #bdbbb3; text-align: left; font-size: 12px; transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease; }
@@ -174,6 +181,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--sage); outl
 .request-placeholder { height: 1px; }
 .request-state { max-width: 720px; margin: 2px 0 24px 40px; color: var(--text-muted); font-size: 13px; }
 .request-state.sending { display: flex; align-items: center; gap: 9px; }
+.streaming-response { margin-bottom: 24px; }
+.streaming-response .message { margin-bottom: 8px; }
+.streaming-status { margin-left: 40px; display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 11px; }
 .typing-dots { display: inline-flex; gap: 3px; }
 .typing-dots span { width: 5px; height: 5px; border-radius: 50%; background: var(--sage); animation: pulse 1s ease-in-out infinite; }
 .typing-dots span:nth-child(2) { animation-delay: 160ms; }

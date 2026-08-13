@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
-import { createReadStream, stat } from "node:fs";
+import { spawn } from "node:child_process";
+import { createReadStream, existsSync, stat } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -7,6 +7,16 @@ import { extname, isAbsolute, join, normalize, relative, resolve, sep } from "no
 import { pathToFileURL } from "node:url";
 
 const root = normalize(join(import.meta.dirname, ".."));
+const releaseAgentBin = join(
+  root,
+  "_build",
+  "native",
+  "release",
+  "build",
+  "cmd",
+  "main",
+  process.platform === "win32" ? "main.exe" : "main",
+);
 const port = Number(process.env.PORT ?? 8765);
 const agentTimeoutMs = Number(process.env.MOONSAGE_AGENT_TIMEOUT_MS ?? 120_000);
 const maxRequestBytes = 256 * 1024;
@@ -68,6 +78,31 @@ export function parseAgentEvents(output) {
   return { error: error || "Agent 没有返回最终内容。" };
 }
 
+export function eventForAgentOutput(line) {
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (event.type === "final_delta" && typeof event.text === "string") {
+    return { type: "delta", text: event.text };
+  }
+  if (event.type === "final_started") {
+    return { type: "status", message: "正在组织回答" };
+  }
+  if (event.type === "tool_started" && typeof event.name === "string") {
+    return { type: "status", message: `正在使用 ${event.name}` };
+  }
+  if (event.type === "retrying") {
+    return { type: "status", message: "连接波动，正在重试" };
+  }
+  if (event.type === "thinking_delta") {
+    return { type: "status", message: "正在分析问题" };
+  }
+  return null;
+}
+
 function validateAgentRequest(document) {
   if (!document || typeof document !== "object" || !Array.isArray(document.messages)) {
     return "请求需要 messages 数组。";
@@ -85,32 +120,75 @@ function validateAgentRequest(document) {
   return total <= 100_000 ? null : "会话内容过长，请新建会话后重试。";
 }
 
-async function runAgent(messages) {
+async function runAgent(messages, emitEvent) {
   const configuredBin = process.env.MOONSAGE_AGENT_BIN;
-  const executable = configuredBin || "moon";
+  const builtBin = !configuredBin && existsSync(releaseAgentBin) ? releaseAgentBin : null;
+  const executable = configuredBin || builtBin || "moon";
   const prompt = buildAgentPrompt(messages);
   const tempRoot = await mkdtemp(join(tmpdir(), "moonsage-agent-"));
   const inputFile = join(tempRoot, "prompt.txt");
   await writeFile(inputFile, prompt, "utf8");
-  const args = configuredBin
+  const args = configuredBin || builtBin
     ? ["ask", "--stream-json", "--input-file", inputFile]
     : ["run", "cmd/main", "--", "ask", "--stream-json", "--input-file", inputFile];
   try {
     return await new Promise((resolveResult) => {
-      execFile(executable, args, {
+      const child = spawn(executable, args, {
         cwd: root,
-        encoding: "utf8",
-        timeout: agentTimeoutMs,
-        maxBuffer: 8 * 1024 * 1024,
         windowsHide: true,
-      }, (error, stdout, stderr) => {
-        const result = parseAgentEvents(stdout);
-        if (result.answer) {
-          resolveResult(result);
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let answer = "";
+      let errorMessage = "";
+      let stderr = "";
+      let pending = "";
+      let outputBytes = 0;
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolveResult(result);
+      };
+      const acceptLine = (line) => {
+        if (!line.trim()) return;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
           return;
         }
-        const reason = result.error || stderr.trim() || error?.message || "Agent 请求失败。";
-        resolveResult({ error: reason });
+        if (event.type === "final_delta" && typeof event.text === "string") answer += event.text;
+        if (event.type === "error" && typeof event.message === "string") errorMessage = event.message;
+        const outgoing = eventForAgentOutput(line);
+        if (outgoing) emitEvent(outgoing);
+      };
+      const timeout = setTimeout(() => {
+        child.kill();
+        finish({ error: `Agent 请求超过 ${Math.ceil(agentTimeoutMs / 1000)} 秒。` });
+      }, agentTimeoutMs);
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => {
+        outputBytes += Buffer.byteLength(chunk);
+        if (outputBytes > 8 * 1024 * 1024) {
+          child.kill();
+          finish({ error: "Agent 输出超过 8 MB。" });
+          return;
+        }
+        pending += chunk;
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() ?? "";
+        for (const line of lines) acceptLine(line);
+      });
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk) => {
+        stderr = (stderr + chunk).slice(-16_384);
+      });
+      child.on("error", (error) => finish({ error: error.message }));
+      child.on("close", () => {
+        if (pending.trim()) acceptLine(pending);
+        if (answer.trim()) finish({ answer });
+        else finish({ error: errorMessage || stderr.trim() || "Agent 没有返回最终内容。" });
       });
     });
   } finally {
@@ -147,6 +225,20 @@ function sendJson(response, status, document) {
   response.end(JSON.stringify(document));
 }
 
+function beginEventStream(response) {
+  response.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.flushHeaders();
+}
+
+function sendEvent(response, event) {
+  if (!response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+}
+
 async function serveAgent(request, response, agentRunner) {
   if (request.method !== "POST") {
     sendJson(response, 405, { error: "仅支持 POST 请求。" });
@@ -163,9 +255,26 @@ async function serveAgent(request, response, agentRunner) {
       sendJson(response, 200, { error: invalid });
       return;
     }
-    sendJson(response, 200, await agentRunner(document.messages));
+    beginEventStream(response);
+    sendEvent(response, { type: "status", message: "正在启动 Agent" });
+    let streamedAnswer = false;
+    const result = await agentRunner(document.messages, (event) => {
+      if (event.type === "delta") streamedAnswer = true;
+      sendEvent(response, event);
+    });
+    if (result?.answer && !streamedAnswer) {
+      sendEvent(response, { type: "delta", text: result.answer });
+    }
+    if (result?.error) sendEvent(response, { type: "error", message: result.error });
+    else sendEvent(response, { type: "done" });
+    response.end();
   } catch (error) {
-    if (!response.writableEnded) sendJson(response, 200, { error: error.message });
+    if (response.headersSent) {
+      sendEvent(response, { type: "error", message: error.message });
+      response.end();
+    } else if (!response.writableEnded) {
+      sendJson(response, 200, { error: error.message });
+    }
   }
 }
 
