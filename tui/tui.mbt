@@ -105,7 +105,7 @@ fn context_bar(tokens : Int, width? : Int = 16) -> String {
 }
 
 ///|
-fn context_text(session : @agent.Session) -> String {
+fn context_text(session : @runtime.Session) -> String {
   let tokens = session.estimated_tokens()
   "Context  [" +
   context_bar(tokens) +
@@ -124,7 +124,7 @@ fn chat_status_text(
   provider : @llm.ProviderKind,
   session_id : String,
   workspace : String,
-  session : @agent.Session,
+  session : @runtime.Session,
 ) -> String {
   "Model      " +
   model +
@@ -140,7 +140,7 @@ fn chat_status_text(
 }
 
 ///|
-fn agent_tools_text(agent : @agent.Agent) -> String {
+fn agent_tools_text(agent : @runtime.Agent) -> String {
   let out = StringBuilder::new()
   out.write_string(
     "Available tools (" + agent.tools.length().to_string() + "):\n",
@@ -190,7 +190,7 @@ fn ChatComposer::set_runtime_status(
   model : String,
   provider : @llm.ProviderKind,
   session_id : String,
-  session : @agent.Session,
+  session : @runtime.Session,
 ) -> Unit {
   let tokens = session.estimated_tokens()
   self.runtime_status = model +
@@ -251,7 +251,7 @@ fn startup_info(
   provider : @llm.ProviderKind,
   session_id : String,
   workspace : String,
-  session : @agent.Session,
+  session : @runtime.Session,
 ) -> String {
   let max_width = (width - 1).max(1)
   let lines = [
@@ -529,7 +529,7 @@ pub async fn run_tui(
   cwd : String,
   session_id : String?,
   continue_latest : Bool,
-  provider? : @llm.ProviderKind = @llm.OpenAi,
+  provider? : @llm.ProviderKind = OpenAi,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
     _ => {
@@ -540,10 +540,10 @@ pub async fn run_tui(
     }
   }
   let ws = @editing.Workspace::new(cwd)
-  let project_instructions = @agent.load_project_instructions(cwd)
+  let project_instructions = @project.load_project_instructions(cwd)
   let agent = @chat.create_agent(modules, cwd, ws, project_instructions~)
   let store_root = @chat.session_root(cwd)
-  let fresh_session = fn() -> (String, @agent.Session) {
+  let fresh_session = fn() -> (String, @runtime.Session) {
     (
       @chat.generated_session_id(@env.now().reinterpret_as_int64()),
       agent.new_session(),
@@ -597,13 +597,14 @@ async fn run_tui_session(
   model : String,
   cwd : String,
   ws : @editing.Workspace,
-  agent : @agent.Agent,
+  agent : @runtime.Agent,
   store_root : String,
   initial_id : String,
-  initial_session : @agent.Session,
-  fresh_session : () -> (String, @agent.Session),
+  initial_session : @runtime.Session,
+  fresh_session : () -> (String, @runtime.Session),
   provider : @llm.ProviderKind,
 ) -> Unit {
+  let client = @llm_adapter.client(api_key, base_url, model, provider)
   let (width, _) = @termui.get_terminal_size()
   let composer = ChatComposer::new(width)
   let mut current_id = initial_id
@@ -687,13 +688,10 @@ async fn run_tui_session(
                 )
               } else {
                 try
-                  agent.compact(
+                  agent.compact_session(
+                    client,
                     session,
-                    api_key,
-                    base_url,
-                    model,
                     threshold_tokens=before - 1,
-                    provider~,
                   )
                 catch {
                   e =>
@@ -748,7 +746,7 @@ async fn run_tui_session(
                 @termui.print_raw(
                   "\u001b[90mCompacting conversation…\u001b[0m\n",
                 )
-                agent.compact(session, api_key, base_url, model, provider~) catch {
+                agent.compact_session(client, session) catch {
                   _ =>
                     @termui.print_raw("Context compaction failed; continuing\n")
                 }
@@ -766,39 +764,20 @@ async fn run_tui_session(
               // mode while the agent may invoke a write or publish tool.
               stop_chat_input()
               try
-                agent.turn(
+                agent.execute_turn(
+                  client,
                   session,
-                  api_key,
-                  base_url,
-                  model,
                   input,
-                  on_delta=fn(text) {
-                    if !thinking.is_empty() {
-                      @termui.print_raw(
-                        "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
-                      )
-                      thinking.reset()
-                    }
-                    if !answer_started {
-                      answer_started = true
-                      @termui.print_raw("\u001b[36;1mMoonSage\u001b[0m\n")
-                    }
-                    printer.feed(text)
-                    let out = printer.take_output()
-                    if out != "" {
-                      @termui.print_raw(out)
-                    }
-                  },
-                  on_thinking=fn(text) {
-                    if text != "" && thinking.to_string().length() < 20000 {
-                      thinking.write_string(text)
-                    }
-                  },
                   context_window_tokens=chat_context_window_tokens,
                   reserved_output_tokens=chat_reserved_output_tokens,
                   on_event=fn(event) {
                     match event {
-                      @agent.ToolStarted(event) => {
+                      ThinkingDelta(event) =>
+                        if event.text != "" &&
+                          thinking.to_string().length() < 20000 {
+                          thinking.write_string(event.text)
+                        }
+                      ToolStarted(event) => {
                         if !thinking.is_empty() {
                           @termui.print_raw(
                             "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
@@ -811,11 +790,26 @@ async fn run_tui_session(
                           "…\u001b[0m\n",
                         )
                       }
-                      @agent.ToolFinished(_) => ()
+                      FinalDelta(text) => {
+                        if !thinking.is_empty() {
+                          @termui.print_raw(
+                            "\u001b[90m" + thinking.to_string() + "\u001b[0m\n",
+                          )
+                          thinking.reset()
+                        }
+                        if !answer_started {
+                          answer_started = true
+                          @termui.print_raw("\u001b[36;1mMoonSage\u001b[0m\n")
+                        }
+                        printer.feed(text)
+                        let out = printer.take_output()
+                        if out != "" {
+                          @termui.print_raw(out)
+                        }
+                      }
                       _ => ()
                     }
                   },
-                  provider~,
                 )
               catch {
                 e =>

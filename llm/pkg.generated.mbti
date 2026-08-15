@@ -63,4 +63,3 @@ type ToolCallDelta derive(Eq, @debug.Debug)
 // Type aliases
 
 // Traits
-

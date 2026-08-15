@@ -38,8 +38,8 @@ test "ask accepts stream-json and serializes structured tool events" {
   }
   assert_true(flag_of(ask, "stream-json"))
   assert_eq(join_values(ask, "question"), "find http")
-  let line = engine_event_json(
-    @agent.ToolFinished({
+  let line = @protocol.event_to_json(
+    ToolFinished({
       round: 2,
       call_id: "call_1",
       name: "run_moon",
@@ -51,7 +51,7 @@ test "ask accepts stream-json and serializes structured tool events" {
     line, "{\"type\":\"tool_finished\",\"round\":2,\"call_id\":\"call_1\",\"name\":\"run_moon\",\"status\":\"ok\",\"result\":\"{\\\"exit_code\\\":0}\"}",
   )
   assert_eq(
-    engine_event_json(@agent.Error("missing API key")).stringify(),
+    @protocol.event_to_json(Error("missing API key")).stringify(),
     "{\"type\":\"error\",\"message\":\"missing API key\"}",
   )
 }

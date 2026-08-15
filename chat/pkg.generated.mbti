@@ -2,13 +2,13 @@
 package "moonsage/chat"
 
 import {
-  "moonsage/agent",
+  "moonsage/agent/runtime",
   "moonsage/editing",
   "moonsage/llm",
 }
 
 // Values
-pub fn create_agent(Array[@moonsage.ModuleSummary], String, @editing.Workspace, project_instructions? : String) -> @agent.Agent
+pub fn create_agent(Array[@moonsage.ModuleSummary], String, @editing.Workspace, project_instructions? : String) -> @runtime.Agent
 
 pub fn friendly_error(String) -> String
 
@@ -16,13 +16,13 @@ pub fn generated_session_id(Int64) -> String
 
 pub async fn latest_session_id(String) -> String?
 
-pub async fn load_session(String, String) -> @agent.Session?
+pub async fn load_session(String, String) -> @runtime.Session?
 
 pub async fn load_session_with_root(String, String) -> SavedSession?
 
 pub async fn run_chat(String, String, String, String, String?, Bool, provider? : @llm.ProviderKind) -> Unit
 
-pub async fn save_session(String, String, @agent.Session, String) -> Unit
+pub async fn save_session(String, String, @runtime.Session, String) -> Unit
 
 pub fn session_root(String) -> String
 
@@ -32,11 +32,10 @@ pub fn tool_display_name(String) -> String
 
 // Types and methods
 pub struct SavedSession {
-  session : @agent.Session
+  session : @runtime.Session
   ws_root : String
 }
 
 // Type aliases
 
 // Traits
-

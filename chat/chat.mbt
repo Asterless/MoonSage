@@ -56,10 +56,10 @@ fn chat_agent(
   cwd : String,
   ws : @editing.Workspace,
   project_instructions? : String = "",
-) -> @agent.Agent {
+) -> @runtime.Agent {
   {
     system_prompt: chat_system_prompt(cwd, project_instructions~),
-    tools: @agent.ask_tools(modules) +
+    tools: @research.research_tools(modules) +
     @local.local_tools(ws) +
     @editing.write_tools(ws, @editing.Prompt) +
     @editing.publish_tools(ws),
@@ -76,7 +76,7 @@ pub fn create_agent(
   cwd : String,
   ws : @editing.Workspace,
   project_instructions? : String = "",
-) -> @agent.Agent {
+) -> @runtime.Agent {
   chat_agent(modules, cwd, ws, project_instructions~)
 }
 
@@ -264,7 +264,7 @@ pub async fn run_chat(
   cwd : String,
   session_id : String?,
   continue_latest : Bool,
-  provider? : @llm.ProviderKind = @llm.OpenAi,
+  provider? : @llm.ProviderKind = OpenAi,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
     _ => {
@@ -273,10 +273,11 @@ pub async fn run_chat(
     }
   }
   let ws = @editing.Workspace::new(cwd)
-  let project_instructions = @agent.load_project_instructions(cwd)
+  let project_instructions = @project.load_project_instructions(cwd)
   let agent = chat_agent(modules, cwd, ws, project_instructions~)
+  let client = @llm_adapter.client(api_key, base_url, model, provider)
   let store_root = session_root(cwd)
-  let fresh_session = fn() -> (String, @agent.Session) {
+  let fresh_session = fn() -> (String, @runtime.Session) {
     (
       generated_session_id(@env.now().reinterpret_as_int64()),
       agent.new_session(),
@@ -350,7 +351,7 @@ pub async fn run_chat(
             // 上下文过长时先压缩再回答。
             if session.estimated_tokens() > compact_threshold_tokens {
               @stdio.stdout.write("⋯ 正在压缩对话历史…\n")
-              agent.compact(session, api_key, base_url, model, provider~) catch {
+              agent.compact_session(client, session) catch {
                 _ =>
                   @stdio.stdout.write(
                     "! 上下文压缩失败，继续使用原历史\n",
@@ -362,40 +363,19 @@ pub async fn run_chat(
             let mut answer_started = false
             // 思考/推理过程缓冲:在工具调用或最终回答前以暗色块输出。
             let thinking = StringBuilder::new()
-            let _ = agent.turn(
+            let _ = agent.execute_turn(
+              client,
               session,
-              api_key,
-              base_url,
-              model,
               input,
-              on_delta=async fn(text) {
-                if thinking.to_string().length() > 0 {
-                  @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
-                  @stdio.stdout.write(thinking.to_string())
-                  @stdio.stdout.write("\u001B[0m\n")
-                  thinking.reset()
-                }
-                if !answer_started {
-                  answer_started = true
-                  @stdio.stdout.write("\n")
-                }
-                printer.feed(text)
-                printer.flush_partial()
-                let out = printer.take_output()
-                if out != "" {
-                  @stdio.stdout.write(out)
-                }
-              },
-              on_thinking=fn(text) {
-                if text != "" && thinking.to_string().length() < 20000 {
-                  thinking.write_string(text)
-                }
-              },
               context_window_tokens=chat_context_window_tokens,
               reserved_output_tokens=chat_reserved_output_tokens,
               on_event=async fn(event) {
                 match event {
-                  @agent.ToolStarted(event) => {
+                  ThinkingDelta(event) =>
+                    if event.text != "" && thinking.to_string().length() < 20000 {
+                      thinking.write_string(event.text)
+                    }
+                  ToolStarted(event) => {
                     let name = event.name
                     if thinking.to_string().length() > 0 {
                       @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
@@ -405,11 +385,27 @@ pub async fn run_chat(
                     }
                     @stdio.stdout.write("\n▸ \{tool_label(name)} …\n")
                   }
-                  @agent.ToolFinished(_) => ()
+                  FinalDelta(text) => {
+                    if thinking.to_string().length() > 0 {
+                      @stdio.stdout.write("\n◍ 思考\n\u001B[2m")
+                      @stdio.stdout.write(thinking.to_string())
+                      @stdio.stdout.write("\u001B[0m\n")
+                      thinking.reset()
+                    }
+                    if !answer_started {
+                      answer_started = true
+                      @stdio.stdout.write("\n")
+                    }
+                    printer.feed(text)
+                    printer.flush_partial()
+                    let out = printer.take_output()
+                    if out != "" {
+                      @stdio.stdout.write(out)
+                    }
+                  }
                   _ => ()
                 }
               },
-              provider~,
             ) catch {
               e => {
                 @stdio.stdout.write("✗ \{prettify_error(e.to_string())}\n")

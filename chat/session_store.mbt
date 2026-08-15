@@ -20,7 +20,7 @@ fn session_path(root : String, id : String) -> String {
 pub async fn save_session(
   root : String,
   id : String,
-  session : @agent.Session,
+  session : @runtime.Session,
   ws_root : String,
 ) -> Unit {
   @fs.mkdir(root, recursive=true) catch {
@@ -42,7 +42,7 @@ pub async fn save_session(
 
 ///|
 // 读取指定会话；不存在或损坏时返回 None。
-pub async fn load_session(root : String, id : String) -> @agent.Session? {
+pub async fn load_session(root : String, id : String) -> @runtime.Session? {
   match load_session_with_root(root, id) {
     Some(saved) => Some(saved.session)
     None => None
@@ -52,7 +52,7 @@ pub async fn load_session(root : String, id : String) -> @agent.Session? {
 ///|
 // 会话及其当时的工作区根目录。
 pub struct SavedSession {
-  session : @agent.Session
+  session : @runtime.Session
   ws_root : String
 }
 
@@ -72,7 +72,7 @@ pub async fn load_session_with_root(
     Some(String(path)) if path != "" => path
     _ => ""
   }
-  Some({ session: @agent.Session::from_json(msgs), ws_root })
+  Some({ session: @runtime.Session::from_json(msgs), ws_root })
 }
 
 ///|

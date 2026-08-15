@@ -1,0 +1,20 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/agent/llm_adapter"
+
+import {
+  "moonsage/agent/model",
+  "moonsage/llm",
+}
+
+// Values
+pub fn client(String, String, String, @llm.ProviderKind) -> @model.ChatClient
+
+pub fn normalize_finish_reason(String?) -> @model.FinishReason
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

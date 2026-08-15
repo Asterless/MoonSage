@@ -29,7 +29,7 @@ test "slash input opens, filters, and selects the command menu" {
 
 ///|
 test "runtime status and startup header show active configuration" {
-  let session = @agent.Session::from_json(Json::array([]))
+  let session = @runtime.Session::from_json(Json::array([]))
   let composer = ChatComposer::new(100)
   composer.set_runtime_status("deepseek-chat", @llm.OpenAi, "chat-123", session)
   let frame = composer.frame_lines().join("\n")

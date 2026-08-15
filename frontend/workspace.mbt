@@ -18,6 +18,7 @@ struct WorkspaceModel {
   selected_path : String
   content : String
   saved_content : String
+  line_endings : String
   branch : String
   changes : Array[WorkspaceChange]
   diff_scope : String
@@ -39,6 +40,7 @@ fn initial_workspace() -> WorkspaceModel {
     selected_path: "",
     content: "",
     saved_content: "",
+    line_endings: "lf",
     branch: "",
     changes: [],
     diff_scope: "working",
@@ -81,10 +83,16 @@ fn decode_workspace_tree(source : String) -> (String, Array[String])? {
 }
 
 ///|
-fn decode_workspace_file(source : String) -> String? {
+fn decode_workspace_file(source : String) -> (String, String)? {
   guard json_fields(source) is Some(fields) else { return None }
   match fields.get("content") {
-    Some(String(content)) => Some(content)
+    Some(String(content)) => {
+      let line_endings = match fields.get("line_endings") {
+        Some(String(style)) => style
+        _ => "lf"
+      }
+      Some((content, line_endings))
+    }
     _ => None
   }
 }
@@ -558,13 +566,18 @@ fn workspace_update(
       )
     WorkspaceFileReceived(path, source) =>
       match decode_workspace_file(source) {
-        Some(content) if path == workspace.selected_path =>
+        Some((content, line_endings)) if path == workspace.selected_path =>
           Some(
             (
               {
                 ..workspace,
                 content,
                 saved_content: content,
+                line_endings: if line_endings == "crlf" {
+                  "crlf"
+                } else {
+                  "lf"
+                },
                 loading: false,
                 error: "",
               },
@@ -597,6 +610,7 @@ fn workspace_update(
               emit,
               workspace.selected_path,
               workspace.content,
+              workspace.line_endings,
             ),
           ),
         )

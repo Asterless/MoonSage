@@ -1,10 +1,11 @@
 import {
   "moonsage/llm",
+  "moonsage/agent/llm_adapter",
+  "moonsage/agent/runtime",
   "moonsage/util",
   "moonsage/editing",
   "moonsage/local",
   "moonsage/tools",
-  "moonsage/agent",
   "moonsage/md_ansi",
   "moonsage/mooncakes",
   "moonbitlang/async/fs",

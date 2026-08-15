@@ -79,10 +79,12 @@ fn save_workspace_file(
   emit : Emit[Msg],
   path : String,
   content : String,
+  line_endings : String,
 ) -> Cmd {
   let body = Json::object({
     "path": Json::string(path),
     "content": Json::string(content),
+    "line_endings": Json::string(line_endings),
   }).stringify()
   workspace_request(emit, "PUT", "/api/workspace/file", body, _ => {
     WorkspaceFileSaved(path, content)

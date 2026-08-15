@@ -1,17 +1,49 @@
 ///|
-test "async replies stay with their originating session" {
-  let model : Model = {
+fn test_request(id : Int, session_id : String, prompt : String) -> Request {
+  {
+    id,
+    session_id,
+    prompt,
+    status: "运行中",
+    answer_buf: [],
+    answer_shown: "",
+    thinking_buf: [],
+    thinking_shown: "",
+    flush_pending: false,
+    tools: [],
+    warning: "",
+    history_truncated: false,
+  }
+}
+
+///|
+fn test_model(
+  sessions : Array[Session],
+  active : Int,
+  request : RequestState,
+) -> Model {
+  {
     draft: "",
-    sessions: [
-      { id: "origin", title: "Origin", detail: "", messages: [] },
-      { id: "active", title: "Active", detail: "", messages: [] },
-    ],
-    active_session: 1,
-    request: Idle,
+    sessions,
+    active_session: active,
+    request,
     command_open: false,
     sidebar_open: true,
     workspace: initial_workspace(),
+    next_id: 100,
   }
+}
+
+///|
+test "async replies stay with their originating session" {
+  let model : Model = test_model(
+    [
+      { id: "origin", title: "Origin", detail: "", messages: [] },
+      { id: "active", title: "Active", detail: "", messages: [] },
+    ],
+    1,
+    Idle,
+  )
   let updated = append_session_message(model, "origin", {
     role: "assistant",
     text: "origin reply",
@@ -28,38 +60,79 @@ test "async replies stay with their originating session" {
 
 ///|
 test "stream events only update their originating request" {
-  let model : Model = {
-    draft: "",
-    sessions: [
+  let request = test_request(7, "origin", "question")
+  let model : Model = test_model(
+    [
       { id: "origin", title: "Origin", detail: "", messages: [] },
       { id: "active", title: "Active", detail: "", messages: [] },
     ],
-    active_session: 1,
-    request: Sending("origin", "question", "正在分析问题", "first"),
-    command_open: false,
-    sidebar_open: true,
-    workspace: initial_workspace(),
-  }
+    1,
+    Sending(request),
+  )
   let emit : Emit[Msg] = Emit(_ => @rabbita.none)
-  let (streamed, _) = update(model, AgentDelta("origin", " second"), emit)
-  assert_true(
-    streamed.request is Sending("origin", "question", _, "first second"),
-  )
-  let (unchanged, _) = update(streamed, AgentDelta("active", "wrong"), emit)
+  let (streamed, _) = update(model, AgentDelta(7, " second"), emit)
+  guard streamed.request is Sending(after) else { fail("expected sending") }
+  assert_eq(after.answer_buf, [" second"])
+  assert_eq(after.answer_shown, "")
+  let (unchanged, _) = update(streamed, AgentDelta(99, "wrong"), emit)
   assert_true(unchanged == streamed)
-  let (failed, _) = update(
-    streamed,
-    AgentFailed("active", "question", "stale failure"),
-    emit,
-  )
+  let (failed, _) = update(streamed, AgentFailed(99, "stale failure"), emit)
   assert_true(failed == streamed)
 }
 
 ///|
-test "Agent responses decode success and service errors" {
+test "AgentFlush commits buffered deltas once" {
+  let request = {
+    ..test_request(3, "s", "p"),
+    flush_pending: true,
+    answer_buf: ["a", "b"],
+  }
+  let model : Model = test_model(
+    [{ id: "s", title: "S", detail: "", messages: [] }],
+    0,
+    Sending(request),
+  )
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (flushed, _) = update(model, AgentFlush(3), emit)
+  guard flushed.request is Sending(after) else { fail("expected sending") }
+  assert_eq(after.answer_shown, "ab")
+  assert_eq(after.answer_buf, [])
+  assert_false(after.flush_pending)
+}
+
+///|
+test "tool calls start running and finish with their result" {
+  let model : Model = test_model(
+    [{ id: "s", title: "S", detail: "", messages: [] }],
+    0,
+    Sending(test_request(1, "s", "p")),
+  )
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (started, _) = update(
+    model,
+    AgentToolStarted(1, "c1", "search_modules", "{\"query\":\"http\"}", 2),
+    emit,
+  )
+  guard started.request is Sending(with_tool) else { fail("expected sending") }
+  assert_eq(with_tool.tools.length(), 1)
+  assert_eq(with_tool.tools[0].status, "running")
+  let (done, _) = update(started, AgentToolFinished(1, "c1", "ok", "[]"), emit)
+  guard done.request is Sending(finished_tools) else {
+    fail("expected sending")
+  }
+  assert_eq(finished_tools.tools[0].status, "ok")
+  assert_eq(finished_tools.tools[0].result, "[]")
+}
+
+///|
+test "Agent responses prefer canonical protocol events" {
   assert_eq(
-    decode_agent_event("{\"type\":\"delta\",\"text\":\"真实回答\"}"),
+    decode_agent_event("{\"type\":\"final_delta\",\"text\":\"真实回答\"}"),
     Delta("真实回答"),
+  )
+  assert_eq(
+    decode_agent_event("{\"type\":\"final_started\"}"),
+    Status("正在组织回答"),
   )
   assert_eq(
     decode_agent_event("{\"type\":\"status\",\"message\":\"正在搜索\"}"),
@@ -69,7 +142,140 @@ test "Agent responses decode success and service errors" {
     decode_agent_event("{\"type\":\"error\",\"message\":\"missing key\"}"),
     StreamError("missing key"),
   )
+  assert_eq(
+    decode_agent_event(
+      "{\"type\":\"tool_started\",\"call_id\":\"c1\",\"name\":\"search_modules\",\"arguments\":\"{}\",\"round\":1}",
+    ),
+    ToolStarted("c1", "search_modules", "{}", 1),
+  )
+  assert_eq(
+    decode_agent_event(
+      "{\"type\":\"tool_finished\",\"call_id\":\"c1\",\"name\":\"search_modules\",\"status\":\"ok\",\"result\":\"[]\",\"round\":1}",
+    ),
+    ToolFinished("c1", "ok", "[]", 1),
+  )
+  assert_eq(
+    decode_agent_event(
+      "{\"type\":\"retrying\",\"attempt\":2,\"reason\":\"429\"}",
+    ),
+    Retry(2, "429"),
+  )
+  assert_eq(
+    decode_agent_event("{\"type\":\"warning\",\"message\":\"budget\"}"),
+    Warning("budget"),
+  )
+  assert_eq(
+    decode_agent_event("{\"type\":\"thinking_delta\",\"text\":\"考虑中\"}"),
+    Thinking("考虑中"),
+  )
+  assert_eq(
+    decode_agent_event("{\"type\":\"meta\",\"history_truncated\":true}"),
+    Meta(true),
+  )
   assert_true(decode_agent_event("not json") is Ignored)
+}
+
+///|
+test "Agent responses accept legacy browser aliases" {
+  assert_eq(
+    decode_agent_event("{\"type\":\"delta\",\"text\":\"旧回答\"}"),
+    Delta("旧回答"),
+  )
+  assert_eq(
+    decode_agent_event("{\"type\":\"thinking\",\"text\":\"旧推理\"}"),
+    Thinking("旧推理"),
+  )
+  assert_eq(
+    decode_agent_event(
+      "{\"type\":\"retry\",\"attempt\":3,\"reason\":\"旧重试\"}",
+    ),
+    Retry(3, "旧重试"),
+  )
+  assert_eq(
+    decode_agent_event(
+      "{\"type\":\"tool_started\",\"id\":\"old-id\",\"name\":\"search_modules\",\"arguments\":\"{}\",\"round\":1}",
+    ),
+    ToolStarted("old-id", "search_modules", "{}", 1),
+  )
+}
+
+///|
+test "storage encode and decode roundtrip" {
+  let sessions = [
+    {
+      id: "welcome",
+      title: "欢迎",
+      detail: "",
+      messages: [{ role: "user", text: "你好" }],
+    },
+  ]
+  let encoded = encode_storage(sessions, 0, 5)
+  guard decode_storage(encoded) is Some((decoded, active, next_id)) else {
+    fail("expected decode")
+  }
+  assert_eq(decoded, sessions)
+  assert_eq(active, 0)
+  assert_eq(next_id, 5)
+  assert_true(decode_storage("not json") is None)
+}
+
+///|
+test "session title comes from the first user prompt" {
+  let model : Model = test_model(
+    [{ id: "session-1", title: "新会话", detail: "", messages: [] }],
+    0,
+    Idle,
+  )
+  let titled = with_title_for_first_prompt(
+    model, "帮我找一个 JSON 解析库并比较它们的性能",
+  )
+  assert_eq(
+    titled.sessions[0].title,
+    "帮我找一个 JSON 解析库并比较它们的性能",
+  )
+  let kept = with_title_for_first_prompt(titled, "第二个问题")
+  assert_eq(
+    kept.sessions[0].title,
+    "帮我找一个 JSON 解析库并比较它们的性能",
+  )
+  let long_prompt = "这是一个非常非常长的提示词用来验证超过二十四个字符之后标题会被截断并加上省略号"
+  let truncated = with_title_for_first_prompt(model, long_prompt)
+  assert_eq(
+    truncated.sessions[0].title,
+    "这是一个非常非常长的提示词用来验证超过二十四个字…",
+  )
+}
+
+///|
+test "cancel commits the partial answer and returns to Idle" {
+  let request = { ..test_request(4, "s", "p"), answer_shown: "第一段" }
+  let model : Model = test_model(
+    [{ id: "s", title: "S", detail: "", messages: [] }],
+    0,
+    Sending(request),
+  )
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (stopped, _) = update(model, CancelRequest, emit)
+  assert_true(stopped.request is Idle)
+  assert_eq(stopped.sessions[0].messages.length(), 1)
+  assert_eq(stopped.sessions[0].messages[0].text, "第一段")
+}
+
+///|
+test "retry starts a fresh request with a new id" {
+  let request = test_request(2, "s", "p")
+  let model : Model = test_model(
+    [{ id: "s", title: "S", detail: "", messages: [] }],
+    0,
+    Failed(request, "超时"),
+  )
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (retried, _) = update(model, Retry, emit)
+  guard retried.request is Sending(fresh) else { fail("expected sending") }
+  assert_eq(fresh.id, 100)
+  assert_eq(fresh.session_id, "s")
+  assert_eq(fresh.prompt, "p")
+  assert_eq(retried.next_id, 101)
 }
 
 ///|
@@ -156,6 +362,10 @@ test "workspace decodes files and git status" {
       "{\"root\":\"demo\",\"files\":[\"main.mbt\",\"src/lib.mbt\"]}",
     ),
     Some(("demo", ["main.mbt", "src/lib.mbt"])),
+  )
+  assert_eq(
+    decode_workspace_file("{\"content\":\"a\",\"line_endings\":\"crlf\"}"),
+    Some(("a", "crlf")),
   )
   let workspace = initial_workspace()
   guard apply_workspace_status(

@@ -2,11 +2,11 @@
 package "moonsage/audit"
 
 import {
-  "moonsage/agent",
+  "moonsage/agent/runtime",
 }
 
 // Values
-pub fn build_audit_evidence(@agent.AgentAnswer?, @agent.AgentAnswer, Bool) -> AuditEvidence
+pub fn build_audit_evidence(@runtime.AgentAnswer?, @runtime.AgentAnswer, Bool) -> AuditEvidence
 
 pub async fn run_audit(ArrayView[String]) -> Unit
 
@@ -33,4 +33,3 @@ pub(all) struct AuditToolRecord {
 // Type aliases
 
 // Traits
-

@@ -31,7 +31,11 @@ const types = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".wasm": "application/wasm",
+  ".json": "application/json; charset=utf-8",
 };
+const maxToolResultBytes = 4096;
 
 export function resolveRequestPath(pathname) {
   let decoded;
@@ -43,6 +47,15 @@ export function resolveRequestPath(pathname) {
   const path = resolve(root, `.${decoded}`);
   const rel = relative(root, path);
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  // Static serving is a dev-only surface: allow only the frontend sources and
+  // the built JS bundle. Everything else (.env, .git, .moonsage, mooncakes/,
+  // ...) must never be reachable over HTTP.
+  const allowed =
+    rel === "frontend" ||
+    rel.startsWith(`frontend${sep}`) ||
+    rel === "_build" ||
+    rel.startsWith(`_build${sep}js${sep}`);
+  if (!allowed) return null;
   return path;
 }
 
@@ -92,22 +105,57 @@ export function eventForAgentOutput(line) {
   } catch {
     return null;
   }
-  if (event.type === "final_delta" && typeof event.text === "string") {
-    return { type: "delta", text: event.text };
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+  const validRound = Number.isInteger(event.round) && event.round >= 0;
+  switch (event.type) {
+    case "thinking_delta":
+      return validRound && typeof event.text === "string" ? event : null;
+    case "tool_started":
+      return validRound &&
+        typeof event.call_id === "string" &&
+        typeof event.name === "string" &&
+        typeof event.arguments === "string"
+        ? event
+        : null;
+    case "tool_finished": {
+      if (!validRound ||
+        typeof event.call_id !== "string" ||
+        typeof event.name !== "string" ||
+        typeof event.status !== "string" ||
+        typeof event.result !== "string") return null;
+      let result = "";
+      let resultBytes = 0;
+      for (const character of event.result) {
+        const characterBytes = Buffer.byteLength(character);
+        if (resultBytes + characterBytes > maxToolResultBytes) break;
+        result += character;
+        resultBytes += characterBytes;
+      }
+      return result === event.result ? event : { ...event, result };
+    }
+    case "retrying":
+      return Number.isInteger(event.attempt) && event.attempt >= 0 && typeof event.reason === "string"
+        ? event
+        : null;
+    case "final_started":
+      return event;
+    case "final_delta":
+      return typeof event.text === "string" ? event : null;
+    case "warning":
+    case "error":
+      return typeof event.message === "string" ? event : null;
+    default:
+      return null;
   }
-  if (event.type === "final_started") {
-    return { type: "status", message: "正在组织回答" };
-  }
-  if (event.type === "tool_started" && typeof event.name === "string") {
-    return { type: "status", message: `正在使用 ${event.name}` };
-  }
-  if (event.type === "retrying") {
-    return { type: "status", message: "连接波动，正在重试" };
-  }
-  if (event.type === "thinking_delta") {
-    return { type: "status", message: "正在分析问题" };
-  }
-  return null;
+}
+
+export function metaForConversation(messages) {
+  const firstUser = messages.findIndex((message) => message.role === "user");
+  const retained = firstUser >= 0 ? messages.slice(firstUser) : messages;
+  return {
+    type: "meta",
+    history_truncated: retained.length > 40,
+  };
 }
 
 function validateAgentRequest(document) {
@@ -127,7 +175,7 @@ function validateAgentRequest(document) {
   return total <= 100_000 ? null : "会话内容过长，请新建会话后重试。";
 }
 
-async function runAgent(messages, emitEvent) {
+async function runAgent(messages, emitEvent, signal) {
   const configuredBin = process.env.MOONSAGE_AGENT_BIN;
   const builtBin = !configuredBin && existsSync(releaseAgentBin) ? releaseAgentBin : null;
   const executable = configuredBin || builtBin || "moon";
@@ -155,8 +203,14 @@ async function runAgent(messages, emitEvent) {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
         resolveResult(result);
       };
+      const onAbort = () => {
+        killProcessTree(child);
+        finish({ error: "请求已停止。" });
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
       const acceptLine = (line) => {
         if (!line.trim()) return;
         let event;
@@ -171,14 +225,14 @@ async function runAgent(messages, emitEvent) {
         if (outgoing) emitEvent(outgoing);
       };
       const timeout = setTimeout(() => {
-        child.kill();
+        killProcessTree(child);
         finish({ error: `Agent 请求超过 ${Math.ceil(agentTimeoutMs / 1000)} 秒。` });
       }, agentTimeoutMs);
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => {
         outputBytes += Buffer.byteLength(chunk);
         if (outputBytes > 8 * 1024 * 1024) {
-          child.kill();
+          killProcessTree(child);
           finish({ error: "Agent 输出超过 8 MB。" });
           return;
         }
@@ -207,16 +261,24 @@ function readJsonBody(request, maxBytes = maxRequestBytes) {
   return new Promise((resolveBody, rejectBody) => {
     const chunks = [];
     let size = 0;
+    let overLimit = false;
     request.on("data", (chunk) => {
       size += chunk.length;
+      if (overLimit) return;
       if (size > maxBytes) {
-        rejectBody(new Error(`请求体不能超过 ${Math.ceil(maxBytes / 1024)} KB。`));
-        request.destroy();
+        overLimit = true;
+        chunks.length = 0;
         return;
       }
       chunks.push(chunk);
     });
     request.on("end", () => {
+      if (overLimit) {
+        const error = new Error(`请求体不能超过 ${Math.ceil(maxBytes / 1024)} KB。`);
+        error.status = 413;
+        rejectBody(error);
+        return;
+      }
       try {
         resolveBody(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       } catch {
@@ -227,9 +289,68 @@ function readJsonBody(request, maxBytes = maxRequestBytes) {
   });
 }
 
+const secureHeaders = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+};
+
 function sendJson(response, status, document) {
-  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...secureHeaders });
   response.end(JSON.stringify(document));
+}
+
+// Accepts only loopback hosts (DNS rebinding protection) and, when a browser
+// sends an Origin header, only same-origin pages.
+export function isTrustedRequest(request, activePort) {
+  const host = String(request.headers.host ?? "");
+  const allowedHosts = new Set([
+    `127.0.0.1:${activePort}`,
+    `localhost:${activePort}`,
+    `[::1]:${activePort}`,
+  ]);
+  if (!allowedHosts.has(host)) return false;
+  const origin = request.headers.origin;
+  if (origin !== undefined) {
+    const allowedOrigins = new Set([
+      `http://127.0.0.1:${activePort}`,
+      `http://localhost:${activePort}`,
+      `http://[::1]:${activePort}`,
+    ]);
+    if (!allowedOrigins.has(origin)) return false;
+  }
+  return true;
+}
+
+export function requireJsonContentType(request) {
+  return String(request.headers["content-type"] ?? "")
+    .toLowerCase()
+    .startsWith("application/json");
+}
+
+// Terminates the child and, on Windows, its whole process tree (e.g. the
+// `moon run` wrapper and the real agent executable) so timeouts and client
+// disconnects never leave token-burning zombie agents behind.
+export function killProcessTree(child) {
+  if (child.pid === undefined) {
+    try { child.kill(); } catch { /* already gone */ }
+    return;
+  }
+  if (process.platform === "win32") {
+    execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {
+      try { child.kill(); } catch { /* already gone */ }
+    });
+  } else {
+    try { process.kill(-child.pid, "SIGTERM"); } catch { /* no process group */ }
+    try { child.kill("SIGTERM"); } catch { /* already gone */ }
+  }
+}
+
+// Textareas normalize line endings to LF; restore the file's original style
+// on save so Windows CRLF files do not turn into whole-file diffs.
+export function normalizeLineEndings(content, style) {
+  const normalized = content.replace(/\r\n/g, "\n");
+  return style === "crlf" ? normalized.replace(/\n/g, "\r\n") : normalized;
 }
 
 export function resolveWorkspacePath(workspaceRoot, requestedPath) {
@@ -351,6 +472,13 @@ function queryPath(requestUrl, name) {
 
 async function serveWorkspace(request, response, pathname, workspaceRoot) {
   try {
+    if (
+      (request.method === "POST" || request.method === "PUT") &&
+      !requireJsonContentType(request)
+    ) {
+      sendJson(response, 415, { error: "写操作需要 application/json 请求。" });
+      return;
+    }
     if (pathname === "/api/workspace/tree" && request.method === "GET") {
       const tree = await collectWorkspaceFiles(workspaceRoot);
       sendJson(response, 200, { root: basename(workspaceRoot), ...tree });
@@ -360,8 +488,15 @@ async function serveWorkspace(request, response, pathname, workspaceRoot) {
       const requestedPath = queryPath(request.url, "path");
       const file = await verifiedWorkspaceFile(workspaceRoot, requestedPath);
       const data = await readFile(file.path);
-      if (data.includes(0)) throw new Error("Binary files cannot be edited here.");
-      sendJson(response, 200, { path: requestedPath, content: data.toString("utf8") });
+      if (data.includes(0)) throw new Error("二进制文件不能在这里编辑。");
+      let content;
+      try {
+        content = new TextDecoder("utf-8", { fatal: true }).decode(data);
+      } catch {
+        throw new Error("非 UTF-8 编码的文件不能在这里编辑。");
+      }
+      const line_endings = content.includes("\r\n") ? "crlf" : "lf";
+      sendJson(response, 200, { path: requestedPath, content, line_endings });
       return;
     }
     if (pathname === "/api/workspace/file" && request.method === "PUT") {
@@ -370,10 +505,11 @@ async function serveWorkspace(request, response, pathname, workspaceRoot) {
         throw new Error("Save requests require path and content.");
       }
       if (Buffer.byteLength(document.content) > maxWorkspaceFileBytes) {
-        throw new Error("Files larger than 1 MB cannot be saved here.");
+        throw new Error("大于 1 MB 的文件不能在这里保存。");
       }
+      const style = document.line_endings === "crlf" ? "crlf" : "lf";
       const file = await verifiedWorkspaceFile(workspaceRoot, document.path);
-      await writeFile(file.path, document.content, "utf8");
+      await writeFile(file.path, normalizeLineEndings(document.content, style), "utf8");
       sendJson(response, 200, { path: document.path, saved: true });
       return;
     }
@@ -424,7 +560,8 @@ async function serveWorkspace(request, response, pathname, workspaceRoot) {
     }
     sendJson(response, 405, { error: "Unsupported workspace operation." });
   } catch (error) {
-    sendJson(response, error?.code === "ENOENT" ? 404 : 400, { error: error.message });
+    const status = error?.status === 413 ? 413 : error?.code === "ENOENT" ? 404 : 400;
+    sendJson(response, status, { error: error.message });
   }
 }
 
@@ -433,13 +570,13 @@ function beginEventStream(response) {
     "Content-Type": "application/x-ndjson; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
-    "X-Content-Type-Options": "nosniff",
+    ...secureHeaders,
   });
   response.flushHeaders();
 }
 
 function sendEvent(response, event) {
-  if (!response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+  if (!response.writableEnded && !response.destroyed) response.write(`${JSON.stringify(event)}\n`);
 }
 
 async function serveAgent(request, response, agentRunner) {
@@ -459,18 +596,33 @@ async function serveAgent(request, response, agentRunner) {
       return;
     }
     beginEventStream(response);
+    sendEvent(response, metaForConversation(document.messages));
     sendEvent(response, { type: "status", message: "正在启动 Agent" });
-    let streamedAnswer = false;
-    const result = await agentRunner(document.messages, (event) => {
-      if (event.type === "delta") streamedAnswer = true;
-      sendEvent(response, event);
+    const controller = new AbortController();
+    response.on("close", () => {
+      if (!response.writableEnded) controller.abort();
     });
-    if (result?.answer && !streamedAnswer) {
-      sendEvent(response, { type: "delta", text: result.answer });
+    let finalStarted = false;
+    let streamedAnswer = false;
+    let streamedError = false;
+    const result = await agentRunner(document.messages, (event) => {
+      if (event.type === "final_started") finalStarted = true;
+      if (event.type === "final_delta") streamedAnswer = true;
+      if (event.type === "error") streamedError = true;
+      sendEvent(response, event);
+    }, controller.signal);
+    if (!response.destroyed) {
+      if (result?.answer && !streamedAnswer) {
+        if (!finalStarted) sendEvent(response, { type: "final_started" });
+        sendEvent(response, { type: "final_delta", text: result.answer });
+      }
+      if (result?.error) {
+        if (!streamedError) sendEvent(response, { type: "error", message: result.error });
+      } else {
+        sendEvent(response, { type: "done" });
+      }
     }
-    if (result?.error) sendEvent(response, { type: "error", message: result.error });
-    else sendEvent(response, { type: "done" });
-    response.end();
+    try { response.end(); } catch { /* client already gone */ }
   } catch (error) {
     if (response.headersSent) {
       sendEvent(response, { type: "error", message: error.message });
@@ -482,7 +634,14 @@ async function serveAgent(request, response, agentRunner) {
 }
 
 export function serve({ listenPort = port, agentRunner = runAgent, workspaceRoot = root } = {}) {
-  const server = createServer((request, response) => {
+  let server;
+  server = createServer((request, response) => {
+    const address = server.address();
+    const activePort = typeof address === "object" && address ? address.port : listenPort;
+    if (!isTrustedRequest(request, activePort)) {
+      response.writeHead(403, secureHeaders).end("Forbidden");
+      return;
+    }
     const pathname = new URL(request.url, "http://localhost").pathname;
     if (pathname === "/api/agent") {
       void serveAgent(request, response, agentRunner);
@@ -494,17 +653,21 @@ export function serve({ listenPort = port, agentRunner = runAgent, workspaceRoot
     }
     let path = resolveRequestPath(pathname);
     if (path === null) {
-      response.writeHead(403).end("Forbidden");
+      response.writeHead(403, secureHeaders).end("Forbidden");
       return;
     }
     stat(path, (error, entry) => {
       if (!error && entry.isDirectory()) path = join(path, "index.html");
       stat(path, (fileError, file) => {
         if (fileError || !file.isFile()) {
-          response.writeHead(404).end("Not found");
+          response.writeHead(404, secureHeaders).end("Not found");
           return;
         }
-        response.writeHead(200, { "Content-Type": types[extname(path)] ?? "application/octet-stream" });
+        response.writeHead(200, {
+          "Content-Type": types[extname(path)] ?? "application/octet-stream",
+          "Cache-Control": "no-cache",
+          ...secureHeaders,
+        });
         createReadStream(path).pipe(response);
       });
     });

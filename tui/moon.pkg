@@ -1,5 +1,7 @@
 import {
-  "moonsage/agent",
+  "moonsage/agent/llm_adapter",
+  "moonsage/agent/project",
+  "moonsage/agent/runtime",
   "moonsage/chat",
   "moonsage/editing",
   "moonsage/llm",

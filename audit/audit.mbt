@@ -42,15 +42,15 @@ fn tool_exit_code(result : String) -> Int? {
 
 ///|
 fn collect_tool_records(
-  answer : @agent.AgentAnswer,
+  answer : @runtime.AgentAnswer,
   phase : String,
 ) -> Array[AuditToolRecord] {
-  let started : Map[String, @agent.ToolStartedEvent] = Map([])
+  let started : Map[String, @runtime.ToolStartedEvent] = Map([])
   let records : Array[AuditToolRecord] = []
   for event in answer.events {
     match event {
-      @agent.ToolStarted(item) => started[item.call_id] = item
-      @agent.ToolFinished(item) => {
+      ToolStarted(item) => started[item.call_id] = item
+      ToolFinished(item) => {
         let begin = started.get(item.call_id)
         records.push({
           phase,
@@ -82,8 +82,8 @@ fn report_claims_verification(text : String) -> Bool {
 
 ///|
 pub fn build_audit_evidence(
-  baseline : @agent.AgentAnswer?,
-  answer : @agent.AgentAnswer,
+  baseline : @runtime.AgentAnswer?,
+  answer : @runtime.AgentAnswer,
   fix_mode : Bool,
 ) -> AuditEvidence {
   let mut tools : Array[AuditToolRecord] = []
@@ -352,23 +352,21 @@ async fn run_audit_agent(
   question : String,
   max_tool_calls~ : Int,
   max_rounds~ : Int,
-  on_event? : async (@agent.EngineEvent) -> Unit = @agent.ignore_event,
-  provider? : @llm.ProviderKind = @llm.OpenAi,
-) -> @agent.AgentAnswer {
-  let agent : @agent.Agent = {
+  on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
+  provider? : @llm.ProviderKind = OpenAi,
+) -> @runtime.AgentAnswer {
+  let agent : @runtime.Agent = {
     system_prompt: audit_system_prompt(),
     tools: audit_tools(ctx),
     max_tool_calls,
     max_rounds,
     max_tokens: 6000,
   }
-  agent.run(
-    api_key,
-    base_url,
-    model,
+  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  agent.execute(
+    client,
     question,
     on_event~,
-    provider~,
     context_window_tokens=32768,
     reserved_output_tokens=6000,
   )
@@ -381,28 +379,26 @@ async fn run_analysis_agent(
   base_url : String,
   model : String,
   ctx : AuditContext,
-  on_event? : async (@agent.EngineEvent) -> Unit = @agent.ignore_event,
-  provider? : @llm.ProviderKind = @llm.OpenAi,
-) -> @agent.AgentAnswer {
+  on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
+  provider? : @llm.ProviderKind = OpenAi,
+) -> @runtime.AgentAnswer {
   let ro_ctx : AuditContext = {
     project_dir: ctx.project_dir,
     fix: false,
     confirm: ctx.confirm,
   }
-  let agent : @agent.Agent = {
+  let agent : @runtime.Agent = {
     system_prompt: audit_analysis_prompt(),
     tools: audit_tools(ro_ctx),
     max_tool_calls: 12,
     max_rounds: 4,
     max_tokens: 4000,
   }
-  agent.run(
-    api_key,
-    base_url,
-    model,
+  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  agent.execute(
+    client,
     audit_analysis_question(),
     on_event~,
-    provider~,
     context_window_tokens=32768,
     reserved_output_tokens=4000,
   )
@@ -418,23 +414,21 @@ async fn run_fix_agent(
   findings : String,
   max_tool_calls~ : Int,
   max_rounds~ : Int,
-  on_event? : async (@agent.EngineEvent) -> Unit = @agent.ignore_event,
-  provider? : @llm.ProviderKind = @llm.OpenAi,
-) -> @agent.AgentAnswer {
-  let agent : @agent.Agent = {
+  on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
+  provider? : @llm.ProviderKind = OpenAi,
+) -> @runtime.AgentAnswer {
+  let agent : @runtime.Agent = {
     system_prompt: audit_fix_prompt(),
     tools: audit_tools(ctx),
     max_tool_calls,
     max_rounds,
     max_tokens: 6000,
   }
-  agent.run(
-    api_key,
-    base_url,
-    model,
+  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  agent.execute(
+    client,
     audit_fix_question(findings),
     on_event~,
-    provider~,
     context_window_tokens=32768,
     reserved_output_tokens=6000,
   )
@@ -571,7 +565,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       )
     }
     @stdio.stdout.write("Phase 1/2: analyzing the project...\n")
-    let analysis_events : Array[@agent.EngineEvent] = []
+    let analysis_events : Array[@runtime.EngineEvent] = []
     let analysis = run_analysis_agent(
       key,
       base_url,
@@ -584,7 +578,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
         print_audit_evidence(
           build_audit_evidence(
             None,
-            @agent.AgentAnswer::new("", [], analysis_events),
+            @runtime.AgentAnswer::new("", [], analysis_events),
             false,
           ),
         )
@@ -596,7 +590,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       }
     }
     @stdio.stdout.write("Phase 2/2: applying fixes...\n")
-    let fix_events : Array[@agent.EngineEvent] = []
+    let fix_events : Array[@runtime.EngineEvent] = []
     let answer = run_fix_agent(
       key,
       base_url,
@@ -612,7 +606,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
         print_audit_evidence(
           build_audit_evidence(
             Some(analysis),
-            @agent.AgentAnswer::new("", [], fix_events),
+            @runtime.AgentAnswer::new("", [], fix_events),
             true,
           ),
         )
@@ -658,7 +652,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       @stdio.stdout.write(event + "\n")
     }
   } else {
-    let audit_events : Array[@agent.EngineEvent] = []
+    let audit_events : Array[@runtime.EngineEvent] = []
     let answer = run_audit_agent(
       key,
       base_url,
@@ -674,7 +668,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
         print_audit_evidence(
           build_audit_evidence(
             None,
-            @agent.AgentAnswer::new("", [], audit_events),
+            @runtime.AgentAnswer::new("", [], audit_events),
             false,
           ),
         )

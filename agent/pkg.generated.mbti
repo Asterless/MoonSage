@@ -2,89 +2,71 @@
 package "moonsage/agent"
 
 import {
-  "moonbitlang/core/debug",
+  "moonsage/agent/model",
+  "moonsage/agent/runtime",
   "moonsage/llm",
   "moonsage/tools",
 }
 
 // Values
-pub fn ask_agent(Array[@moonsage.ModuleSummary]) -> Agent
+#deprecated
+pub fn ask_agent(Array[@moonsage.ModuleSummary]) -> @runtime.Agent
 
+#deprecated
 pub fn ask_tools(Array[@moonsage.ModuleSummary]) -> Array[@tools.Tool]
 
-pub async fn ignore_event(EngineEvent) -> Unit
+pub fn event_to_json(@runtime.EngineEvent) -> Json
+
+pub async fn ignore_event(@runtime.EngineEvent) -> Unit
+
+pub async fn ignore_model_event(@model.ModelEvent) -> Unit
 
 pub async fn load_project_instructions(String) -> String
 
-pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, provider? : @llm.ProviderKind, extra_tools? : Array[@tools.Tool], project_instructions? : String) -> AgentAnswer
+pub fn research_agent(Array[@moonsage.ModuleSummary]) -> @runtime.Agent
+
+pub fn research_tools(Array[@moonsage.ModuleSummary]) -> Array[@tools.Tool]
+
+#deprecated
+pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (@runtime.EngineEvent) -> Unit, provider? : @llm.ProviderKind, extra_tools? : Array[@tools.Tool], project_instructions? : String) -> @runtime.AgentAnswer
+
+pub async fn run_research_agent(@model.ChatClient, Array[@moonsage.ModuleSummary], String, on_event? : async (@runtime.EngineEvent) -> Unit, extra_tools? : Array[@tools.Tool], project_instructions? : String) -> @runtime.AgentAnswer
 
 // Errors
 
 // Types and methods
-pub(all) struct Agent {
-  system_prompt : String
-  tools : Array[@tools.Tool]
-  max_tool_calls : Int
-  max_rounds : Int
-  max_tokens : Int
-}
-pub async fn Agent::compact(Self, Session, String, String, String, threshold_tokens? : Int, keep_recent_turns? : Int, provider? : @llm.ProviderKind) -> Unit
-pub fn Agent::new_session(Self) -> Session
-pub async fn Agent::run(Self, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, provider? : @llm.ProviderKind, context_window_tokens? : Int, reserved_output_tokens? : Int) -> AgentAnswer
-pub async fn Agent::turn(Self, Session, String, String, String, String, on_delta? : async (String) -> Unit, on_event? : async (EngineEvent) -> Unit, on_thinking? : async (String) -> Unit, provider? : @llm.ProviderKind, context_window_tokens? : Int, reserved_output_tokens? : Int) -> AgentAnswer
-
-pub struct AgentAnswer {
-  text : String
-  trace : Array[String]
-  events : Array[EngineEvent]
-}
-pub fn AgentAnswer::new(String, Array[String], Array[EngineEvent]) -> Self
-
-pub(all) enum EngineEvent {
-  ThinkingDelta(ThinkingDeltaEvent)
-  ToolStarted(ToolStartedEvent)
-  ToolFinished(ToolFinishedEvent)
-  FinalStarted
-  FinalDelta(String)
-  Retrying(RetryEvent)
-  Warning(String)
-  Error(String)
-} derive(Eq, @debug.Debug)
-
-pub(all) struct RetryEvent {
-  attempt : Int
-  reason : String
-} derive(Eq, @debug.Debug)
-
-pub(all) struct Session {
-  messages : Array[Json]
-}
-pub fn Session::char_count(Self) -> Int
-pub fn Session::estimated_tokens(Self) -> Int
-pub fn Session::from_json(Json) -> Self
-pub fn Session::to_json(Self) -> Json
-
-pub(all) struct ThinkingDeltaEvent {
-  round : Int
-  text : String
-} derive(Eq, @debug.Debug)
-
-pub(all) struct ToolFinishedEvent {
-  round : Int
-  call_id : String
-  name : String
-  status : String
-  result : String
-} derive(Eq, @debug.Debug)
-
-pub(all) struct ToolStartedEvent {
-  round : Int
-  call_id : String
-  name : String
-  arguments : String
-} derive(Eq, @debug.Debug)
 
 // Type aliases
+pub using @runtime {type Agent}
+
+pub using @runtime {type AgentAnswer}
+
+pub using @model {type ChatClient}
+
+pub using @model {type ChatMessage}
+
+pub using @model {type ChatRequest}
+
+pub using @model {type ChatResponse}
+
+pub using @runtime {type EngineEvent}
+
+pub using @model {type FinishReason}
+
+pub using @model {type ModelEvent}
+
+pub using @model {type ModelTool}
+
+pub using @model {type ModelToolCall}
+
+pub using @runtime {type RetryEvent}
+
+pub using @runtime {type Session}
+
+pub using @runtime {type ThinkingDeltaEvent}
+
+pub using @runtime {type ToolFinishedEvent}
+
+pub using @runtime {type ToolStartedEvent}
 
 // Traits
-

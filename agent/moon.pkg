@@ -1,14 +1,15 @@
 import {
   "moonsage",
-  "moonsage/tools",
+  "moonsage/agent/llm_adapter",
+  "moonsage/agent/model",
+  "moonsage/agent/project",
+  "moonsage/agent/protocol",
+  "moonsage/agent/research",
+  "moonsage/agent/runtime",
   "moonsage/llm",
-  "moonsage/mooncakes",
-  "moonbitlang/async",
-  "moonbitlang/async/fs",
-  "moonbitlang/core/json",
+  "moonsage/tools",
 }
 
 import {
-  "moonbitlang/async/http",
-  "moonbitlang/async/socket",
-} for "wbtest"
+  "moonbitlang/async",
+} for "test"

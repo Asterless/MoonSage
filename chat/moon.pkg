@@ -1,7 +1,10 @@
 import {
   "moonsage/llm",
+  "moonsage/agent/llm_adapter",
+  "moonsage/agent/project",
+  "moonsage/agent/research",
+  "moonsage/agent/runtime",
   "moonsage",
-  "moonsage/agent",
   "moonsage/editing",
   "moonsage/local",
   "moonsage/md_ansi",

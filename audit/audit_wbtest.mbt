@@ -91,21 +91,21 @@ test "audit tools include write_file only in fix mode" {
 ///|
 fn audit_answer(
   text : String,
-  events : Array[@agent.EngineEvent],
-) -> @agent.AgentAnswer {
-  @agent.AgentAnswer::new(text, [], events)
+  events : Array[@runtime.EngineEvent],
+) -> @runtime.AgentAnswer {
+  @runtime.AgentAnswer::new(text, [], events)
 }
 
 ///|
 test "audit evidence rejects a claimed verification with failing exit code" {
   let answer = audit_answer("## 审计报告\n测试通过", [
-    @agent.ToolStarted({
+    @runtime.ToolStarted({
       round: 0,
       call_id: "run-1",
       name: "run_moon",
       arguments: "{\"args\":\"test\"}",
     }),
-    @agent.ToolFinished({
+    @runtime.ToolFinished({
       round: 0,
       call_id: "run-1",
       name: "run_moon",
@@ -123,13 +123,13 @@ test "audit evidence rejects a claimed verification with failing exit code" {
 ///|
 test "audit evidence requires a successful post-fix verification" {
   let answer = audit_answer("## 审计报告", [
-    @agent.ToolStarted({
+    @runtime.ToolStarted({
       round: 0,
       call_id: "write-1",
       name: "write_file",
       arguments: "{\"path\":\"main.mbt\"}",
     }),
-    @agent.ToolFinished({
+    @runtime.ToolFinished({
       round: 0,
       call_id: "write-1",
       name: "write_file",
@@ -146,26 +146,26 @@ test "audit evidence requires a successful post-fix verification" {
 ///|
 test "audit evidence verifies a successful post-fix moon command" {
   let answer = audit_answer("## 审计报告", [
-    @agent.ToolStarted({
+    @runtime.ToolStarted({
       round: 0,
       call_id: "edit-1",
       name: "multi_edit",
       arguments: "{\"edits\":[]}",
     }),
-    @agent.ToolFinished({
+    @runtime.ToolFinished({
       round: 0,
       call_id: "edit-1",
       name: "multi_edit",
       status: "ok",
       result: "applied",
     }),
-    @agent.ToolStarted({
+    @runtime.ToolStarted({
       round: 1,
       call_id: "run-1",
       name: "run_moon",
       arguments: "{\"args\":\"test\"}",
     }),
-    @agent.ToolFinished({
+    @runtime.ToolFinished({
       round: 1,
       call_id: "run-1",
       name: "run_moon",
@@ -182,39 +182,39 @@ test "audit evidence verifies a successful post-fix moon command" {
 ///|
 test "audit evidence invalidates verification after a later edit" {
   let answer = audit_answer("## 审计报告", [
-    @agent.ToolStarted({
+    @runtime.ToolStarted({
       round: 0,
       call_id: "edit-1",
       name: "multi_edit",
       arguments: "{}",
     }),
-    @agent.ToolFinished({
+    @runtime.ToolFinished({
       round: 0,
       call_id: "edit-1",
       name: "multi_edit",
       status: "ok",
       result: "applied",
     }),
-    @agent.ToolStarted({
+    @runtime.ToolStarted({
       round: 1,
       call_id: "run-1",
       name: "run_moon",
       arguments: "{\"args\":\"test\"}",
     }),
-    @agent.ToolFinished({
+    @runtime.ToolFinished({
       round: 1,
       call_id: "run-1",
       name: "run_moon",
       status: "ok",
       result: "{\"exit_code\":0}",
     }),
-    @agent.ToolStarted({
+    @runtime.ToolStarted({
       round: 2,
       call_id: "edit-2",
       name: "write_file",
       arguments: "{}",
     }),
-    @agent.ToolFinished({
+    @runtime.ToolFinished({
       round: 2,
       call_id: "edit-2",
       name: "write_file",

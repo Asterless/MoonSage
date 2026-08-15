@@ -45,59 +45,8 @@ async fn run_search(query : String) -> Unit {
 }
 
 ///|
-fn engine_event_json(event : @agent.EngineEvent) -> Json {
-  match event {
-    ThinkingDelta(event) =>
-      Json::object({
-        "type": Json::string("thinking_delta"),
-        "round": Json::number(event.round.to_double()),
-        "text": Json::string(event.text),
-      })
-    ToolStarted(event) =>
-      Json::object({
-        "type": Json::string("tool_started"),
-        "round": Json::number(event.round.to_double()),
-        "call_id": Json::string(event.call_id),
-        "name": Json::string(event.name),
-        "arguments": Json::string(event.arguments),
-      })
-    ToolFinished(event) =>
-      Json::object({
-        "type": Json::string("tool_finished"),
-        "round": Json::number(event.round.to_double()),
-        "call_id": Json::string(event.call_id),
-        "name": Json::string(event.name),
-        "status": Json::string(event.status),
-        "result": Json::string(event.result),
-      })
-    FinalStarted => Json::object({ "type": Json::string("final_started") })
-    FinalDelta(text) =>
-      Json::object({
-        "type": Json::string("final_delta"),
-        "text": Json::string(text),
-      })
-    Retrying(event) =>
-      Json::object({
-        "type": Json::string("retrying"),
-        "attempt": Json::number(event.attempt.to_double()),
-        "reason": Json::string(event.reason),
-      })
-    Warning(message) =>
-      Json::object({
-        "type": Json::string("warning"),
-        "message": Json::string(message),
-      })
-    Error(message) =>
-      Json::object({
-        "type": Json::string("error"),
-        "message": Json::string(message),
-      })
-  }
-}
-
-///|
-async fn write_json_event(event : @agent.EngineEvent) -> Unit {
-  @stdio.stdout.write(engine_event_json(event).stringify() + "\n")
+async fn write_json_event(event : @runtime.EngineEvent) -> Unit {
+  @stdio.stdout.write(@protocol.event_to_json(event).stringify() + "\n")
 }
 
 ///|
@@ -133,6 +82,7 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
   let provider = @llm.provider_from_string(
     @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
   )
+  let client = @llm_adapter.client(key, base_url, model, provider)
   let modules = @mooncakes.fetch_modules() catch {
     error => {
       if stream_json {
@@ -146,7 +96,7 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
     }
   }
   let cwd = @env.current_dir().unwrap_or(".")
-  let project_instructions = @agent.load_project_instructions(cwd)
+  let project_instructions = @project.load_project_instructions(cwd)
   let mcp_tools = configured_mcp_tools() catch {
     error => {
       if stream_json {
@@ -162,14 +112,11 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
   }
   if stream_json {
     ignore(
-      @agent.run_llm_agent(
-        key,
-        base_url,
-        model,
+      @research.run_research_agent(
+        client,
         modules,
         question,
         on_event=async fn(event) { write_json_event(event) },
-        provider~,
         extra_tools=mcp_tools,
         project_instructions~,
       ),
@@ -180,20 +127,22 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
   }
   @stdio.stdout.write("MoonSage\n")
   let printer = @md_ansi.MdStreamPrinter::new()
-  let answer = @agent.run_llm_agent(
-    key,
-    base_url,
-    model,
+  let answer = @research.run_research_agent(
+    client,
     modules,
     question,
-    on_delta=async fn(text) {
-      printer.feed(text)
-      let out = printer.take_output()
-      if out != "" {
-        @stdio.stdout.write(out)
+    on_event=async fn(event) {
+      match event {
+        FinalDelta(text) => {
+          printer.feed(text)
+          let out = printer.take_output()
+          if out != "" {
+            @stdio.stdout.write(out)
+          }
+        }
+        _ => ()
       }
     },
-    provider~,
     extra_tools=mcp_tools,
     project_instructions~,
   )

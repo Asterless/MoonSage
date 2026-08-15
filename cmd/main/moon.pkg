@@ -4,12 +4,16 @@ supported_targets = "+native"
 
 import {
   "moonsage/llm",
+  "moonsage/agent/llm_adapter",
+  "moonsage/agent/project",
+  "moonsage/agent/protocol",
+  "moonsage/agent/research",
+  "moonsage/agent/runtime",
   "moonsage",
   "moonsage/chat",
   "moonsage/tui",
   "moonsage/mooncakes",
   "moonsage/md_ansi",
-  "moonsage/agent",
   "moonsage/tools",
   "moonsage/audit",
   "moonsage/dotenv",

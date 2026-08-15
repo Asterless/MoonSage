@@ -1,0 +1,17 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/agent/protocol"
+
+import {
+  "moonsage/agent/runtime",
+}
+
+// Values
+pub fn event_to_json(@runtime.EngineEvent) -> Json
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits
