@@ -2,6 +2,27 @@
 let sessions_storage_key : String = "moonsage.web.sessions.v1"
 
 ///|
+let theme_storage_key : String = "moonsage.web.theme.v1"
+
+///|
+fn normalize_theme(value : String) -> String {
+  if value == "dark" {
+    "dark"
+  } else {
+    "light"
+  }
+}
+
+///|
+fn opposite_theme(value : String) -> String {
+  if normalize_theme(value) == "dark" {
+    "light"
+  } else {
+    "dark"
+  }
+}
+
+///|
 fn json_int_field(
   fields : Map[String, Json],
   name : String,
@@ -120,6 +141,31 @@ extern "js" fn storage_save(key : String, value : String) -> Unit =
 ///|
 extern "js" fn storage_load(key : String) -> String =
   #| (key) => { try { return localStorage.getItem(key) ?? ""; } catch { return ""; } }
+
+///|
+extern "js" fn apply_document_theme(theme : String) -> Unit =
+  #| (theme) => {
+  #|   if (typeof document === "undefined") return;
+  #|   const normalized = theme === "dark" ? "dark" : "light";
+  #|   document.documentElement.dataset.theme = normalized;
+  #|   document.documentElement.style.colorScheme = normalized;
+  #|   const meta = document.querySelector('meta[name="theme-color"]');
+  #|   if (meta) meta.setAttribute("content", normalized === "dark" ? "#17181f" : "#ffffff");
+  #| }
+
+///|
+fn load_theme() -> String {
+  normalize_theme(storage_load(theme_storage_key))
+}
+
+///|
+fn persist_theme(theme : String) -> Cmd {
+  let normalized = normalize_theme(theme)
+  @cmd.custom_cmd(_ => {
+    storage_save(theme_storage_key, normalized)
+    apply_document_theme(normalized)
+  })
+}
 
 ///|
 fn persist_model(model : Model) -> Cmd {

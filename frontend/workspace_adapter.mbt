@@ -50,33 +50,65 @@ fn workspace_request(
 }
 
 ///|
-fn load_workspace_tree(emit : Emit[Msg]) -> Cmd {
-  workspace_request(emit, "GET", "/api/workspace/tree", "", body => {
-    WorkspaceTreeReceived(body)
+fn workspace_prefix(workspace_id : String) -> String {
+  if workspace_id == "" {
+    "/api/workspace"
+  } else {
+    "/api/workspaces/" + encode_workspace_path(workspace_id)
+  }
+}
+
+///|
+fn load_workspace_tree(emit : Emit[Msg], workspace_id : String) -> Cmd {
+  workspace_request(emit, "GET", workspace_prefix(workspace_id) + "/tree", "", body => {
+    WorkspaceTreeReceived(workspace_id, body)
   })
 }
 
 ///|
-fn load_workspace_status(emit : Emit[Msg]) -> Cmd {
-  workspace_request(emit, "GET", "/api/workspace/git/status", "", body => {
-    WorkspaceStatusReceived(body)
+fn load_workspace_registry(emit : Emit[Msg]) -> Cmd {
+  workspace_request(emit, "GET", "/api/workspaces", "", body => {
+    WorkspaceRegistryReceived(body)
   })
 }
 
 ///|
-fn load_workspace_file(emit : Emit[Msg], path : String) -> Cmd {
+fn pick_workspace(emit : Emit[Msg]) -> Cmd {
+  workspace_request(emit, "POST", "/api/workspaces/pick", "", body => {
+    WorkspacePicked(body)
+  })
+}
+
+///|
+fn load_workspace_status(emit : Emit[Msg], workspace_id : String) -> Cmd {
   workspace_request(
     emit,
     "GET",
-    "/api/workspace/file?path=" + encode_workspace_path(path),
+    workspace_prefix(workspace_id) + "/git/status",
     "",
-    body => WorkspaceFileReceived(path, body),
+    body => WorkspaceStatusReceived(workspace_id, body),
+  )
+}
+
+///|
+fn load_workspace_file(
+  emit : Emit[Msg],
+  workspace_id : String,
+  path : String,
+) -> Cmd {
+  workspace_request(
+    emit,
+    "GET",
+    workspace_prefix(workspace_id) + "/file?path=" + encode_workspace_path(path),
+    "",
+    body => WorkspaceFileReceived(workspace_id, path, body),
   )
 }
 
 ///|
 fn save_workspace_file(
   emit : Emit[Msg],
+  workspace_id : String,
   path : String,
   content : String,
   line_endings : String,
@@ -86,40 +118,62 @@ fn save_workspace_file(
     "content": Json::string(content),
     "line_endings": Json::string(line_endings),
   }).stringify()
-  workspace_request(emit, "PUT", "/api/workspace/file", body, _ => {
-    WorkspaceFileSaved(path, content)
-  })
+  workspace_request(
+    emit,
+    "PUT",
+    workspace_prefix(workspace_id) + "/file",
+    body,
+    _ => WorkspaceFileSaved(workspace_id, path, content),
+  )
 }
 
 ///|
-fn load_workspace_diff(emit : Emit[Msg], scope : String, path : String) -> Cmd {
+fn load_workspace_diff(
+  emit : Emit[Msg],
+  workspace_id : String,
+  scope : String,
+  path : String,
+) -> Cmd {
   let suffix = if path == "" {
     ""
   } else {
     "&path=" + encode_workspace_path(path)
   }
-  let url = "/api/workspace/git/diff?scope=" + scope + suffix
+  let url = workspace_prefix(workspace_id) + "/git/diff?scope=" + scope + suffix
   workspace_request(emit, "GET", url, "", body => {
-    WorkspaceDiffReceived(scope, path, body)
+    WorkspaceDiffReceived(workspace_id, scope, path, body)
   })
 }
 
 ///|
 fn workspace_git_paths_request(
   emit : Emit[Msg],
+  workspace_id : String,
   action : String,
   paths : Array[String],
 ) -> Cmd {
   let body = Json::object({ "paths": Json::array(paths.map(Json::string)) }).stringify()
-  workspace_request(emit, "POST", "/api/workspace/git/" + action, body, result => {
-    WorkspaceGitActionReceived(action, result)
-  })
+  workspace_request(
+    emit,
+    "POST",
+    workspace_prefix(workspace_id) + "/git/" + action,
+    body,
+    result => WorkspaceGitActionReceived(workspace_id, action, result),
+  )
 }
 
 ///|
-fn commit_workspace_changes(emit : Emit[Msg], message : String) -> Cmd {
+fn commit_workspace_changes(
+  emit : Emit[Msg],
+  workspace_id : String,
+  message : String,
+) -> Cmd {
   let body = Json::object({ "message": Json::string(message) }).stringify()
-  workspace_request(emit, "POST", "/api/workspace/git/commit", body, result => {
-    WorkspaceCommitReceived(result)
-  })
+  workspace_request(
+    emit,
+    "POST",
+    workspace_prefix(workspace_id) + "/git/commit",
+    body,
+    result => WorkspaceCommitReceived(workspace_id, result),
+  )
 }

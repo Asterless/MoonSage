@@ -2,6 +2,7 @@
 package "moonsage/agent"
 
 import {
+  "moonbitlang/core/debug",
   "moonsage/agent/model",
   "moonsage/agent/runtime",
   "moonsage/llm",
@@ -32,9 +33,20 @@ pub async fn run_llm_agent(String, String, String, Array[@moonsage.ModuleSummary
 
 pub async fn run_research_agent(@model.ChatClient, Array[@moonsage.ModuleSummary], String, on_event? : async (@runtime.EngineEvent) -> Unit, extra_tools? : Array[@tools.Tool], project_instructions? : String) -> @runtime.AgentAnswer
 
+pub fn workspace_agent(String, WorkspacePermission, String) -> @runtime.Agent
+
+pub fn workspace_permission_from_string(String) -> WorkspacePermission
+
+pub fn workspace_permission_to_string(WorkspacePermission) -> String
+
 // Errors
 
 // Types and methods
+pub(all) enum WorkspacePermission {
+  ReadOnly
+  ControlledWrite
+  FullAuto
+} derive(Eq, @debug.Debug)
 
 // Type aliases
 pub using @runtime {type Agent}

@@ -1,6 +1,10 @@
 ///|
-fn agent_request_body(session_id : String, messages : Array[Message]) -> Json {
-  Json::object({
+fn agent_request_body(
+  session_id : String,
+  messages : Array[Message],
+  workspace_id : String,
+) -> Json {
+  let fields : Map[String, Json] = {
     "session_id": Json::string(session_id),
     "messages": Json::array(
       messages.map(message => {
@@ -10,13 +14,21 @@ fn agent_request_body(session_id : String, messages : Array[Message]) -> Json {
         })
       }),
     ),
-  })
+  }
+  if workspace_id != "" {
+    fields["workspace_id"] = Json::string(workspace_id)
+    // Browser tasks cannot answer stdin prompts, so use the explicit
+    // non-interactive policy rather than silently declining every edit.
+    fields["permission"] = Json::string("full-auto")
+  }
+  Json::object(fields)
 }
 
 ///|
 // The server streams one JSON object per line. Canonical CLI events are
 // decoded first; legacy browser aliases remain accepted during migration.
 enum AgentStreamEvent {
+  Started(String)
   Status(String)
   Delta(String)
   Thinking(String)
@@ -25,6 +37,8 @@ enum AgentStreamEvent {
   ToolFinished(String, String, String, Int)
   Retry(Int, String)
   Warning(String)
+  Paused(String)
+  Completed
   Done
   StreamError(String)
   Ignored
@@ -43,6 +57,7 @@ fn decode_agent_event(line : String) -> AgentStreamEvent {
   let document = @json.parse(line) catch { _ => return Ignored }
   guard document is Object(fields) else { return Ignored }
   match fields.get("type") {
+    Some(String("started")) => Started(json_string_field(fields, "permission"))
     Some(String("status")) =>
       match fields.get("message") {
         Some(String(message)) => Status(message)
@@ -112,6 +127,10 @@ fn decode_agent_event(line : String) -> AgentStreamEvent {
         Some(String(message)) => Warning(message)
         _ => Ignored
       }
+    Some(String("paused")) => Paused(json_string_field(fields, "reason"))
+    Some(String("completed")) => Completed
+    Some(String("failed")) => StreamError(json_string_field(fields, "message"))
+    Some(String("cancelled")) => StreamError("任务已取消")
     Some(String("done")) => Done
     Some(String("error")) =>
       match fields.get("message") {
@@ -142,10 +161,41 @@ extern "js" fn stream_agent_request(
   #|   globalThis.__moonsageAgentAbort = controller;
   #|   void (async () => {
   #|     try {
-  #|       const response = await fetch("/api/agent", {
+  #|       let endpoint = "/api/agent";
+  #|       let requestBody = body;
+  #|       let parsed;
+  #|       try { parsed = JSON.parse(body); }
+  #|       catch { throw new Error("Agent 请求格式无效"); }
+  #|       if (typeof parsed.workspace_id === "string" && parsed.workspace_id) {
+  #|         const latest = Array.isArray(parsed.messages) && parsed.messages.length
+  #|           ? parsed.messages[parsed.messages.length - 1]
+  #|           : null;
+  #|         const goal = latest && typeof latest.text === "string" ? latest.text.trim() : "";
+  #|         if (!goal) throw new Error("工作区任务需要目标描述");
+  #|         const create = await fetch("/api/tasks", {
+  #|           method: "POST",
+  #|           headers: { "Content-Type": "application/json" },
+  #|           body: JSON.stringify({
+  #|             workspace_id: parsed.workspace_id,
+  #|             goal,
+  #|             permission: parsed.permission || "full-auto",
+  #|           }),
+  #|           signal: controller.signal,
+  #|         });
+  #|         const createText = await create.text();
+  #|         let createDocument;
+  #|         try { createDocument = JSON.parse(createText); }
+  #|         catch { throw new Error(createText || `HTTP ${create.status}`); }
+  #|         if (!create.ok) throw new Error(createDocument.error || `HTTP ${create.status}`);
+  #|         const taskId = createDocument.task && createDocument.task.id;
+  #|         if (typeof taskId !== "string" || !taskId) throw new Error("任务创建失败");
+  #|         endpoint = `/api/tasks/${encodeURIComponent(taskId)}/run`;
+  #|         requestBody = "";
+  #|       }
+  #|       const response = await fetch(endpoint, {
   #|         method: "POST",
-  #|         headers: { "Content-Type": "application/json" },
-  #|         body,
+  #|         headers: requestBody ? { "Content-Type": "application/json" } : undefined,
+  #|         body: requestBody || undefined,
   #|         signal: controller.signal,
   #|       });
   #|       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -191,7 +241,19 @@ extern "js" fn stick_to_bottom_if_near() -> Unit =
 
 ///|
 fn after_render_scroll() -> Cmd {
-  @cmd.custom_cmd(_ => stick_to_bottom_if_near(), kind=@cmd.AfterRender)
+  @cmd.custom_cmd(_ => stick_to_bottom_if_near(), kind=AfterRender)
+}
+
+///|
+extern "js" fn focus_moonsage_control(selector : String) -> Unit =
+  #| (selector) => {
+  #|   const element = document.querySelector(selector);
+  #|   if (element instanceof HTMLElement) element.focus({ preventScroll: true });
+  #| }
+
+///|
+fn after_render_focus(selector : String) -> Cmd {
+  @cmd.custom_cmd(_ => focus_moonsage_control(selector), kind=AfterRender)
 }
 
 ///|
@@ -200,13 +262,25 @@ fn request_agent(
   session_id : String,
   request_id : Int,
   messages : Array[Message],
+  workspace_id : String,
 ) -> Cmd {
-  let body = agent_request_body(session_id, messages).stringify()
+  let body = agent_request_body(session_id, messages, workspace_id).stringify()
   @cmd.custom_cmd(scheduler => {
     stream_agent_request(
       body,
       line => {
         let command = match decode_agent_event(line) {
+          Started(permission) =>
+            emit(
+              AgentStatus(
+                request_id,
+                if permission == "" {
+                  "工作区任务已开始"
+                } else {
+                  "工作区任务已开始 · {permission}"
+                },
+              ),
+            )
           Status(message) => emit(AgentStatus(request_id, message))
           Delta(text) => emit(AgentDelta(request_id, text))
           Thinking(text) => emit(AgentThinking(request_id, text))
@@ -218,6 +292,18 @@ fn request_agent(
           Retry(attempt, reason) =>
             emit(AgentRetry(request_id, attempt, reason))
           Warning(message) => emit(AgentWarning(request_id, message))
+          Paused(reason) =>
+            emit(
+              AgentStatus(
+                request_id,
+                if reason == "" {
+                  "任务已暂停"
+                } else {
+                  "任务已暂停：{reason}"
+                },
+              ),
+            )
+          Completed => emit(AgentFinished(request_id))
           Done => emit(AgentFinished(request_id))
           StreamError(reason) => emit(AgentFailed(request_id, reason))
           Ignored => @rabbita.none

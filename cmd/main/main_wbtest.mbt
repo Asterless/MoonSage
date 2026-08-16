@@ -23,6 +23,21 @@ test "cli parses subcommands" {
     return
   }
   assert_eq(join_values(am, "question"), "推荐一个库")
+  let task = root.parse(
+    argv=[
+      "task", "--workspace", "D:/work/demo", "--permission", "read-only", "--stream-json",
+      "检查文件",
+    ],
+    env=Map([]),
+  )
+  guard task.subcommand is Some(("task", tm)) else {
+    assert_true(false)
+    return
+  }
+  assert_eq(task_workspace(tm), "D:/work/demo")
+  assert_true(task_permission(tm) is @agent.WorkspacePermission::ReadOnly)
+  assert_true(flag_of(tm, "stream-json"))
+  assert_eq(join_values(tm, "goal"), "检查文件")
 }
 
 ///|

@@ -73,6 +73,92 @@ test "wildcard_match supports * and ?" {
 }
 
 ///|
+test "workspace ignore policy matches generated entries case-insensitively" {
+  assert_true(is_ignored_project_entry(".git"))
+  assert_true(is_ignored_project_entry(".MOONCAKES"))
+  assert_true(is_ignored_project_entry(".moonsage"))
+  assert_true(is_ignored_project_entry(".CACHE"))
+  assert_true(is_ignored_project_entry("_build"))
+  assert_true(is_ignored_project_entry("_BUILD.BAK"))
+  assert_true(is_ignored_project_entry("Node_Modules"))
+  assert_true(is_ignored_project_entry("TARGET"))
+  assert_true(is_ignored_project_entry("_AUDIT_WS_example"))
+  assert_true(is_ignored_project_path("src/.env"))
+  assert_true(is_ignored_project_path(".MOONSAGE/state.json"))
+  assert_true(is_ignored_project_path("_audit_ws_123/report.md"))
+  assert_true(!is_ignored_project_path("src/main.mbt"))
+}
+
+///|
+async test "list_project_files_tool excludes generated directories and env files" {
+  let tmp = @fs.tmpdir(prefix="moonsage-ignore-test-")
+  @fs.mkdir(tmp + "/src", recursive=true)
+  let _ = @fs.write_file(
+    tmp + "/src/main.mbt",
+    "pub fn main() {}\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let ignored_directories = [
+    ".git", ".mooncakes", ".moonsage", ".cache", "_build", "_build.bak", "node_modules",
+    "target", "_audit_ws_example",
+  ]
+  for directory in ignored_directories {
+    @fs.mkdir(tmp + "/" + directory, recursive=true)
+    let _ = @fs.write_file(
+      tmp + "/" + directory + "/hidden.mbt",
+      "let hidden = true\n",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+  }
+  let _ = @fs.write_file(
+    tmp + "/.env",
+    "SECRET=hidden\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let payload = list_project_files_tool(tmp, "{}")
+  let doc = @json.parse(payload)
+  guard doc is Object(fields) else { fail("expected object") }
+  let files = match fields.get("files") {
+    Some(Array(items)) => items
+    _ => fail("missing files")
+  }
+  assert_eq(files.length(), 1)
+  assert_eq(files[0].stringify(), "\"src/main.mbt\"")
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "local file tools reject ignored paths" {
+  let tmp = @fs.tmpdir(prefix="moonsage-ignore-path-test-")
+  let read_blocked = try {
+    ignore(read_file_tool(tmp, "{\"path\":\".moonsage/state.json\"}"))
+    false
+  } catch {
+    _ => true
+  }
+  let grep_blocked = try {
+    ignore(grep_files_tool(tmp, "{\"pattern\":\"secret\",\"path\":\"_build\"}"))
+    false
+  } catch {
+    _ => true
+  }
+  let list_blocked = try {
+    ignore(list_project_files_tool(tmp, "{\"path\":\"node_modules\"}"))
+    false
+  } catch {
+    _ => true
+  }
+  assert_true(read_blocked)
+  assert_true(grep_blocked)
+  assert_true(list_blocked)
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
 async test "list_project_files_tool filters by pattern and reports truncation" {
   let tmp = @fs.tmpdir(prefix="moonsage-list-test-")
   let _ = @fs.write_file(

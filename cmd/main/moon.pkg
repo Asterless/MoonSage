@@ -5,6 +5,7 @@ supported_targets = "+native"
 import {
   "moonsage/llm",
   "moonsage/agent/llm_adapter",
+  "moonsage/agent",
   "moonsage/agent/project",
   "moonsage/agent/protocol",
   "moonsage/agent/research",
