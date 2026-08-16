@@ -9,12 +9,28 @@ struct WorkspaceChange {
 } derive(Eq)
 
 ///|
+struct WorkspaceFileEntry {
+  path : String
+  relative_path : String
+} derive(Debug, Eq)
+
+///|
+struct WorkspaceFileGroup {
+  key : String
+  label : String
+  files : Array[WorkspaceFileEntry]
+} derive(Debug, Eq)
+
+///|
 struct WorkspaceModel {
   open : Bool
+  id : String
+  name : String
   tab : String
   root : String
   files : Array[String]
   filter : String
+  expanded_groups : Array[String]
   selected_path : String
   content : String
   saved_content : String
@@ -33,10 +49,13 @@ struct WorkspaceModel {
 fn initial_workspace() -> WorkspaceModel {
   {
     open: false,
+    id: "",
+    name: "",
     tab: "files",
     root: "",
     files: [],
     filter: "",
+    expanded_groups: [""],
     selected_path: "",
     content: "",
     saved_content: "",
@@ -80,6 +99,35 @@ fn decode_workspace_tree(source : String) -> (String, Array[String])? {
     }
   }
   Some((json_string_field(fields, "root"), paths))
+}
+
+///|
+fn decode_workspace_registry(source : String) -> (String, String)? {
+  guard json_fields(source) is Some(fields) else { return None }
+  guard fields.get("workspaces") is Some(Array(items)) else { return None }
+  for item in items {
+    guard item is Object(workspace) else { continue }
+    match workspace.get("id") {
+      Some(String(id)) =>
+        return Some((id, json_string_field(workspace, "name")))
+      _ => continue
+    }
+  }
+  Some(("", ""))
+}
+
+///|
+fn decode_workspace_pick(source : String) -> (String, String)? {
+  guard json_fields(source) is Some(fields) else { return None }
+  guard fields.get("workspace") is Some(Object(workspace)) else { return None }
+  guard workspace.get("id") is Some(String(id)) else { return None }
+  Some((id, json_string_field(workspace, "name")))
+}
+
+///|
+fn workspace_pick_cancelled(source : String) -> Bool {
+  guard json_fields(source) is Some(fields) else { return false }
+  fields.get("cancelled") is Some(True)
 }
 
 ///|
@@ -182,19 +230,97 @@ fn change_label(change : WorkspaceChange) -> String {
 }
 
 ///|
+fn workspace_path_group(path : String) -> (String, String) {
+  match path.find("/") {
+    Some(index) => (path[:index].to_owned(), path[index + 1:].to_owned())
+    None => ("", path)
+  }
+}
+
+///|
+fn workspace_file_groups(
+  paths : Array[String],
+  filter : String,
+) -> Array[WorkspaceFileGroup] {
+  let needle = filter.trim().to_lower()
+  let root_files : Array[WorkspaceFileEntry] = []
+  let group_order : Array[String] = []
+  let grouped : Map[String, Array[WorkspaceFileEntry]] = Map([])
+  for path in paths {
+    if needle != "" && !path.to_lower().contains(needle) {
+      continue
+    }
+    let (key, relative_path) = workspace_path_group(path)
+    let entry : WorkspaceFileEntry = { path, relative_path }
+    if key == "" {
+      root_files.push(entry)
+    } else {
+      match grouped.get(key) {
+        Some(entries) => entries.push(entry)
+        None => {
+          grouped[key] = [entry]
+          group_order.push(key)
+        }
+      }
+    }
+  }
+  let groups : Array[WorkspaceFileGroup] = []
+  if !root_files.is_empty() {
+    groups.push({ key: "", label: "根目录", files: root_files })
+  }
+  for key in group_order {
+    groups.push({ key, label: key, files: grouped[key] })
+  }
+  groups
+}
+
+///|
+fn workspace_group_expanded(workspace : WorkspaceModel, key : String) -> Bool {
+  if !workspace.filter.trim().is_empty() {
+    return true
+  }
+  if workspace.selected_path != "" &&
+    workspace_path_group(workspace.selected_path).0 == key {
+    return true
+  }
+  workspace.expanded_groups.any(group => group == key)
+}
+
+///|
+fn toggle_workspace_group(
+  groups : Array[String],
+  key : String,
+) -> Array[String] {
+  let next : Array[String] = []
+  let mut found = false
+  for group in groups {
+    if group == key {
+      found = true
+    } else {
+      next.push(group)
+    }
+  }
+  if !found {
+    next.push(key)
+  }
+  next
+}
+
+///|
 fn workspace_tabs(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
   let tabs = [("files", "文件"), ("diff", "Diff"), ("git", "Git")]
   nav(
     class="workspace-tabs",
+    attrs=@html.Attrs::build().role("tablist").aria_label("工作区视图"),
     [
       for tab in tabs => {
+        let active = workspace.tab == tab.0
         button(
-          class=if workspace.tab == tab.0 {
-            "workspace-tab active"
-          } else {
-            "workspace-tab"
-          },
+          class=if active { "workspace-tab active" } else { "workspace-tab" },
           type_="button",
+          attrs=@html.Attrs::build()
+            .role("tab")
+            .aria_selected(if active { "true" } else { "false" }),
           on_click=emit(WorkspaceTabSelected(tab.0)),
           tab.1,
         )
@@ -205,12 +331,10 @@ fn workspace_tabs(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
 
 ///|
 fn workspace_file_list(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
-  let needle = workspace.filter.trim().to_lower()
-  let files = if needle == "" {
-    workspace.files
-  } else {
-    workspace.files.filter(path => path.to_lower().contains(needle))
-  }
+  let groups = workspace_file_groups(workspace.files, workspace.filter)
+  let visible_count = groups.fold(init=0, (count, group) => {
+    count + group.files.length()
+  })
   let dirty = workspace_changed(workspace)
   div(class="workspace-file-browser", [
     input(
@@ -220,40 +344,92 @@ fn workspace_file_list(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
       attrs=@html.Attrs::build().aria_label("筛选工作区文件"),
       on_input=emit.map(value => WorkspaceFilterChanged(value)),
     ),
-    div(class="workspace-file-count", "\{files.length()} 个文件"),
+    div(class="workspace-file-count", "\{visible_count} 个文件"),
     nav(
       class="workspace-file-list",
+      attrs=@html.Attrs::build().aria_label("工作区文件"),
       [
-        for path in files => {
-          let active = path == workspace.selected_path
-          let status = change_for_path(workspace, path)
-          button(
-            class=if active {
-              "workspace-file active"
-            } else {
-              "workspace-file"
-            },
-            type_="button",
-            title=path,
-            disabled=dirty && !active,
-            on_click=emit(WorkspaceSelectFile(path)),
-            [
-              span(
-                class="workspace-file-icon",
-                if active {
-                  "●"
+        for group in groups => {
+          let expanded = workspace_group_expanded(workspace, group.key)
+          div(class="workspace-file-group", [
+            button(
+              class="workspace-group-toggle",
+              type_="button",
+              title=if expanded {
+                "折叠 \{group.label}"
+              } else {
+                "展开 \{group.label}"
+              },
+              attrs=@html.Attrs::build().aria_expanded(
+                if expanded {
+                  "true"
                 } else {
-                  "○"
+                  "false"
                 },
               ),
-              span(class="workspace-file-path", path),
-              match status {
-                Some(change) =>
-                  span(class="workspace-file-status", change_label(change))
-                None => span(class="workspace-file-status empty", "")
-              },
-            ],
-          )
+              on_click=emit(WorkspaceToggleGroup(group.key)),
+              [
+                span(
+                  class=if expanded {
+                    "group-chevron expanded"
+                  } else {
+                    "group-chevron"
+                  },
+                  [icon("chevron-right")],
+                ),
+                icon(if expanded { "folder-open" } else { "folder" }),
+                span(class="workspace-group-label", group.label),
+                span(
+                  class="workspace-group-count",
+                  group.files.length().to_string(),
+                ),
+              ],
+            ),
+            if expanded {
+              div(
+                class="workspace-group-files",
+                attrs=@html.Attrs::build().role("group"),
+                [
+                  for entry in group.files => {
+                    let active = entry.path == workspace.selected_path
+                    let status = change_for_path(workspace, entry.path)
+                    button(
+                      class=if active {
+                        "workspace-file active"
+                      } else {
+                        "workspace-file"
+                      },
+                      type_="button",
+                      title=entry.path,
+                      disabled=dirty && !active,
+                      attrs=@html.Attrs::build().aria_current(
+                        if active {
+                          "location"
+                        } else {
+                          "false"
+                        },
+                      ),
+                      on_click=emit(WorkspaceSelectFile(entry.path)),
+                      [
+                        span(class="workspace-file-icon", [icon("file-code-2")]),
+                        span(class="workspace-file-path", entry.relative_path),
+                        match status {
+                          Some(change) =>
+                            span(
+                              class="workspace-file-status",
+                              change_label(change),
+                            )
+                          None => span(class="workspace-file-status empty", "")
+                        },
+                      ],
+                    )
+                  }
+                ],
+              )
+            } else {
+              div(class="workspace-group-placeholder", "")
+            },
+          ])
         }
       ],
     ),
@@ -264,7 +440,7 @@ fn workspace_file_list(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
 fn workspace_editor(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
   if workspace.selected_path == "" {
     div(class="workspace-editor-empty", [
-      span(class="workspace-empty-mark", "</>"),
+      span(class="workspace-empty-mark", [icon("file-code-2")]),
       p("从文件列表选择文件"),
     ])
   } else {
@@ -281,7 +457,7 @@ fn workspace_editor(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
           title="保存文件",
           disabled=!dirty || workspace.loading,
           on_click=emit(WorkspaceSaveFile),
-          "保存",
+          [icon("save"), span("保存")],
         ),
       ]),
       textarea(
@@ -299,10 +475,11 @@ fn workspace_editor(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
 
 ///|
 fn workspace_files_view(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
-  div(class="workspace-files-view", [
-    workspace_file_list(workspace, emit),
-    workspace_editor(workspace, emit),
-  ])
+  div(
+    class="workspace-files-view",
+    attrs=@html.Attrs::build().role("tabpanel"),
+    [workspace_file_list(workspace, emit), workspace_editor(workspace, emit)],
+  )
 }
 
 ///|
@@ -325,53 +502,71 @@ fn diff_line_view(line : String) -> Html {
 
 ///|
 fn workspace_diff_view(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
-  div(class="workspace-diff-view", [
-    div(class="workspace-view-toolbar", [
-      div(class="segmented-control", [
+  div(
+    class="workspace-diff-view",
+    attrs=@html.Attrs::build().role("tabpanel"),
+    [
+      div(class="workspace-view-toolbar", [
+        div(class="segmented-control", [
+          button(
+            class=if workspace.diff_scope == "working" { "active" } else { "" },
+            type_="button",
+            attrs=@html.Attrs::build().aria_pressed(
+              if workspace.diff_scope == "working" {
+                "true"
+              } else {
+                "false"
+              },
+            ),
+            on_click=emit(WorkspaceDiffScopeChanged("working")),
+            "工作区",
+          ),
+          button(
+            class=if workspace.diff_scope == "staged" { "active" } else { "" },
+            type_="button",
+            attrs=@html.Attrs::build().aria_pressed(
+              if workspace.diff_scope == "staged" {
+                "true"
+              } else {
+                "false"
+              },
+            ),
+            on_click=emit(WorkspaceDiffScopeChanged("staged")),
+            "暂存区",
+          ),
+        ]),
         button(
-          class=if workspace.diff_scope == "working" { "active" } else { "" },
+          class="workspace-icon-button",
           type_="button",
-          on_click=emit(WorkspaceDiffScopeChanged("working")),
-          "工作区",
-        ),
-        button(
-          class=if workspace.diff_scope == "staged" { "active" } else { "" },
-          type_="button",
-          on_click=emit(WorkspaceDiffScopeChanged("staged")),
-          "暂存区",
+          title="刷新 Diff",
+          attrs=@html.Attrs::build().aria_label("刷新 Diff"),
+          on_click=emit(WorkspaceRefresh),
+          icon("refresh-cw"),
         ),
       ]),
-      button(
-        class="workspace-icon-button",
-        type_="button",
-        title="刷新 Diff",
-        attrs=@html.Attrs::build().aria_label("刷新 Diff"),
-        on_click=emit(WorkspaceRefresh),
-        "↻",
-      ),
-    ]),
-    if workspace.diff == "" && !workspace.loading {
-      div(class="workspace-editor-empty", [
-        span(class="workspace-empty-mark", "±"),
-        p(
-          if workspace.diff_scope == "working" {
-            "工作区没有差异"
-          } else {
-            "暂存区没有差异"
-          },
-        ),
-      ])
-    } else {
-      pre(
-        class="workspace-diff",
-        [
-          for line in workspace.diff.split("\n") => {
-            diff_line_view(line.to_owned())
-          }
-        ],
-      )
-    },
-  ])
+      if workspace.diff == "" && !workspace.loading {
+        div(class="workspace-editor-empty", [
+          span(class="workspace-empty-mark", [icon("file-diff")]),
+          p(
+            if workspace.diff_scope == "working" {
+              "工作区没有差异"
+            } else {
+              "暂存区没有差异"
+            },
+          ),
+        ])
+      } else {
+        pre(
+          class="workspace-diff",
+          [
+            for line in workspace.diff.split("\n") => {
+              diff_line_view(line.to_owned())
+            }
+          ],
+        )
+      },
+    ],
+  )
 }
 
 ///|
@@ -384,8 +579,9 @@ fn workspace_change_row(change : WorkspaceChange, emit : Emit[Msg]) -> Html {
         class="workspace-row-action",
         type_="button",
         title="暂存文件",
+        attrs=@html.Attrs::build().aria_label("暂存 " + change.path),
         on_click=emit(WorkspaceStage(change.path)),
-        "+",
+        icon("plus"),
       )
     } else {
       span(class="workspace-row-action-placeholder", "")
@@ -395,8 +591,9 @@ fn workspace_change_row(change : WorkspaceChange, emit : Emit[Msg]) -> Html {
         class="workspace-row-action",
         type_="button",
         title="取消暂存",
+        attrs=@html.Attrs::build().aria_label("取消暂存 " + change.path),
         on_click=emit(WorkspaceUnstage(change.path)),
-        "−",
+        icon("minus"),
       )
     } else {
       span(class="workspace-row-action-placeholder", "")
@@ -408,16 +605,16 @@ fn workspace_change_row(change : WorkspaceChange, emit : Emit[Msg]) -> Html {
 fn workspace_git_view(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
   let staged = workspace.changes.filter(change => change.staged)
   let unstaged = workspace.changes.filter(change => change.unstaged)
-  div(class="workspace-git-view", [
+  div(class="workspace-git-view", attrs=@html.Attrs::build().role("tabpanel"), [
     div(class="workspace-view-toolbar", [
-      div(class="branch-badge", [span("⑂"), span(workspace.branch)]),
+      div(class="branch-badge", [icon("git-branch"), span(workspace.branch)]),
       button(
         class="workspace-icon-button",
         type_="button",
         title="刷新 Git 状态",
         attrs=@html.Attrs::build().aria_label("刷新 Git 状态"),
         on_click=emit(WorkspaceRefresh),
-        "↻",
+        icon("refresh-cw"),
       ),
     ]),
     div(class="workspace-change-list", [
@@ -460,20 +657,58 @@ fn workspace_git_view(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
 }
 
 ///|
-fn workspace_view(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
-  aside(class="workspace-panel", [
+fn workspace_view(
+  workspace : WorkspaceModel,
+  modal : Bool,
+  emit : Emit[Msg],
+) -> Html {
+  let panel_attrs = @html.Attrs::build().aria_label("工作区")
+  let panel_attrs = if modal {
+    panel_attrs
+    .role("dialog")
+    .aria_modal("true")
+    .on_keydown(event => {
+      if event.key() == "Escape" {
+        event.prevent_default()
+        emit(ToggleWorkspace)
+      } else {
+        @rabbita.none
+      }
+    })
+  } else {
+    panel_attrs
+  }
+  aside(class="workspace-panel", attrs=panel_attrs, [
     header(class="workspace-header", [
       div(class="workspace-heading", [
         h1("工作区"),
-        span(if workspace.root == "" { "本地仓库" } else { workspace.root }),
+        span(
+          if workspace.name == "" {
+            if workspace.root == "" {
+              "尚未选择目录"
+            } else {
+              "本地仓库"
+            }
+          } else {
+            workspace.name
+          },
+        ),
       ]),
+      button(
+        class="workspace-icon-button",
+        type_="button",
+        title="选择工作区目录",
+        attrs=@html.Attrs::build().aria_label("选择工作区目录"),
+        on_click=emit(WorkspacePick),
+        icon("folder-open"),
+      ),
       button(
         class="workspace-icon-button",
         type_="button",
         title="关闭工作区",
         attrs=@html.Attrs::build().aria_label("关闭工作区"),
         on_click=emit(ToggleWorkspace),
-        "×",
+        icon("panel-right-close"),
       ),
     ]),
     workspace_tabs(workspace, emit),
@@ -503,13 +738,23 @@ fn workspace_update(
   match msg {
     ToggleWorkspace =>
       if workspace.open {
-        Some(({ ..workspace, open: false, loading: false }, @rabbita.none))
+        Some(
+          (
+            { ..workspace, open: false, loading: false },
+            after_render_focus(".workspace-toggle"),
+          ),
+        )
       } else {
         let next = { ..workspace, open: true, loading: true, error: "" }
         Some(
           (
             next,
-            @cmd.batch([load_workspace_tree(emit), load_workspace_status(emit)]),
+            @cmd.batch([
+              load_workspace_registry(emit),
+              load_workspace_tree(emit, workspace.id),
+              load_workspace_status(emit, workspace.id),
+              after_render_focus(".workspace-panel .workspace-icon-button"),
+            ]),
           ),
         )
       }
@@ -519,38 +764,139 @@ fn workspace_update(
         Some(
           (
             { ..next, loading: true },
-            load_workspace_diff(emit, next.diff_scope, ""),
+            load_workspace_diff(emit, next.id, next.diff_scope, ""),
           ),
         )
       } else if tab == "git" {
-        Some(({ ..next, loading: true }, load_workspace_status(emit)))
+        Some(({ ..next, loading: true }, load_workspace_status(emit, next.id)))
       } else {
         Some(({ ..next, loading: false }, @rabbita.none))
       }
     }
-    WorkspaceTreeReceived(source) =>
-      match decode_workspace_tree(source) {
-        Some((root, files)) =>
+    WorkspaceRegistryReceived(source) =>
+      match decode_workspace_registry(source) {
+        Some((id, name)) => {
+          if workspace.id != "" {
+            return Some((workspace, @rabbita.none))
+          }
+          let next = { ..workspace, id, name, error: "" }
           Some(
             (
-              { ..workspace, root, files, loading: false, error: "" },
-              @rabbita.none,
+              next,
+              @cmd.batch([
+                load_workspace_tree(emit, next.id),
+                load_workspace_status(emit, next.id),
+              ]),
             ),
           )
+        }
         None =>
           Some(
             (
-              {
-                ..workspace,
-                loading: false,
-                error: "工作区文件列表格式无效。",
-              },
+              { ..workspace, error: "工作区注册信息格式无效。" },
               @rabbita.none,
             ),
           )
       }
+    WorkspacePick =>
+      Some(
+        (
+          { ..workspace, loading: true, error: "", notice: "" },
+          pick_workspace(emit),
+        ),
+      )
+    WorkspacePicked(source) =>
+      if workspace_pick_cancelled(source) {
+        Some(({ ..workspace, loading: false }, @rabbita.none))
+      } else {
+        match decode_workspace_pick(source) {
+          Some((id, name)) => {
+            let next = {
+              ..workspace,
+              id,
+              name,
+              root: "",
+              files: [],
+              selected_path: "",
+              content: "",
+              saved_content: "",
+              changes: [],
+              branch: "",
+              diff: "",
+              loading: true,
+              error: "",
+              notice: "已选择工作区",
+            }
+            Some(
+              (
+                next,
+                @cmd.batch([
+                  load_workspace_tree(emit, id),
+                  load_workspace_status(emit, id),
+                ]),
+              ),
+            )
+          }
+          None =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  loading: false,
+                  error: "工作区选择结果无效。",
+                },
+                @rabbita.none,
+              ),
+            )
+        }
+      }
+    WorkspaceTreeReceived(workspace_id, source) =>
+      if workspace_id != workspace.id {
+        Some((workspace, @rabbita.none))
+      } else {
+        match decode_workspace_tree(source) {
+          Some((root, files)) =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  root,
+                  files,
+                  expanded_groups: [""],
+                  loading: false,
+                  error: "",
+                },
+                @rabbita.none,
+              ),
+            )
+          None =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  loading: false,
+                  error: "工作区文件列表格式无效。",
+                },
+                @rabbita.none,
+              ),
+            )
+        }
+      }
     WorkspaceFilterChanged(filter) =>
       Some(({ ..workspace, filter, }, @rabbita.none))
+    WorkspaceToggleGroup(key) =>
+      Some(
+        (
+          {
+            ..workspace,
+            expanded_groups: toggle_workspace_group(
+              workspace.expanded_groups,
+              key,
+            ),
+          },
+          @rabbita.none,
+        ),
+      )
     WorkspaceSelectFile(path) =>
       Some(
         (
@@ -561,41 +907,45 @@ fn workspace_update(
             error: "",
             notice: "",
           },
-          load_workspace_file(emit, path),
+          load_workspace_file(emit, workspace.id, path),
         ),
       )
-    WorkspaceFileReceived(path, source) =>
-      match decode_workspace_file(source) {
-        Some((content, line_endings)) if path == workspace.selected_path =>
-          Some(
-            (
-              {
-                ..workspace,
-                content,
-                saved_content: content,
-                line_endings: if line_endings == "crlf" {
-                  "crlf"
-                } else {
-                  "lf"
+    WorkspaceFileReceived(workspace_id, path, source) =>
+      if workspace_id != workspace.id {
+        Some((workspace, @rabbita.none))
+      } else {
+        match decode_workspace_file(source) {
+          Some((content, line_endings)) if path == workspace.selected_path =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  content,
+                  saved_content: content,
+                  line_endings: if line_endings == "crlf" {
+                    "crlf"
+                  } else {
+                    "lf"
+                  },
+                  loading: false,
+                  error: "",
                 },
-                loading: false,
-                error: "",
-              },
-              @rabbita.none,
-            ),
-          )
-        Some(_) => Some((workspace, @rabbita.none))
-        None =>
-          Some(
-            (
-              {
-                ..workspace,
-                loading: false,
-                error: "文件响应格式无效。",
-              },
-              @rabbita.none,
-            ),
-          )
+                @rabbita.none,
+              ),
+            )
+          Some(_) => Some((workspace, @rabbita.none))
+          None =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  loading: false,
+                  error: "文件响应格式无效。",
+                },
+                @rabbita.none,
+              ),
+            )
+        }
       }
     WorkspaceContentChanged(content) =>
       Some(({ ..workspace, content, notice: "" }, @rabbita.none))
@@ -608,6 +958,7 @@ fn workspace_update(
             { ..workspace, loading: true, error: "", notice: "" },
             save_workspace_file(
               emit,
+              workspace.id,
               workspace.selected_path,
               workspace.content,
               workspace.line_endings,
@@ -615,8 +966,10 @@ fn workspace_update(
           ),
         )
       }
-    WorkspaceFileSaved(path, content) =>
-      if path == workspace.selected_path && content == workspace.content {
+    WorkspaceFileSaved(workspace_id, path, content) =>
+      if workspace_id != workspace.id {
+        Some((workspace, @rabbita.none))
+      } else if path == workspace.selected_path && content == workspace.content {
         Some(
           (
             {
@@ -626,36 +979,40 @@ fn workspace_update(
               notice: "已保存",
               error: "",
             },
-            load_workspace_status(emit),
+            load_workspace_status(emit, workspace.id),
           ),
         )
       } else {
-        Some((workspace, load_workspace_status(emit)))
+        Some((workspace, load_workspace_status(emit, workspace.id)))
       }
-    WorkspaceStatusReceived(source) =>
-      match apply_workspace_status(workspace, source) {
-        Some(next) => Some((next, @rabbita.none))
-        None =>
-          Some(
-            (
-              {
-                ..workspace,
-                loading: false,
-                error: "Git 状态响应格式无效。",
-              },
-              @rabbita.none,
-            ),
-          )
+    WorkspaceStatusReceived(workspace_id, source) =>
+      if workspace_id != workspace.id {
+        Some((workspace, @rabbita.none))
+      } else {
+        match apply_workspace_status(workspace, source) {
+          Some(next) => Some((next, @rabbita.none))
+          None =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  loading: false,
+                  error: "Git 状态响应格式无效。",
+                },
+                @rabbita.none,
+              ),
+            )
+        }
       }
     WorkspaceDiffScopeChanged(scope) =>
       Some(
         (
           { ..workspace, diff_scope: scope, loading: true, error: "" },
-          load_workspace_diff(emit, scope, ""),
+          load_workspace_diff(emit, workspace.id, scope, ""),
         ),
       )
-    WorkspaceDiffReceived(scope, _, source) =>
-      if scope != workspace.diff_scope {
+    WorkspaceDiffReceived(workspace_id, scope, _, source) =>
+      if workspace_id != workspace.id || scope != workspace.diff_scope {
         Some((workspace, @rabbita.none))
       } else {
         match decode_workspace_diff(source) {
@@ -681,10 +1038,10 @@ fn workspace_update(
         (
           { ..workspace, loading: true, error: "", notice: "" },
           @cmd.batch([
-            load_workspace_tree(emit),
-            load_workspace_status(emit),
+            load_workspace_tree(emit, workspace.id),
+            load_workspace_status(emit, workspace.id),
             if workspace.tab == "diff" {
-              load_workspace_diff(emit, workspace.diff_scope, "")
+              load_workspace_diff(emit, workspace.id, workspace.diff_scope, "")
             } else {
               @rabbita.none
             },
@@ -695,47 +1052,56 @@ fn workspace_update(
       Some(
         (
           { ..workspace, loading: true, error: "", notice: "" },
-          workspace_git_paths_request(emit, "stage", [path]),
+          workspace_git_paths_request(emit, workspace.id, "stage", [path]),
         ),
       )
     WorkspaceUnstage(path) =>
       Some(
         (
           { ..workspace, loading: true, error: "", notice: "" },
-          workspace_git_paths_request(emit, "unstage", [path]),
+          workspace_git_paths_request(emit, workspace.id, "unstage", [path]),
         ),
       )
-    WorkspaceGitActionReceived(action, source) =>
-      match apply_workspace_status(workspace, source) {
-        Some(next) =>
-          Some(
-            (
-              {
-                ..next,
-                notice: if action == "stage" {
-                  "已暂存"
-                } else {
-                  "已取消暂存"
+    WorkspaceGitActionReceived(workspace_id, action, source) =>
+      if workspace_id != workspace.id {
+        Some((workspace, @rabbita.none))
+      } else {
+        match apply_workspace_status(workspace, source) {
+          Some(next) =>
+            Some(
+              (
+                {
+                  ..next,
+                  notice: if action == "stage" {
+                    "已暂存"
+                  } else {
+                    "已取消暂存"
+                  },
                 },
-              },
-              if workspace.tab == "diff" {
-                load_workspace_diff(emit, workspace.diff_scope, "")
-              } else {
-                @rabbita.none
-              },
-            ),
-          )
-        None =>
-          Some(
-            (
-              {
-                ..workspace,
-                loading: false,
-                error: "Git 操作响应格式无效。",
-              },
-              @rabbita.none,
-            ),
-          )
+                if workspace.tab == "diff" {
+                  load_workspace_diff(
+                    emit,
+                    workspace.id,
+                    workspace.diff_scope,
+                    "",
+                  )
+                } else {
+                  @rabbita.none
+                },
+              ),
+            )
+          None =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  loading: false,
+                  error: "Git 操作响应格式无效。",
+                },
+                @rabbita.none,
+              ),
+            )
+        }
       }
     WorkspaceCommitMessageChanged(message) =>
       Some(
@@ -750,30 +1116,38 @@ fn workspace_update(
         Some(
           (
             { ..workspace, loading: true, error: "", notice: "" },
-            commit_workspace_changes(emit, workspace.commit_message),
+            commit_workspace_changes(
+              emit,
+              workspace.id,
+              workspace.commit_message,
+            ),
           ),
         )
       }
-    WorkspaceCommitReceived(source) =>
-      match apply_workspace_status(workspace, source) {
-        Some(next) =>
-          Some(
-            (
-              { ..next, commit_message: "", notice: "提交已创建" },
-              @rabbita.none,
-            ),
-          )
-        None =>
-          Some(
-            (
-              {
-                ..workspace,
-                loading: false,
-                error: "提交响应格式无效。",
-              },
-              @rabbita.none,
-            ),
-          )
+    WorkspaceCommitReceived(workspace_id, source) =>
+      if workspace_id != workspace.id {
+        Some((workspace, @rabbita.none))
+      } else {
+        match apply_workspace_status(workspace, source) {
+          Some(next) =>
+            Some(
+              (
+                { ..next, commit_message: "", notice: "提交已创建" },
+                @rabbita.none,
+              ),
+            )
+          None =>
+            Some(
+              (
+                {
+                  ..workspace,
+                  loading: false,
+                  error: "提交响应格式无效。",
+                },
+                @rabbita.none,
+              ),
+            )
+        }
       }
     WorkspaceFailed(reason) =>
       Some(

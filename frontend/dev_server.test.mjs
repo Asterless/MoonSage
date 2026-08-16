@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { buildAgentPrompt, eventForAgentOutput, isTrustedRequest, killProcessTree, metaForConversation, normalizeLineEndings, parseAgentEvents, parseGitStatus, requireJsonContentType, resolveRequestPath, resolveWorkspacePath, serve } from "./dev_server.mjs";
+import { buildAgentPrompt, eventForAgentOutput, isTrustedRequest, killProcessTree, metaForConversation, normalizeLineEndings, parseAgentEvents, parseGitStatus, requireJsonContentType, resolveRequestPath, resolveWorkspacePath, serve, verifiedWorkspacePath, workspaceRelativePath } from "./dev_server.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,10 +45,91 @@ test("resolves only relative workspace paths", () => {
   assert.equal(resolveWorkspacePath(workspace, "../secret.txt"), null);
   assert.equal(resolveWorkspacePath(workspace, "/absolute.txt"), null);
   assert.equal(resolveWorkspacePath(workspace, ".env"), null);
+  assert.equal(resolveWorkspacePath(workspace, ".ENV"), null);
   assert.equal(resolveWorkspacePath(workspace, ".git/config"), null);
+  assert.equal(resolveWorkspacePath(workspace, ".GIT/config"), null);
+  assert.equal(resolveWorkspacePath(workspace, ".mooncakes/cache.json"), null);
   assert.equal(resolveWorkspacePath(workspace, ".moonsage/sessions/private.json"), null);
+  assert.equal(resolveWorkspacePath(workspace, ".cache/results.json"), null);
+  assert.equal(resolveWorkspacePath(workspace, "_build/output.js"), null);
+  assert.equal(resolveWorkspacePath(workspace, "_build.bak/output.js"), null);
+  assert.equal(resolveWorkspacePath(workspace, "node_modules/package/index.js"), null);
+  assert.equal(resolveWorkspacePath(workspace, "target/debug/output"), null);
+  assert.equal(resolveWorkspacePath(workspace, "_audit_ws_MoonQOI3/report.md"), null);
+  assert.equal(resolveWorkspacePath(workspace, "_AUDIT_WS_MoonQOI3/report.md"), null);
   if (process.platform === "win32") {
     assert.equal(resolveWorkspacePath(workspace, "C:/Windows/System32/config"), null);
+  }
+});
+
+test("workspace tree and file access consistently ignore generated directories", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "moonsage-filtered-workspace-"));
+  const ignoredDirectories = [
+    ".git",
+    ".mooncakes",
+    ".moonsage",
+    ".cache",
+    "_build",
+    "_build.bak",
+    "node_modules",
+    "target",
+    "_audit_ws_example",
+  ];
+  await mkdir(join(workspaceRoot, "src"));
+  await writeFile(join(workspaceRoot, "src", "main.mbt"), "fn main {}\n", "utf8");
+  await writeFile(join(workspaceRoot, ".env"), "SECRET=hidden\n", "utf8");
+  for (const directory of ignoredDirectories) {
+    await mkdir(join(workspaceRoot, directory), { recursive: true });
+    await writeFile(join(workspaceRoot, directory, "hidden.mbt"), "let hidden = true\n", "utf8");
+  }
+  let linkedIgnoredPath = "";
+  try {
+    await symlink(
+      join(workspaceRoot, ".git"),
+      join(workspaceRoot, "metadata"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    linkedIgnoredPath = "metadata/hidden.mbt";
+  } catch (error) {
+    if (!["EACCES", "ENOTSUP", "EPERM"].includes(error.code)) throw error;
+  }
+
+  const server = serve({ listenPort: 0, workspaceRoot });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  try {
+    const treeResponse = await fetch(`http://127.0.0.1:${port}/api/workspace/tree`);
+    assert.equal(treeResponse.status, 200);
+    const tree = await treeResponse.json();
+    assert.deepEqual(tree.files, ["src/main.mbt"]);
+    assert.equal(tree.truncated, false);
+
+    const readable = await fetch(
+      `http://127.0.0.1:${port}/api/workspace/file?path=src%2Fmain.mbt`,
+    );
+    assert.equal(readable.status, 200);
+    assert.match((await readable.json()).content, /fn main/);
+
+    for (const directory of ignoredDirectories) {
+      const path = encodeURIComponent(`${directory}/hidden.mbt`);
+      const response = await fetch(`http://127.0.0.1:${port}/api/workspace/file?path=${path}`);
+      assert.equal(response.status, 400, directory);
+    }
+    const envResponse = await fetch(`http://127.0.0.1:${port}/api/workspace/file?path=.env`);
+    assert.equal(envResponse.status, 400);
+    const mixedCaseResponse = await fetch(
+      `http://127.0.0.1:${port}/api/workspace/file?path=.GIT%2Fhidden.mbt`,
+    );
+    assert.equal(mixedCaseResponse.status, 400);
+    if (linkedIgnoredPath) {
+      const linkedResponse = await fetch(
+        `http://127.0.0.1:${port}/api/workspace/file?path=${encodeURIComponent(linkedIgnoredPath)}`,
+      );
+      assert.equal(linkedResponse.status, 400);
+    }
+  } finally {
+    await closeServer(server);
+    await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
 
@@ -221,8 +302,6 @@ test("workspace API edits files and completes a git workflow", { skip: !canSpawn
   try {
     const tree = await (await fetch(api + "/tree")).json();
     assert.deepEqual(tree.files, ["main.mbt"]);
-    await rm(join(workspaceRoot, ".env"));
-    await rm(join(workspaceRoot, ".moonsage"), { recursive: true });
 
     const opened = await (await fetch(api + "/file?path=main.mbt")).json();
     assert.match(opened.content, /println\(1\)/);
@@ -309,6 +388,26 @@ test("workspace API unstages files before the first commit", { skip: !canSpawnCh
   }
 });
 
+test("workspace path policy rejects traversal, ignored entries, and symlinks", { skip: process.platform === "win32" }, async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "moonsage-path-policy-"));
+  const outsideRoot = await mkdtemp(join(tmpdir(), "moonsage-path-outside-"));
+  try {
+    await writeFile(join(outsideRoot, "secret.txt"), "secret\n", "utf8");
+    await symlink(join(outsideRoot, "secret.txt"), join(workspaceRoot, "link.txt"));
+    assert.equal(workspaceRelativePath("../secret.txt"), null);
+    assert.equal(workspaceRelativePath(".git/config"), null);
+    assert.equal(workspaceRelativePath("_audit_ws_123/log.txt"), null);
+    assert.equal(workspaceRelativePath("src\\main.mbt"), "src/main.mbt");
+    await assert.rejects(
+      verifiedWorkspacePath(workspaceRoot, "link.txt"),
+      /Symbolic links are not supported/,
+    );
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
 test("static serving only exposes the frontend and built JS", () => {
   assert.equal(resolveRequestPath("/frontend/index.html"), join(import.meta.dirname, "index.html"));
   assert.equal(resolveRequestPath("/.env"), null);
@@ -319,6 +418,24 @@ test("static serving only exposes the frontend and built JS", () => {
     resolveRequestPath("/_build/js/release/build/frontend/frontend.js"),
     join(import.meta.dirname, "..", "_build", "js", "release", "build", "frontend", "frontend.js"),
   );
+});
+
+test("serves local SVG assets with the SVG content type", async () => {
+  const server = serve({ listenPort: 0 });
+  try {
+    await new Promise((resolve) => server.once("listening", resolve));
+    const { port } = server.address();
+    const response = await fetch(
+      `http://127.0.0.1:${port}/frontend/assets/icons/menu.svg`,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/svg+xml");
+    const icon = await response.text();
+    assert.match(icon, /@license lucide-static/);
+    assert.match(icon, /lucide-menu/);
+  } finally {
+    await closeServer(server);
+  }
 });
 
 test("accepts only loopback hosts and same-origin pages", () => {
@@ -465,6 +582,80 @@ test("workspace file API rejects non-UTF-8 files", async () => {
   } finally {
     await closeServer(server);
     await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("registers workspaces and persists task lifecycle events", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "moonsage-registered-workspace-"));
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-task-store-"));
+  await writeFile(join(workspaceRoot, "README.md"), "# task\n", "utf8");
+  let receivedContext;
+  const server = serve({
+    listenPort: 0,
+    workspaceRoot,
+    workspaceDataDirectory: dataRoot,
+    agentRunner: async (_messages, emit, _signal, context) => {
+      receivedContext = context;
+      emit({ type: "final_started" });
+      emit({ type: "final_delta", text: "已检查工作区" });
+      return { answer: "已检查工作区" };
+    },
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const registered = await fetch(base + "/api/workspaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: workspaceRoot }),
+    });
+    assert.equal(registered.status, 201);
+    const workspace = (await registered.json()).workspace;
+    assert.equal(workspace.name, workspaceRoot.split(/[\\/]/).at(-1));
+    assert.ok(workspace.id);
+
+    const listed = await (await fetch(base + "/api/workspaces")).json();
+    assert.equal(listed.workspaces[0].id, workspace.id);
+    const defaultTaskResponse = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspace.id, goal: "默认任务" }),
+    });
+    assert.equal(defaultTaskResponse.status, 201);
+    assert.equal((await defaultTaskResponse.json()).task.permission, "full-auto");
+    const taskResponse = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspace_id: workspace.id,
+        goal: "检查 README",
+        permission: "read-only",
+      }),
+    });
+    assert.equal(taskResponse.status, 201);
+    const task = (await taskResponse.json()).task;
+    assert.equal(task.status, "queued");
+
+    const run = await fetch(base + `/api/tasks/${task.id}/run`, { method: "POST" });
+    assert.equal(run.status, 200);
+    const events = (await run.text()).trim().split("\n").map(JSON.parse);
+    assert.ok(events.some((event) => event.type === "started"));
+    assert.ok(events.some((event) => event.type === "completed"));
+    assert.deepEqual(
+      events.filter((event) => event.type === "final_delta"),
+      [{ type: "final_delta", text: "已检查工作区" }],
+    );
+    assert.equal(receivedContext.workspaceRoot, workspaceRoot);
+    assert.equal(receivedContext.permission, "read-only");
+
+    const restored = await (await fetch(base + `/api/tasks/${task.id}`)).json();
+    assert.equal(restored.task.status, "completed");
+    assert.ok(restored.events.some((event) => event.type === "completed"));
+  } finally {
+    await closeServer(server);
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
   }
 });
 

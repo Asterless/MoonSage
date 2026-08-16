@@ -29,9 +29,104 @@ fn test_model(
     request,
     command_open: false,
     sidebar_open: true,
+    theme: "light",
+    compact: false,
+    workspace_overlay: false,
     workspace: initial_workspace(),
     next_id: 100,
   }
+}
+
+///|
+test "theme values normalize and toggle" {
+  assert_eq(normalize_theme(""), "light")
+  assert_eq(normalize_theme("system"), "light")
+  assert_eq(normalize_theme("dark"), "dark")
+  assert_eq(opposite_theme("light"), "dark")
+  assert_eq(opposite_theme("dark"), "light")
+}
+
+///|
+test "viewport changes only flip layout at the compact boundary" {
+  let desktop = test_model(
+    [{ id: "s", title: "S", detail: "", messages: [] }],
+    0,
+    Idle,
+  )
+  let compact = with_viewport_width(desktop, 760)
+  assert_true(compact.compact)
+  assert_true(compact.workspace_overlay)
+  assert_false(compact.sidebar_open)
+  let still_compact = with_viewport_width(
+    { ..compact, sidebar_open: true },
+    600,
+  )
+  assert_true(still_compact.sidebar_open)
+  let back_desktop = with_viewport_width(still_compact, 761)
+  assert_false(back_desktop.compact)
+  assert_true(back_desktop.workspace_overlay)
+  assert_true(back_desktop.sidebar_open)
+  let wide_workspace = with_viewport_width(back_desktop, 1041)
+  assert_false(wide_workspace.workspace_overlay)
+  assert_true(wide_workspace.sidebar_open)
+}
+
+///|
+test "workspace files group by top-level directory and filter by full path" {
+  let groups = workspace_file_groups(
+    ["README.md", "src/main.mbt", "src/lib/util.mbt", "tests/main.mbt"],
+    "",
+  )
+  assert_eq(groups.length(), 3)
+  assert_eq(groups[0].label, "根目录")
+  assert_eq(groups[0].files[0].relative_path, "README.md")
+  assert_eq(groups[1].label, "src")
+  assert_eq(groups[1].files[1].relative_path, "lib/util.mbt")
+  let filtered = workspace_file_groups(
+    ["README.md", "src/main.mbt", "src/lib/util.mbt", "tests/main.mbt"],
+    "util",
+  )
+  assert_eq(filtered.length(), 1)
+  assert_eq(filtered[0].label, "src")
+  assert_eq(filtered[0].files[0].path, "src/lib/util.mbt")
+}
+
+///|
+#warnings("-alert_unstable")
+test "semantic views expose navigation and workspace states" {
+  let model = test_model(
+    [{ id: "s", title: "S", detail: "", messages: [] }],
+    0,
+    Idle,
+  )
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let session_html = @rabbita.render_to_string(fn() {
+    Val::constant(session_view(model, emit))
+  })
+  assert_true(session_html.contains("<aside"))
+  assert_true(session_html.contains("aria-label=\"会话列表\""))
+  assert_true(session_html.contains("aria-current=\"page\""))
+  assert_true(session_html.contains("aria-pressed=\"false\""))
+  let workspace = {
+    ..initial_workspace(),
+    open: true,
+    files: ["README.md", "src/main.mbt"],
+    selected_path: "src/main.mbt",
+  }
+  let workspace_html = @rabbita.render_to_string(fn() {
+    Val::constant(workspace_view(workspace, false, emit))
+  })
+  assert_true(workspace_html.contains("role=\"tab\""))
+  assert_true(workspace_html.contains("aria-selected=\"true\""))
+  assert_true(workspace_html.contains("aria-expanded=\"true\""))
+  assert_true(workspace_html.contains("aria-current=\"location\""))
+  assert_true(workspace_html.contains("根目录"))
+  assert_true(workspace_html.contains("src"))
+  let modal_html = @rabbita.render_to_string(fn() {
+    Val::constant(workspace_view(workspace, true, emit))
+  })
+  assert_true(modal_html.contains("role=\"dialog\""))
+  assert_true(modal_html.contains("aria-modal=\"true\""))
 }
 
 ///|
@@ -127,6 +222,12 @@ test "tool calls start running and finish with their result" {
 ///|
 test "Agent responses prefer canonical protocol events" {
   assert_eq(
+    decode_agent_event(
+      "{\"type\":\"started\",\"permission\":\"controlled-write\"}",
+    ),
+    Started("controlled-write"),
+  )
+  assert_eq(
     decode_agent_event("{\"type\":\"final_delta\",\"text\":\"真实回答\"}"),
     Delta("真实回答"),
   )
@@ -171,6 +272,15 @@ test "Agent responses prefer canonical protocol events" {
   assert_eq(
     decode_agent_event("{\"type\":\"meta\",\"history_truncated\":true}"),
     Meta(true),
+  )
+  assert_eq(
+    decode_agent_event("{\"type\":\"paused\",\"reason\":\"等待批准\"}"),
+    Paused("等待批准"),
+  )
+  assert_eq(decode_agent_event("{\"type\":\"completed\"}"), Completed)
+  assert_eq(
+    decode_agent_event("{\"type\":\"failed\",\"message\":\"写入被拒绝\"}"),
+    StreamError("写入被拒绝"),
   )
   assert_true(decode_agent_event("not json") is Ignored)
 }
@@ -358,6 +468,19 @@ test "Markdown renders tables, thematic breaks, and break types" {
 ///|
 test "workspace decodes files and git status" {
   assert_eq(
+    decode_workspace_registry(
+      "{\"workspaces\":[{\"id\":\"workspace-1\",\"name\":\"demo\"}]}",
+    ),
+    Some(("workspace-1", "demo")),
+  )
+  assert_eq(
+    decode_workspace_pick(
+      "{\"workspace\":{\"id\":\"workspace-2\",\"name\":\"local\"}}",
+    ),
+    Some(("workspace-2", "local")),
+  )
+  assert_true(workspace_pick_cancelled("{\"cancelled\":true}"))
+  assert_eq(
     decode_workspace_tree(
       "{\"root\":\"demo\",\"files\":[\"main.mbt\",\"src/lib.mbt\"]}",
     ),
@@ -383,6 +506,7 @@ test "workspace decodes files and git status" {
 test "workspace protects unsaved editor state from stale saves" {
   let workspace = {
     ..initial_workspace(),
+    id: "workspace-1",
     selected_path: "main.mbt",
     content: "newer",
     saved_content: "old",
@@ -391,7 +515,7 @@ test "workspace protects unsaved editor state from stale saves" {
   let emit : Emit[Msg] = Emit(_ => @rabbita.none)
   guard workspace_update(
       workspace,
-      WorkspaceFileSaved("main.mbt", "older request"),
+      WorkspaceFileSaved("workspace-1", "main.mbt", "older request"),
       emit,
     )
     is Some((updated, _)) else {
@@ -400,4 +524,27 @@ test "workspace protects unsaved editor state from stale saves" {
   assert_eq(updated.content, "newer")
   assert_eq(updated.saved_content, "old")
   assert_true(workspace_changed(updated))
+}
+
+///|
+test "workspace ignores file responses from a different workspace" {
+  let workspace = {
+    ..initial_workspace(),
+    id: "workspace-new",
+    selected_path: "README.md",
+    content: "new workspace",
+    saved_content: "new workspace",
+  }
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  guard workspace_update(
+      workspace,
+      WorkspaceFileReceived(
+        "workspace-old", "README.md", "{\"content\":\"old workspace\",\"line_endings\":\"lf\"}",
+      ),
+      emit,
+    )
+    is Some((updated, _)) else {
+    fail("expected workspace update")
+  }
+  assert_eq(updated, workspace)
 }

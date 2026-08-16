@@ -80,6 +80,42 @@ fn root_command() -> @argparse.Command {
         ],
       ),
       @argparse.Command(
+        "task",
+        about="Run a task against a local workspace.",
+        options=[
+          @argparse.OptionArg(
+            "workspace",
+            long="workspace",
+            about="Workspace directory the task is allowed to access.",
+          ),
+          @argparse.OptionArg("cwd", long="cwd", about="Alias for --workspace."),
+          @argparse.OptionArg(
+            "permission",
+            long="permission",
+            about="Permission policy: read-only, controlled-write, or full-auto.",
+          ),
+          @argparse.OptionArg(
+            "input-file",
+            long="input-file",
+            about="Read the task goal from a UTF-8 file.",
+          ),
+        ],
+        flags=[
+          @argparse.FlagArg(
+            "stream-json",
+            long="stream-json",
+            about="Write Agent lifecycle events as JSON Lines.",
+          ),
+        ],
+        positionals=[
+          @argparse.PositionArg(
+            "goal",
+            num_args=@argparse.ValueRange(lower=0),
+            about="Task goal.",
+          ),
+        ],
+      ),
+      @argparse.Command(
         "audit",
         about="Audit a remote Mooncakes package (optionally fix it).",
         options=[

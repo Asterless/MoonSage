@@ -87,6 +87,35 @@ let grep_max_matches_default = 200
 let grep_max_line_chars = 200
 
 ///|
+// Keep local agent file access aligned with the dev server workspace policy.
+// Directory names are matched case-insensitively because workspace paths may
+// come from a case-insensitive filesystem.
+fn is_ignored_project_entry(name : String) -> Bool {
+  let normalized = name.to_lower()
+  normalized == ".git" ||
+  normalized == ".mooncakes" ||
+  normalized == ".moonsage" ||
+  normalized == ".cache" ||
+  normalized == "_build" ||
+  normalized == "_build.bak" ||
+  normalized == "node_modules" ||
+  normalized == "target" ||
+  normalized.has_prefix("_audit_ws_")
+}
+
+///|
+fn is_ignored_project_path(path : String) -> Bool {
+  let segments = path.replace(old="\\", new="/").split("/")
+  for segment_view in segments {
+    let segment = segment_view.to_owned()
+    if is_ignored_project_entry(segment) || segment.to_lower() == ".env" {
+      return true
+    }
+  }
+  false
+}
+
+///|
 async fn collect_project_files(
   dir : String,
   root : String,
@@ -98,10 +127,7 @@ async fn collect_project_files(
     if out.length() >= max {
       return
     }
-    if entry == "_build" ||
-      entry == ".git" ||
-      entry == ".mooncakes" ||
-      entry == "target" {
+    if is_ignored_project_entry(entry) || entry.to_lower() == ".env" {
       continue
     }
     let path = dir + "/" + entry
@@ -148,6 +174,9 @@ async fn list_project_files_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
   let sub = @util.json_string_arg(document, "path")
   let pattern = @util.json_string_arg(document, "pattern")
+  guard sub == "" || !is_ignored_project_path(sub) else {
+    fail("path is ignored: \{sub}")
+  }
   let dir = if sub == "" { root } else { @util.safe_path(root, sub) }
   let files : Array[String] = []
   collect_project_files(dir, root, files, collect_files_hard_cap)
@@ -178,6 +207,9 @@ async fn grep_files_tool(root : String, arguments : String) -> String {
     grep_max_matches_default,
   )
   guard pattern != "" else { fail("pattern is required") }
+  guard sub == "" || !is_ignored_project_path(sub) else {
+    fail("path is ignored: \{sub}")
+  }
   let dir = if sub == "" { root } else { @util.safe_path(root, sub) }
   let needle = pattern.to_lower()
   let files : Array[String] = []
@@ -221,6 +253,7 @@ async fn grep_files_tool(root : String, arguments : String) -> String {
 async fn read_file_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
   let rel = @util.json_string_arg(document, "path")
+  guard !is_ignored_project_path(rel) else { fail("path is ignored: \{rel}") }
   let path = @util.safe_path(root, rel)
   let start = @util.json_string_arg(document, "start")
   let end = @util.json_string_arg(document, "end")
@@ -337,6 +370,9 @@ async fn git_diff_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments) catch { _ => Json::object({}) }
   let path = @util.json_string_arg(document, "path")
   let limited = if path != "" {
+    guard !is_ignored_project_path(path) else {
+      fail("path is ignored: \{path}")
+    }
     ignore(@util.safe_path(root, path))
     Some(path)
   } else {

@@ -1,11 +1,12 @@
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, existsSync, stat } from "node:fs";
-import { lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
 
 const root = normalize(join(import.meta.dirname, ".."));
 const releaseAgentBin = join(
@@ -25,7 +26,16 @@ const maxWorkspaceRequestBytes = 2 * 1024 * 1024;
 const maxWorkspaceFileBytes = 1024 * 1024;
 const maxWorkspaceFiles = 5000;
 const execFileAsync = promisify(execFile);
-const ignoredWorkspaceDirectories = new Set([".git", ".mooncakes", ".moonsage", "_build", "node_modules", "target"]);
+const ignoredWorkspaceDirectories = new Set([
+  ".git",
+  ".mooncakes",
+  ".moonsage",
+  ".cache",
+  "_build",
+  "_build.bak",
+  "node_modules",
+  "target",
+]);
 const ignoredWorkspaceFiles = new Set([".env"]);
 const types = {
   ".css": "text/css; charset=utf-8",
@@ -36,6 +46,228 @@ const types = {
   ".json": "application/json; charset=utf-8",
 };
 const maxToolResultBytes = 4096;
+const dataRoot = normalize(
+  process.env.MOONSAGE_DATA_DIR ||
+    (process.platform === "win32"
+      ? join(process.env.LOCALAPPDATA || process.env.APPDATA || homedir(), "MoonSage")
+      : process.platform === "darwin"
+        ? join(homedir(), "Library", "Application Support", "MoonSage")
+        : join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "moonsage")),
+);
+let activeDataRoot = dataRoot;
+function workspaceRegistryPath() { return join(activeDataRoot, "workspaces.json"); }
+function taskStorePath() { return join(activeDataRoot, "tasks"); }
+const workspaceIdPattern = /^[a-z0-9-]{8,80}$/;
+const taskIdPattern = /^[a-z0-9-]{8,80}$/;
+const runningWriteTasks = new Map();
+
+function isIgnoredWorkspaceDirectory(name) {
+  const normalized = name.toLowerCase();
+  return ignoredWorkspaceDirectories.has(normalized) || normalized.startsWith("_audit_ws_");
+}
+
+function isIgnoredWorkspacePath(requestedPath) {
+  const segments = requestedPath.replaceAll("\\", "/").split("/").filter(Boolean);
+  const filename = segments.at(-1)?.toLowerCase() ?? "";
+  return segments.some(isIgnoredWorkspaceDirectory) || ignoredWorkspaceFiles.has(filename);
+}
+
+function emptyWorkspaceRegistry() {
+  return { version: 1, workspaces: [] };
+}
+
+async function readWorkspaceRegistry() {
+  try {
+    const source = await readFile(workspaceRegistryPath(), "utf8");
+    const document = JSON.parse(source);
+    if (!document || document.version !== 1 || !Array.isArray(document.workspaces)) {
+      return emptyWorkspaceRegistry();
+    }
+    const workspaces = document.workspaces.filter((workspace) => (
+      workspace && workspace.id && workspace.root && workspace.name
+    ));
+    workspaces.sort((a, b) => String(b.last_used_at || "").localeCompare(String(a.last_used_at || "")));
+    return {
+      version: 1,
+      workspaces,
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") return emptyWorkspaceRegistry();
+    throw error;
+  }
+}
+
+let workspaceRegistryWrite = Promise.resolve();
+async function writeWorkspaceRegistry(document) {
+  const next = workspaceRegistryWrite.catch(() => {}).then(async () => {
+    await mkdir(activeDataRoot, { recursive: true });
+    const target = workspaceRegistryPath();
+    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(document, null, 2) + "\n", "utf8");
+    try {
+      await rename(temporary, target);
+    } finally {
+      try {
+        await rm(temporary, { force: true });
+      } catch { /* the rename already removed it */ }
+    }
+  });
+  workspaceRegistryWrite = next.catch(() => {});
+  return next;
+}
+
+function publicWorkspace(workspace) {
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    path: workspace.root,
+    created_at: workspace.created_at,
+    last_used_at: workspace.last_used_at,
+  };
+}
+
+async function resolveRegisteredWorkspace(id, registry) {
+  if (typeof id !== "string" || !workspaceIdPattern.test(id)) {
+    throw new Error("Invalid workspace id.");
+  }
+  let record = registry ? await registry.get(id) : null;
+  if (!registry) {
+    const stored = await readWorkspaceRegistry();
+    const workspace = stored.workspaces.find((entry) => entry.id === id);
+    if (workspace) record = { ...publicWorkspace(workspace) };
+  }
+  if (!record) {
+    const error = new Error("Workspace is not registered.");
+    error.status = 404;
+    throw error;
+  }
+  const canonical = await verifiedWorkspaceRoot(record.path || record.root);
+  return { ...record, root: canonical };
+}
+
+async function registerWorkspace(requestedPath) {
+  if (typeof requestedPath !== "string" || !requestedPath.trim()) {
+    throw new Error("Workspace path is required.");
+  }
+  const canonical = await realpath(resolve(requestedPath));
+  const entry = await lstat(canonical);
+  if (!entry.isDirectory()) throw new Error("Workspace path must be a directory.");
+  if (isIgnoredWorkspacePath(basename(canonical))) {
+    throw new Error("Generated and hidden directories cannot be workspaces.");
+  }
+  const registry = await readWorkspaceRegistry();
+  const existing = registry.workspaces.find((workspace) => workspace.root === canonical);
+  if (existing) {
+    existing.last_used_at = new Date().toISOString();
+    await writeWorkspaceRegistry(registry);
+    return existing;
+  }
+  const now = new Date().toISOString();
+  const workspace = {
+    id: randomUUID(),
+    name: basename(canonical) || canonical,
+    root: canonical,
+    created_at: now,
+    last_used_at: now,
+  };
+  registry.workspaces.push(workspace);
+  await writeWorkspaceRegistry(registry);
+  return workspace;
+}
+
+async function removeRegisteredWorkspace(id) {
+  const registry = await readWorkspaceRegistry();
+  const index = registry.workspaces.findIndex((workspace) => workspace.id === id);
+  if (index < 0) {
+    const error = new Error("Workspace is not registered.");
+    error.status = 404;
+    throw error;
+  }
+  const [removed] = registry.workspaces.splice(index, 1);
+  await writeWorkspaceRegistry(registry);
+  return removed;
+}
+
+async function pickWorkspaceDirectory() {
+  if (process.platform === "win32") {
+    const script = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; if($d.ShowDialog() -eq 'OK'){ $d.SelectedPath }";
+    const result = await execFileAsync("powershell", ["-NoProfile", "-STA", "-NonInteractive", "-Command", script], {
+      timeout: 120_000,
+      windowsHide: true,
+      maxBuffer: 16 * 1024,
+      encoding: "utf8",
+    });
+    return result.stdout.trim();
+  }
+  if (process.platform === "darwin") {
+    const result = await execFileAsync("osascript", ["-e", "POSIX path of (choose folder with prompt \"Choose a MoonSage workspace\")"], {
+      timeout: 120_000,
+      maxBuffer: 16 * 1024,
+      encoding: "utf8",
+    });
+    return result.stdout.trim();
+  }
+  const result = await execFileAsync("zenity", ["--file-selection", "--directory", "--title=Choose a MoonSage workspace"], {
+    timeout: 120_000,
+    maxBuffer: 16 * 1024,
+    encoding: "utf8",
+  });
+  return result.stdout.trim();
+}
+
+function taskPaths(id) {
+  const directory = taskStorePath();
+  return {
+    meta: join(directory, `${id}.json`),
+    events: join(directory, `${id}.jsonl`),
+  };
+}
+
+async function readTask(id) {
+  if (typeof id !== "string" || !taskIdPattern.test(id)) {
+    throw new Error("Invalid task id.");
+  }
+  try {
+    return JSON.parse(await readFile(taskPaths(id).meta, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      const missing = new Error("Task is not found.");
+      missing.status = 404;
+      throw missing;
+    }
+    throw error;
+  }
+}
+
+async function writeTask(task) {
+  await mkdir(taskStorePath(), { recursive: true });
+  await writeFile(taskPaths(task.id).meta, JSON.stringify(task, null, 2) + "\n", "utf8");
+  return task;
+}
+
+async function appendTaskEvent(task, event) {
+  await mkdir(taskStorePath(), { recursive: true });
+  const record = { ...event, task_id: task.id, timestamp: new Date().toISOString() };
+  await appendFile(taskPaths(task.id).events, JSON.stringify(record) + "\n", "utf8");
+  if (event.type === "started") task.status = "running";
+  if (event.type === "paused") task.status = "paused";
+  if (event.type === "completed") task.status = "completed";
+  if (event.type === "failed") task.status = "failed";
+  if (event.type === "cancelled") task.status = "cancelled";
+  task.updated_at = record.timestamp;
+  await writeTask(task);
+  return record;
+}
+
+async function readTaskEvents(id) {
+  try {
+    const source = await readFile(taskPaths(id).events, "utf8");
+    return source.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
 
 export function resolveRequestPath(pathname) {
   let decoded;
@@ -172,20 +404,55 @@ function validateAgentRequest(document) {
     }
     total += message.text.length;
   }
+  if (document.workspace_id !== undefined &&
+    (typeof document.workspace_id !== "string" || !workspaceIdPattern.test(document.workspace_id))) {
+    return "workspace_id 无效。";
+  }
   return total <= 100_000 ? null : "会话内容过长，请新建会话后重试。";
 }
 
-async function runAgent(messages, emitEvent, signal) {
+function buildWorkspaceAgentPrompt(messages, context) {
+  const latest = messages.at(-1)?.text ?? "";
+  const instructions = context.permission === "read-only"
+    ? "You may inspect the workspace but must not modify files."
+    : "Work directly in the workspace using the available file tools. Explain planned changes before writing files.";
+  return [
+    "You are MoonSage operating as a workspace task agent.",
+    `Workspace: ${context.workspaceRoot}`,
+    `Task id: ${context.taskId || "ad-hoc"}`,
+    `Permission: ${context.permission || "full-auto"}`,
+    instructions,
+    "Use relative paths in tool calls. Do not treat the chat transcript as the project; inspect the workspace when needed.",
+    "",
+    "TASK GOAL:",
+    latest,
+  ].join("\n");
+}
+
+async function runAgent(messages, emitEvent, signal, context = {}) {
   const configuredBin = process.env.MOONSAGE_AGENT_BIN;
   const builtBin = !configuredBin && existsSync(releaseAgentBin) ? releaseAgentBin : null;
   const executable = configuredBin || builtBin || "moon";
-  const prompt = buildAgentPrompt(messages);
+  const prompt = context.workspaceRoot
+    ? buildWorkspaceAgentPrompt(messages, context)
+    : buildAgentPrompt(messages);
   const tempRoot = await mkdtemp(join(tmpdir(), "moonsage-agent-"));
   const inputFile = join(tempRoot, "prompt.txt");
   await writeFile(inputFile, prompt, "utf8");
+  const taskArgs = [
+    "task",
+    "--stream-json",
+    "--workspace",
+    context.workspaceRoot,
+    "--input-file",
+    inputFile,
+    "--permission",
+    context.permission || "full-auto",
+  ];
+  const askArgs = ["ask", "--stream-json", "--input-file", inputFile];
   const args = configuredBin || builtBin
-    ? ["ask", "--stream-json", "--input-file", inputFile]
-    : ["run", "cmd/main", "--", "ask", "--stream-json", "--input-file", inputFile];
+    ? (context.workspaceRoot ? taskArgs : askArgs)
+    : ["run", "cmd/main", "--", ...(context.workspaceRoot ? taskArgs : askArgs)];
   try {
     return await new Promise((resolveResult) => {
       const child = spawn(executable, args, {
@@ -357,28 +624,103 @@ export function resolveWorkspacePath(workspaceRoot, requestedPath) {
   if (typeof requestedPath !== "string" || requestedPath.includes("\0")) return null;
   const normalizedPath = requestedPath.replaceAll("\\", "/");
   if (normalizedPath === "" || normalizedPath.startsWith("/") || isAbsolute(normalizedPath)) return null;
-  const segments = normalizedPath.split("/");
-  if (segments.some((segment) => ignoredWorkspaceDirectories.has(segment))) return null;
-  if (ignoredWorkspaceFiles.has(segments.at(-1))) return null;
+  if (isIgnoredWorkspacePath(normalizedPath)) return null;
   const path = resolve(workspaceRoot, normalizedPath);
   const rel = relative(workspaceRoot, path);
   if (rel === "" || rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) return null;
   return path;
 }
 
-async function verifiedWorkspaceFile(workspaceRoot, requestedPath) {
-  const path = resolveWorkspacePath(workspaceRoot, requestedPath);
-  if (!path) throw new Error("File path is outside the workspace.");
-  const entry = await lstat(path);
-  if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("Only regular workspace files are supported.");
-  const canonicalRoot = await realpath(workspaceRoot);
-  const canonicalPath = await realpath(path);
-  const rel = relative(canonicalRoot, canonicalPath);
+export function workspaceRelativePath(requestedPath) {
+  if (typeof requestedPath !== "string" || requestedPath.includes("\0")) return null;
+  const normalizedPath = requestedPath.replaceAll("\\", "/");
+  if (
+    normalizedPath === "" ||
+    normalizedPath.startsWith("/") ||
+    isAbsolute(normalizedPath) ||
+    isIgnoredWorkspacePath(normalizedPath)
+  ) return null;
+  const segments = normalizedPath.split("/");
+  if (segments.some((segment) => segment === "..")) return null;
+  const cleaned = segments.filter((segment) => segment && segment !== ".").join("/");
+  return cleaned || null;
+}
+
+function assertCanonicalWithin(rootPath, targetPath) {
+  const rel = relative(rootPath, targetPath);
   if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
     throw new Error("File path is outside the workspace.");
   }
-  if (entry.size > maxWorkspaceFileBytes) throw new Error("Files larger than 1 MB cannot be edited here.");
-  return { path, size: entry.size };
+  const normalized = rel.split(sep).join("/");
+  if (!normalized || isIgnoredWorkspacePath(normalized)) {
+    throw new Error("File path is outside the workspace.");
+  }
+  return normalized;
+}
+
+/** Resolve and verify an existing workspace entry against its real path. */
+export async function verifiedWorkspacePath(
+  workspaceRoot,
+  requestedPath,
+  { kind = "file", maxBytes = maxWorkspaceFileBytes } = {},
+) {
+  const path = resolveWorkspacePath(workspaceRoot, requestedPath);
+  if (!path) throw new Error("File path is outside the workspace.");
+  const entry = await lstat(path);
+  if (entry.isSymbolicLink()) throw new Error("Symbolic links are not supported in the workspace.");
+  if (kind === "file" && !entry.isFile()) throw new Error("Only regular workspace files are supported.");
+  if (kind === "directory" && !entry.isDirectory()) throw new Error("Workspace path must be a directory.");
+  const canonicalRoot = await realpath(workspaceRoot);
+  const canonicalPath = await realpath(path);
+  const relativePath = assertCanonicalWithin(canonicalRoot, canonicalPath);
+  if (kind === "file" && entry.size > maxBytes) {
+    throw new Error("Files larger than 1 MB cannot be edited here.");
+  }
+  return { path, size: entry.size, relativePath };
+}
+
+async function verifyWorkspaceParents(workspaceRoot, normalizedPath) {
+  let current = workspaceRoot;
+  const segments = normalizedPath.split("/");
+  for (const segment of segments.slice(0, -1)) {
+    current = join(current, segment);
+    try {
+      const entry = await lstat(current);
+      if (entry.isSymbolicLink()) {
+        throw new Error("Symbolic links are not supported in the workspace.");
+      }
+      if (!entry.isDirectory()) {
+        throw new Error("Workspace path must be a directory.");
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
+/** Verify a Git path while allowing deleted paths to remain stageable. */
+async function verifiedGitPath(workspaceRoot, requestedPath) {
+  const normalized = workspaceRelativePath(requestedPath);
+  if (!normalized) throw new Error("File path is outside the workspace.");
+  await verifyWorkspaceParents(workspaceRoot, normalized);
+  try {
+    const entry = await lstat(resolve(workspaceRoot, normalized));
+    if (entry.isSymbolicLink()) throw new Error("Symbolic links are not supported in the workspace.");
+    await verifiedWorkspacePath(workspaceRoot, normalized, {
+      kind: entry.isDirectory() ? "directory" : "file",
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    // A deleted tracked file has no realpath to verify, but its lexical path
+    // is still bounded by the workspace and can safely be passed to Git.
+  }
+  return normalized;
+}
+
+async function verifiedWorkspaceFile(workspaceRoot, requestedPath) {
+  return verifiedWorkspacePath(workspaceRoot, requestedPath);
 }
 
 async function collectWorkspaceFiles(workspaceRoot) {
@@ -388,10 +730,11 @@ async function collectWorkspaceFiles(workspaceRoot) {
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (files.length >= maxWorkspaceFiles) return;
-      if (entry.isSymbolicLink() || ignoredWorkspaceDirectories.has(entry.name) || ignoredWorkspaceFiles.has(entry.name)) continue;
       const path = join(directory, entry.name);
+      const requestedPath = relative(workspaceRoot, path).split(sep).join("/");
+      if (entry.isSymbolicLink() || isIgnoredWorkspacePath(requestedPath)) continue;
       if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile()) files.push(relative(workspaceRoot, path).split(sep).join("/"));
+      else if (entry.isFile()) files.push(requestedPath);
     }
   }
   await visit(workspaceRoot);
@@ -463,15 +806,24 @@ async function workspaceStatus(workspaceRoot) {
     runGit(workspaceRoot, ["branch", "--show-current"]),
     runGit(workspaceRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
   ]);
-  return { branch: branch.trim() || "detached HEAD", changes: parseGitStatus(porcelain) };
+  const changes = parseGitStatus(porcelain).filter((change) => !isIgnoredWorkspacePath(change.path));
+  return { branch: branch.trim() || "detached HEAD", changes };
 }
 
 function queryPath(requestUrl, name) {
   return new URL(requestUrl, "http://localhost").searchParams.get(name) ?? "";
 }
 
+async function verifiedWorkspaceRoot(workspaceRoot) {
+  const candidate = resolve(workspaceRoot);
+  const entry = await lstat(candidate);
+  if (!entry.isDirectory()) throw new Error("Workspace path must be a directory.");
+  return realpath(candidate);
+}
+
 async function serveWorkspace(request, response, pathname, workspaceRoot) {
   try {
+    workspaceRoot = await verifiedWorkspaceRoot(workspaceRoot);
     if (
       (request.method === "POST" || request.method === "PUT") &&
       !requireJsonContentType(request)
@@ -521,30 +873,32 @@ async function serveWorkspace(request, response, pathname, workspaceRoot) {
       const scope = queryPath(request.url, "scope");
       if (!['working', 'staged'].includes(scope)) throw new Error("Invalid diff scope.");
       const requestedPath = queryPath(request.url, "path");
-      if (requestedPath && !resolveWorkspacePath(workspaceRoot, requestedPath)) {
-        throw new Error("File path is outside the workspace.");
-      }
-      const diff = await workspaceDiff(workspaceRoot, scope, requestedPath);
-      sendJson(response, 200, { scope, path: requestedPath, diff });
+      const safePath = requestedPath ? await verifiedGitPath(workspaceRoot, requestedPath) : "";
+      const diff = await workspaceDiff(workspaceRoot, scope, safePath);
+      sendJson(response, 200, { scope, path: safePath, diff });
       return;
     }
     if (pathname === "/api/workspace/git/stage" && request.method === "POST") {
       const document = await readJsonBody(request);
       const paths = Array.isArray(document?.paths) ? document.paths : [];
-      if (paths.length === 0 || paths.some((path) => !resolveWorkspacePath(workspaceRoot, path))) {
+      if (paths.length === 0) {
         throw new Error("Select valid workspace files.");
       }
-      await runGit(workspaceRoot, ["add", "--", ...paths]);
+      const safePaths = [];
+      for (const path of paths) safePaths.push(await verifiedGitPath(workspaceRoot, path));
+      await runGit(workspaceRoot, ["add", "--", ...safePaths]);
       sendJson(response, 200, await workspaceStatus(workspaceRoot));
       return;
     }
     if (pathname === "/api/workspace/git/unstage" && request.method === "POST") {
       const document = await readJsonBody(request);
       const paths = Array.isArray(document?.paths) ? document.paths : [];
-      if (paths.length === 0 || paths.some((path) => !resolveWorkspacePath(workspaceRoot, path))) {
+      if (paths.length === 0) {
         throw new Error("Select valid workspace files.");
       }
-      await runGit(workspaceRoot, ["reset", "--", ...paths]);
+      const safePaths = [];
+      for (const path of paths) safePaths.push(await verifiedGitPath(workspaceRoot, path));
+      await runGit(workspaceRoot, ["reset", "--", ...safePaths]);
       sendJson(response, 200, await workspaceStatus(workspaceRoot));
       return;
     }
@@ -579,7 +933,7 @@ function sendEvent(response, event) {
   if (!response.writableEnded && !response.destroyed) response.write(`${JSON.stringify(event)}\n`);
 }
 
-async function serveAgent(request, response, agentRunner) {
+async function serveAgent(request, response, agentRunner, registry, defaultWorkspaceRoot = "") {
   if (request.method !== "POST") {
     sendJson(response, 405, { error: "仅支持 POST 请求。" });
     return;
@@ -595,6 +949,22 @@ async function serveAgent(request, response, agentRunner) {
       sendJson(response, 200, { error: invalid });
       return;
     }
+    let workspace = document.workspace_id
+      ? await resolveRegisteredWorkspace(document.workspace_id, registry)
+      : null;
+    if (!workspace && defaultWorkspaceRoot) {
+      const registered = await registerWorkspace(defaultWorkspaceRoot);
+      workspace = await resolveRegisteredWorkspace(registered.id, registry);
+    }
+    const context = workspace
+      ? {
+          workspaceId: workspace.id,
+          workspaceRoot: workspace.root,
+          permission: ["read-only", "controlled-write", "full-auto"].includes(document.permission)
+            ? document.permission
+            : "full-auto",
+        }
+      : {};
     beginEventStream(response);
     sendEvent(response, metaForConversation(document.messages));
     sendEvent(response, { type: "status", message: "正在启动 Agent" });
@@ -610,7 +980,7 @@ async function serveAgent(request, response, agentRunner) {
       if (event.type === "final_delta") streamedAnswer = true;
       if (event.type === "error") streamedError = true;
       sendEvent(response, event);
-    }, controller.signal);
+    }, controller.signal, context);
     if (!response.destroyed) {
       if (result?.answer && !streamedAnswer) {
         if (!finalStarted) sendEvent(response, { type: "final_started" });
@@ -633,7 +1003,219 @@ async function serveAgent(request, response, agentRunner) {
   }
 }
 
-export function serve({ listenPort = port, agentRunner = runAgent, workspaceRoot = root } = {}) {
+async function serveWorkspaceRegistry(request, response, pathname) {
+  try {
+    if (pathname === "/api/workspaces" && request.method === "GET") {
+      const registry = await readWorkspaceRegistry();
+      sendJson(response, 200, { workspaces: registry.workspaces.map(publicWorkspace) });
+      return true;
+    }
+    if (pathname === "/api/workspaces" && request.method === "POST") {
+      if (!requireJsonContentType(request)) {
+        sendJson(response, 415, { error: "写操作需要 application/json 请求。" });
+        return true;
+      }
+      const document = await readJsonBody(request);
+      const workspace = await registerWorkspace(document?.path);
+      sendJson(response, 201, { workspace: publicWorkspace(workspace) });
+      return true;
+    }
+    if (pathname === "/api/workspaces/pick" && request.method === "POST") {
+      const selected = await pickWorkspaceDirectory();
+      if (!selected) {
+        sendJson(response, 200, { cancelled: true });
+        return true;
+      }
+      const workspace = await registerWorkspace(selected);
+      sendJson(response, 201, { workspace: publicWorkspace(workspace) });
+      return true;
+    }
+    const match = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+    if (match && request.method === "DELETE") {
+      const id = decodeURIComponent(match[1]);
+      const workspace = await removeRegisteredWorkspace(id);
+      sendJson(response, 200, { removed: publicWorkspace(workspace) });
+      return true;
+    }
+    const workspaceRoute = pathname.match(/^\/api\/workspaces\/([^/]+)(\/.*)$/);
+    if (workspaceRoute) {
+      const workspace = await resolveRegisteredWorkspace(decodeURIComponent(workspaceRoute[1]));
+      const delegated = `/api/workspace${workspaceRoute[2]}`;
+      await serveWorkspace(request, response, delegated, workspace.root);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    const status = error?.status === 404 ? 404 : error?.code === "ENOENT" ? 404 : 400;
+    sendJson(response, status, { error: error.message });
+    return true;
+  }
+}
+
+function taskMessages(task) {
+  return [{ role: "user", text: task.goal }];
+}
+
+async function runTask(task, emitEvent, signal, agentRunner) {
+  const workspace = await resolveRegisteredWorkspace(task.workspace_id);
+  const isWriter = task.permission !== "read-only";
+  if (isWriter && runningWriteTasks.has(workspace.id)) {
+    const error = new Error("该工作区已有写任务正在运行。请等待它完成后再试。");
+    error.status = 409;
+    throw error;
+  }
+  if (isWriter) runningWriteTasks.set(workspace.id, task.id);
+  let log = Promise.resolve();
+  let streamedAnswer = false;
+  const record = (event) => {
+    if (event.type === "final_delta") streamedAnswer = true;
+    log = log.then(() => appendTaskEvent(task, event));
+    emitEvent(event);
+  };
+  try {
+    record({ type: "started", permission: task.permission });
+    const result = await agentRunner(
+      taskMessages(task),
+      record,
+      signal,
+      {
+        taskId: task.id,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.root,
+        permission: task.permission,
+      },
+    );
+    if (result?.answer && !streamedAnswer) {
+      record({ type: "final_started" });
+      record({ type: "final_delta", text: result.answer });
+    }
+    if (result?.error) {
+      record({ type: "failed", message: result.error });
+      return result;
+    }
+    record({ type: "completed" });
+    return result || {};
+  } catch (error) {
+    record({ type: "failed", message: error.message });
+    throw error;
+  } finally {
+    await log;
+    if (isWriter && runningWriteTasks.get(workspace.id) === task.id) {
+      runningWriteTasks.delete(workspace.id);
+    }
+  }
+}
+
+async function serveTaskRun(request, response, taskId, agentRunner) {
+  try {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "仅支持 POST 请求。" });
+      return;
+    }
+    const task = await readTask(taskId);
+    if (task.status === "running") {
+      sendJson(response, 409, { error: "任务已经在运行。" });
+      return;
+    }
+    beginEventStream(response);
+    const controller = new AbortController();
+    response.on("close", () => {
+      if (!response.writableEnded) controller.abort();
+    });
+    let streamedAnswer = false;
+    const result = await runTask(task, (event) => {
+      if (event.type === "final_delta") streamedAnswer = true;
+      sendEvent(response, event);
+    }, controller.signal, agentRunner);
+    if (result?.answer && !streamedAnswer) sendEvent(response, { type: "final_delta", text: result.answer });
+    if (!result?.error) sendEvent(response, { type: "done" });
+    try { response.end(); } catch { /* client already gone */ }
+  } catch (error) {
+    if (response.headersSent) {
+      sendEvent(response, { type: "error", message: error.message });
+      try { response.end(); } catch { /* client already gone */ }
+    } else {
+      sendJson(response, error?.status === 409 ? 409 : error?.status === 404 ? 404 : 400, { error: error.message });
+    }
+  }
+}
+
+async function serveTasks(request, response, pathname, agentRunner) {
+  try {
+    if (pathname === "/api/tasks" && request.method === "GET") {
+      const workspaceId = queryPath(request.url, "workspace_id");
+      const tasks = [];
+      try {
+        const entries = await readdir(taskStorePath(), { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+          try {
+            const task = JSON.parse(await readFile(join(taskStorePath(), entry.name), "utf8"));
+            if (!workspaceId || task.workspace_id === workspaceId) tasks.push(task);
+          } catch { /* ignore a partially written task */ }
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      tasks.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+      sendJson(response, 200, { tasks });
+      return true;
+    }
+    if (pathname === "/api/tasks" && request.method === "POST") {
+      if (!requireJsonContentType(request)) {
+        sendJson(response, 415, { error: "写操作需要 application/json 请求。" });
+        return true;
+      }
+      const document = await readJsonBody(request);
+      if (typeof document?.workspace_id !== "string" || typeof document?.goal !== "string") {
+        throw new Error("workspace_id and goal are required.");
+      }
+      const workspace = await resolveRegisteredWorkspace(document.workspace_id);
+      const goal = document.goal.trim();
+      if (!goal || goal.length > 100_000) throw new Error("Task goal must be between 1 and 100000 characters.");
+      const permission = ["read-only", "controlled-write", "full-auto"].includes(document.permission)
+        ? document.permission
+        : "full-auto";
+      const now = new Date().toISOString();
+      const task = {
+        id: randomUUID(),
+        workspace_id: workspace.id,
+        goal,
+        permission,
+        status: "queued",
+        created_at: now,
+        updated_at: now,
+      };
+      await writeTask(task);
+      await appendTaskEvent(task, { type: "created", goal, permission });
+      sendJson(response, 201, { task });
+      return true;
+    }
+    const detail = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+    if (detail && request.method === "GET") {
+      const task = await readTask(decodeURIComponent(detail[1]));
+      sendJson(response, 200, { task, events: await readTaskEvents(task.id) });
+      return true;
+    }
+    const run = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
+    if (run) {
+      await serveTaskRun(request, response, decodeURIComponent(run[1]), agentRunner);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    sendJson(response, error?.status === 404 ? 404 : error?.status === 409 ? 409 : 400, { error: error.message });
+    return true;
+  }
+}
+
+export function serve({
+  listenPort = port,
+  agentRunner = runAgent,
+  workspaceRoot = root,
+  workspaceDataDirectory,
+} = {}) {
+  if (workspaceDataDirectory) activeDataRoot = normalize(resolve(workspaceDataDirectory));
   let server;
   server = createServer((request, response) => {
     const address = server.address();
@@ -645,6 +1227,14 @@ export function serve({ listenPort = port, agentRunner = runAgent, workspaceRoot
     const pathname = new URL(request.url, "http://localhost").pathname;
     if (pathname === "/api/agent") {
       void serveAgent(request, response, agentRunner);
+      return;
+    }
+    if (pathname === "/api/workspaces" || pathname.startsWith("/api/workspaces/")) {
+      void serveWorkspaceRegistry(request, response, pathname);
+      return;
+    }
+    if (pathname === "/api/tasks" || pathname.startsWith("/api/tasks/")) {
+      void serveTasks(request, response, pathname, agentRunner);
       return;
     }
     if (pathname.startsWith("/api/workspace/")) {
@@ -675,6 +1265,9 @@ export function serve({ listenPort = port, agentRunner = runAgent, workspaceRoot
   server.listen(listenPort, "127.0.0.1", () => {
     const address = server.address();
     const activePort = typeof address === "object" && address ? address.port : listenPort;
+    if (normalize(resolve(workspaceRoot)) === root) {
+      void registerWorkspace(workspaceRoot).catch(() => {});
+    }
     console.log(`MoonSage frontend: http://127.0.0.1:${activePort}/frontend/`);
   });
   return server;

@@ -8,6 +8,7 @@ fn usage() -> String {
     #|  moonsage tui
     #|  moonsage search <keywords>
     #|  moonsage ask [--stream-json] <question>
+    #|  moonsage task [--workspace <dir>] [--permission read-only|controlled-write|full-auto] [--stream-json] <goal>
     #|  moonsage audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
     #|  moonsage audit --clean
     #|  moonsage --version
@@ -156,6 +157,118 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
 }
 
 ///|
+fn task_workspace(m : @argparse.Matches) -> String {
+  match values_of(m, "workspace") {
+    [path, ..] => path
+    _ =>
+      match values_of(m, "cwd") {
+        [path, ..] => path
+        _ => @env.current_dir().unwrap_or(".")
+      }
+  }
+}
+
+///|
+fn task_permission(m : @argparse.Matches) -> @agent.WorkspacePermission {
+  match values_of(m, "permission") {
+    [value, ..] => @agent.workspace_permission_from_string(value)
+    _ => @agent.WorkspacePermission::ControlledWrite
+  }
+}
+
+///|
+/// Workspace-first task runner. Unlike `ask`, this does not load Mooncakes
+/// research context or replay a conversation; the selected cwd is the agent's
+/// only project context and local tools operate against that directory.
+async fn run_task(m : @argparse.Matches) -> Unit {
+  let key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
+  let stream_json = flag_of(m, "stream-json")
+  guard key != "" else {
+    if stream_json {
+      write_json_event(Error("set MOONSAGE_API_KEY before using task"))
+    } else {
+      @stdio.stderr.write("error: set MOONSAGE_API_KEY before using task\n") catch {
+        _ => ()
+      }
+    }
+    return
+  }
+  let goal = match values_of(m, "input-file") {
+    [path, ..] => {
+      let bytes = @fs.read_file(path).binary()
+      @utf8.decode(bytes)
+    }
+    _ => join_values(m, "goal")
+  }
+  guard goal.trim() != "" else {
+    if stream_json {
+      write_json_event(Error("task goal is required"))
+    } else {
+      @stdio.stderr.write("error: task goal is required\n") catch {
+        _ => ()
+      }
+    }
+    return
+  }
+  let base_url = @sys.get_env_var("MOONSAGE_BASE_URL").unwrap_or(
+    "https://api.deepseek.com",
+  )
+  let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
+  let provider = @llm.provider_from_string(
+    @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
+  )
+  let cwd = task_workspace(m)
+  let project_instructions = @project.load_project_instructions(cwd)
+  let agent = @agent.workspace_agent(
+    cwd,
+    task_permission(m),
+    project_instructions,
+  )
+  let client = @llm_adapter.client(key, base_url, model, provider)
+  if stream_json {
+    ignore(
+      agent.execute(
+        client,
+        goal,
+        on_event=async fn(event) { write_json_event(event) },
+        context_window_tokens=32768,
+        reserved_output_tokens=1600,
+      ),
+    ) catch {
+      error => write_json_event(Error(error.to_string()))
+    }
+    return
+  }
+  @stdio.stdout.write("MoonSage task\n")
+  let printer = @md_ansi.MdStreamPrinter::new()
+  let answer = agent.execute(
+    client,
+    goal,
+    on_event=async fn(event) {
+      match event {
+        FinalDelta(text) => {
+          printer.feed(text)
+          let out = printer.take_output()
+          if out != "" {
+            @stdio.stdout.write(out)
+          }
+        }
+        _ => ()
+      }
+    },
+    context_window_tokens=32768,
+    reserved_output_tokens=1600,
+  )
+  printer.finish()
+  @stdio.stdout.write(printer.take_output())
+  @stdio.stdout.write("\n")
+  for event in answer.trace {
+    println(event)
+  }
+  let _ = answer.text
+}
+
+///|
 async fn ask_question(m : @argparse.Matches) -> String {
   match values_of(m, "input-file") {
     [path, ..] => {
@@ -257,6 +370,7 @@ async fn main {
     Some(("search", m)) => run_search(join_values(m, "keywords"))
     Some(("ask", m)) =>
       run_ask(ask_question(m), stream_json=flag_of(m, "stream-json"))
+    Some(("task", m)) => run_task(m)
     Some(("audit", m)) => @audit.run_audit(audit_args(m))
     _ => println(usage())
   }

@@ -81,6 +81,9 @@ struct Model {
   request : RequestState
   command_open : Bool
   sidebar_open : Bool
+  theme : String
+  compact : Bool
+  workspace_overlay : Bool
   workspace : WorkspaceModel
   next_id : Int
 } derive(Eq)
@@ -107,26 +110,32 @@ enum Msg {
   RunCommand(String)
   SelectSession(Int)
   ToggleSidebar
+  ToggleTheme
+  ViewportChanged(Int)
   NewSession
   ToggleWorkspace
+  WorkspacePick
+  WorkspacePicked(String)
   WorkspaceTabSelected(String)
-  WorkspaceTreeReceived(String)
+  WorkspaceRegistryReceived(String)
+  WorkspaceTreeReceived(String, String)
   WorkspaceFilterChanged(String)
+  WorkspaceToggleGroup(String)
   WorkspaceSelectFile(String)
-  WorkspaceFileReceived(String, String)
+  WorkspaceFileReceived(String, String, String)
   WorkspaceContentChanged(String)
   WorkspaceSaveFile
-  WorkspaceFileSaved(String, String)
-  WorkspaceStatusReceived(String)
+  WorkspaceFileSaved(String, String, String)
+  WorkspaceStatusReceived(String, String)
   WorkspaceDiffScopeChanged(String)
-  WorkspaceDiffReceived(String, String, String)
+  WorkspaceDiffReceived(String, String, String, String)
   WorkspaceRefresh
   WorkspaceStage(String)
   WorkspaceUnstage(String)
-  WorkspaceGitActionReceived(String, String)
+  WorkspaceGitActionReceived(String, String, String)
   WorkspaceCommitMessageChanged(String)
   WorkspaceCommit
-  WorkspaceCommitReceived(String)
+  WorkspaceCommitReceived(String, String)
   WorkspaceFailed(String)
 } derive(Eq)
 
@@ -145,7 +154,7 @@ fn welcome_messages() -> Array[Message] {
   [
     {
       role: "assistant",
-      text: "## 欢迎使用 MoonSage\n\n可以帮你搜索 Mooncakes、检查项目，或直接讨论代码。\n\n- 输入 `/` 查看命令\n- 支持中文与 Markdown\n- 会话会保存在本机浏览器中",
+      text: "## 欢迎使用 MoonSage\n\n以工作区任务为中心：先读取本地项目，再根据你的目标检查、修改和验证文件。\n\n- 对话只用于描述任务目标\n- 输入 `/` 查看命令\n- 支持中文与 Markdown",
     },
     {
       role: "assistant",
@@ -177,15 +186,53 @@ fn initial_model() -> Model {
   } else {
     0
   }
+  let width = @dom.window().inner_width()
+  let compact = is_compact_width(width)
+  let workspace_overlay = is_workspace_overlay_width(width)
+  let theme = load_theme()
+  apply_document_theme(theme)
   {
     draft: "",
     sessions,
     active_session: active,
     request: Idle,
     command_open: false,
-    sidebar_open: @dom.window().inner_width() > 720,
+    sidebar_open: !compact,
+    theme,
+    compact,
+    workspace_overlay,
     workspace: initial_workspace(),
     next_id,
+  }
+}
+
+///|
+fn is_compact_width(width : Int) -> Bool {
+  width <= 760
+}
+
+///|
+fn is_workspace_overlay_width(width : Int) -> Bool {
+  width <= 1040
+}
+
+///|
+fn with_viewport_width(model : Model, width : Int) -> Model {
+  let compact = is_compact_width(width)
+  let workspace_overlay = is_workspace_overlay_width(width)
+  if compact == model.compact && workspace_overlay == model.workspace_overlay {
+    model
+  } else {
+    {
+      ..model,
+      compact,
+      workspace_overlay,
+      sidebar_open: if compact == model.compact {
+        model.sidebar_open
+      } else {
+        !compact
+      },
+    }
   }
 }
 
@@ -403,7 +450,13 @@ fn update_conversation(
             (
               ready,
               @cmd.batch([
-                request_agent(emit, session_id, request.id, payload),
+                request_agent(
+                  emit,
+                  session_id,
+                  request.id,
+                  payload,
+                  next.workspace.id,
+                ),
                 persist_model(ready),
               ]),
             )
@@ -623,6 +676,7 @@ fn update_conversation(
                 session_id,
                 fresh.id,
                 session_messages(next, session_id),
+                next.workspace.id,
               ),
               persist_model(next),
             ]),
@@ -631,13 +685,65 @@ fn update_conversation(
         _ => (model, @rabbita.none)
       }
     RunCommand(command) => update({ ..model, draft: command }, Submit, emit)
-    SelectSession(index) =>
+    SelectSession(index) => {
+      let command = if model.compact {
+        @cmd.batch([
+          after_render_scroll(),
+          after_render_focus(".composer-input"),
+        ])
+      } else {
+        after_render_scroll()
+      }
       (
-        { ..model, active_session: index, command_open: false },
-        after_render_scroll(),
+        {
+          ..model,
+          active_session: index,
+          command_open: false,
+          sidebar_open: if model.compact {
+            false
+          } else {
+            model.sidebar_open
+          },
+        },
+        command,
       )
-    ToggleSidebar =>
-      ({ ..model, sidebar_open: !model.sidebar_open }, @rabbita.none)
+    }
+    ToggleSidebar => {
+      let sidebar_open = !model.sidebar_open
+      (
+        { ..model, sidebar_open, },
+        after_render_focus(
+          if sidebar_open {
+            ".sidebar .sidebar-icon-button"
+          } else {
+            ".topbar > .icon-button"
+          },
+        ),
+      )
+    }
+    ToggleTheme => {
+      let theme = opposite_theme(model.theme)
+      ({ ..model, theme, }, persist_theme(theme))
+    }
+    ViewportChanged(width) => {
+      let next = with_viewport_width(model, width)
+      let command = if model.sidebar_open && !next.sidebar_open {
+        after_render_focus(
+          if model.workspace.open && next.workspace_overlay {
+            ".workspace-panel .workspace-icon-button"
+          } else {
+            ".topbar > .icon-button"
+          },
+        )
+      } else if model.workspace.open &&
+        !model.workspace_overlay &&
+        next.workspace_overlay {
+        after_render_focus(".workspace-panel .workspace-icon-button")
+      } else {
+        @rabbita.none
+      }
+      (next, command)
+    }
     NewSession => {
       let sessions = Array::copy(model.sessions)
       let session_id = "session-\{model.next_id}"
@@ -653,16 +759,26 @@ fn update_conversation(
         ],
       })
       let next = {
+        ..model,
         draft: "",
         sessions,
         active_session: sessions.length() - 1,
-        request: model.request,
         command_open: false,
-        sidebar_open: @dom.window().inner_width() > 720,
-        workspace: model.workspace,
+        sidebar_open: !model.compact,
         next_id: model.next_id + 1,
       }
-      (next, @cmd.batch([persist_model(next), after_render_scroll()]))
+      (
+        next,
+        @cmd.batch([
+          persist_model(next),
+          after_render_scroll(),
+          if model.compact {
+            after_render_focus(".composer-input")
+          } else {
+            @rabbita.none
+          },
+        ]),
+      )
     }
     _ => (model, @rabbita.none)
   }
@@ -677,6 +793,15 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
 }
 
 ///|
+fn icon(name : String) -> Html {
+  span(
+    class="icon icon-" + name,
+    attrs=@html.Attrs::build().aria_hidden("true"),
+    "",
+  )
+}
+
+///|
 fn message_view(message : Message) -> Html {
   let label = if message.role == "user" { "你" } else { "MoonSage" }
   let kind = if message.role == "user" { "message user" } else { "message" }
@@ -687,7 +812,7 @@ fn message_view(message : Message) -> Html {
     ])
   } else {
     div(class=kind, [
-      span(class="message-avatar", "M"),
+      span(class="message-avatar", [icon("sparkles")]),
       div(class="message-content", [
         span(class="message-label", label),
         markdown_view(message.text),
@@ -717,6 +842,7 @@ fn tool_card_view(tool : ToolCall) -> Html {
   }
   details(class="tool-call", [
     summary([
+      icon("chevron-right"),
       span(class=if running { "tool-dot running" } else { "tool-dot" }, ""),
       span(class="tool-name", tool.name),
       span(
@@ -750,7 +876,7 @@ fn stop_button(emit : Emit[Msg]) -> Html {
     title="停止生成",
     attrs=@html.Attrs::build().aria_label("停止生成"),
     on_click=emit(CancelRequest),
-    "停止",
+    [icon("square"), span("停止")],
   )
 }
 
@@ -771,7 +897,7 @@ fn prompt_suggestions(emit : Emit[Msg]) -> Html {
           class="prompt-chip",
           type_="button",
           on_click=emit(UsePrompt(prompt)),
-          [span(label), span(class="prompt-arrow", "→")],
+          [span(label), span(class="prompt-arrow", [icon("arrow-right")])],
         )
       }
     ],
@@ -785,58 +911,132 @@ fn command_menu(draft : String, emit : Emit[Msg]) -> Html {
     let command = pair.0
     let description = pair.1
     li([
-      button(class="command-row", on_click=emit(RunCommand(command)), [
-        span(class="command-name", command),
-        span(class="command-description", description),
-      ]),
+      button(
+        class="command-row",
+        type_="button",
+        attrs=@html.Attrs::build().role("menuitem"),
+        on_click=emit(RunCommand(command)),
+        [
+          span(class="command-name", command),
+          span(class="command-description", description),
+        ],
+      ),
     ])
   })
-  div(class="command-menu", [
-    div(class="command-heading", "命令 · \{filtered.length()}"),
-    if rows.length() == 0 {
-      p(class="command-empty", "没有匹配的命令")
-    } else {
-      ul(rows)
-    },
-  ])
+  div(
+    class="command-menu",
+    attrs=@html.Attrs::build().role("menu").aria_label("命令菜单"),
+    [
+      div(class="command-heading", "命令 · \{filtered.length()}"),
+      if rows.length() == 0 {
+        p(class="command-empty", "没有匹配的命令")
+      } else {
+        ul(rows)
+      },
+    ],
+  )
 }
 
 ///|
 fn session_view(model : Model, emit : Emit[Msg]) -> Html {
+  let workspace_modal = model.workspace.open && model.workspace_overlay
+  let drawer_modal = model.sidebar_open && model.compact
+  let sidebar_hidden = !model.sidebar_open || workspace_modal
+  let sidebar_attrs = @html.Attrs::build()
+    .aria_label("会话侧栏")
+    .aria_hidden(if sidebar_hidden { "true" } else { "false" })
+    .inert(sidebar_hidden)
+  let sidebar_attrs = if drawer_modal {
+    sidebar_attrs
+    .role("dialog")
+    .aria_modal("true")
+    .on_keydown(event => {
+      if event.key() == "Escape" {
+        event.prevent_default()
+        emit(ToggleSidebar)
+      } else {
+        @rabbita.none
+      }
+    })
+  } else {
+    sidebar_attrs
+  }
   let rows : Array[Html] = [
     for index, session in model.sessions => {
-      let class = if index == model.active_session {
-        "session active"
-      } else {
-        "session"
-      }
-      button(class~, on_click=emit(SelectSession(index)), [
-        span(class="session-title", session.title),
-        span(class="session-detail", session.detail),
-      ])
+      let active = index == model.active_session
+      let class = if active { "session active" } else { "session" }
+      button(
+        class~,
+        type_="button",
+        attrs=@html.Attrs::build().aria_current(
+          if active {
+            "page"
+          } else {
+            "false"
+          },
+        ),
+        on_click=emit(SelectSession(index)),
+        [
+          span(class="session-title", session.title),
+          span(class="session-detail", session.detail),
+        ],
+      )
     }
   ]
-  aside(class="sidebar", [
+  aside(class="sidebar", attrs=sidebar_attrs, [
     div(class="sidebar-head", [
-      div(class="brand", [span(class="brand-mark", "M"), span("MoonSage")]),
+      div(class="brand", [
+        span(class="brand-wordmark", "MoonSage"),
+        span(class="brand-caption", "MOONBIT AGENT"),
+      ]),
       button(
         class="sidebar-icon-button",
+        type_="button",
         title="折叠侧栏",
         attrs=@html.Attrs::build().aria_label("折叠侧栏"),
         on_click=emit(ToggleSidebar),
-        "‹",
+        icon("panel-left-close"),
       ),
     ]),
-    button(class="new-session", on_click=emit(NewSession), [
-      span(class="new-session-icon", "+"),
+    button(class="new-session", type_="button", on_click=emit(NewSession), [
+      icon("square-plus"),
       span("新对话"),
     ]),
     div(class="sidebar-label", "对话"),
-    nav(class="session-list", rows),
+    nav(
+      class="session-list",
+      attrs=@html.Attrs::build().aria_label("会话列表"),
+      rows,
+    ),
     div(class="sidebar-footer", [
-      span(class="footer-avatar", "M"),
-      div(class="footer-copy", [span("Agent API"), span("同源连接")]),
-      span(class="online-dot", ""),
+      div(class="connection-status", [
+        span(class="online-dot", ""),
+        div(class="footer-copy", [span("Agent API"), span("同源连接")]),
+      ]),
+      button(
+        class="theme-toggle",
+        type_="button",
+        title=if model.theme == "dark" {
+          "切换浅色主题"
+        } else {
+          "切换暗色主题"
+        },
+        attrs=@html.Attrs::build()
+          .aria_label(
+            if model.theme == "dark" {
+              "切换浅色主题"
+            } else {
+              "切换暗色主题"
+            },
+          )
+          .aria_pressed(if model.theme == "dark" { "true" } else { "false" }),
+        on_click=emit(ToggleTheme),
+        if model.theme == "dark" {
+          icon("sun")
+        } else {
+          icon("moon")
+        },
+      ),
     ]),
   ])
 }
@@ -879,7 +1079,10 @@ fn request_state_view(
           },
           if req.thinking_shown != "" {
             details(class="thinking-panel", [
-              summary([span(class="thinking-label", "思考过程")]),
+              summary([
+                icon("chevron-right"),
+                span(class="thinking-label", "思考过程"),
+              ]),
               div(class="thinking-body", req.thinking_shown),
             ])
           } else {
@@ -905,8 +1108,15 @@ fn request_state_view(
       }
     Failed(_, reason) =>
       div(class="request-state failed", [
-        div([span(class="request-title", "请求失败"), p(reason)]),
-        button(class="retry-button", on_click=emit(Retry), "重试"),
+        icon("circle-alert"),
+        div(class="request-copy", [
+          span(class="request-title", "请求失败"),
+          p(reason),
+        ]),
+        button(class="retry-button", on_click=emit(Retry), [
+          icon("rotate-ccw"),
+          span("重试"),
+        ]),
       ])
   }
 }
@@ -931,7 +1141,13 @@ fn request_dot_class(request : RequestState) -> String {
 
 ///|
 fn app() -> Val[Html] {
-  let (model, emit) = @rabbita.create_state(initial_model(), update~)
+  let (model, emit) = @rabbita.create_state_with_init(
+    init=fn(emit) { (initial_model(), load_workspace_registry(emit)) },
+    update~,
+    subscriptions=(_, emit) => {
+      @sub.on_resize(viewport => emit(ViewportChanged(viewport.width)))
+    },
+  )
   model.view(model => {
     let active = model.sessions[model.active_session]
     let content : Array[Html] = active.messages.map(message_view)
@@ -946,130 +1162,215 @@ fn app() -> Val[Html] {
       shell_class
     }
     let sending = model.request is Sending(_)
-    div(class=shell_class, [
-      session_view(model, emit),
-      if model.sidebar_open {
-        button(
-          class="sidebar-scrim",
-          title="关闭侧栏",
-          attrs=@html.Attrs::build().aria_label("关闭侧栏"),
-          on_click=emit(ToggleSidebar),
-          "",
-        )
-      } else {
-        div(class="sidebar-placeholder", "")
-      },
-      main_(class="main-panel", [
-        header(class="topbar", [
+    let workspace_modal = model.workspace.open && model.workspace_overlay
+    let sidebar_modal = model.sidebar_open && model.compact
+    let main_hidden = workspace_modal || sidebar_modal
+    div(
+      class=shell_class,
+      attrs=@html.Attrs::build().data_set("theme", model.theme),
+      [
+        session_view(model, emit),
+        if model.sidebar_open {
           button(
-            class="icon-button",
-            title="切换侧栏",
-            attrs=@html.Attrs::build().aria_label("切换侧栏"),
+            class="sidebar-scrim",
+            title="关闭侧栏",
+            attrs=@html.Attrs::build()
+              .aria_label("关闭侧栏")
+              .aria_hidden(if workspace_modal { "true" } else { "false" })
+              .inert(workspace_modal),
             on_click=emit(ToggleSidebar),
-            "=",
-          ),
-          div(class="conversation-heading", [
-            h1(active.title),
-            span(class="conversation-meta", "MoonSage · \{active.detail}"),
-          ]),
-          div(class="runtime-info", [
-            span(class=request_dot_class(model.request), ""),
-            span(request_label(model.request)),
-          ]),
-          button(
-            class=if model.workspace.open {
-              "workspace-toggle active"
-            } else {
-              "workspace-toggle"
-            },
-            type_="button",
-            title="切换工作区",
-            attrs=@html.Attrs::build().aria_label("切换工作区"),
-            on_click=emit(ToggleWorkspace),
-            "</>",
-          ),
-        ]),
-        section(class="message-scroll", [
-          div(class="message-column", [
-            if content.length() == 0 {
-              div(class="empty-state", [
-                div(class="empty-mark", "M"),
-                h1("开始新的对话"),
-                p("描述任务，或输入 / 查看命令。"),
-              ])
-            } else {
-              div(content)
-            },
-            if active.messages.length() == 2 && model.active_session == 0 {
-              prompt_suggestions(emit)
-            } else {
-              div(class="prompt-placeholder", "")
-            },
-            request_state_view(model.request, active.id, emit),
-          ]),
-        ]),
-        section(class="composer-area", [
-          if model.command_open && !sending {
-            command_menu(model.draft, emit)
-          } else {
-            div(class="menu-placeholder", "")
-          },
-          form(class="composer", on_submit=emit(Submit), [
-            button(
-              class="composer-tool",
-              type_="button",
-              title="添加上下文",
-              attrs=@html.Attrs::build().aria_label("添加上下文"),
-              on_click=emit(UsePrompt("请先了解当前项目上下文")),
-              "+",
-            ),
-            textarea(
-              class="composer-input",
-              value=model.draft,
-              rows=1,
-              placeholder="输入消息，或输入 / 查看命令",
-              autofocus=true,
-              disabled=sending,
-              attrs=@html.Attrs::build()
-                .aria_label("消息")
-                .on_keydown(event => {
-                  if event.key() == "Enter" &&
-                    !event.shift_key() &&
-                    !event.is_composing() {
-                    event.prevent_default()
-                    emit(Submit)
+            "",
+          )
+        } else {
+          div(class="sidebar-placeholder", "")
+        },
+        main_(
+          class="main-panel",
+          attrs=@html.Attrs::build()
+            .aria_hidden(if main_hidden { "true" } else { "false" })
+            .inert(main_hidden),
+          [
+            header(class="topbar", [
+              button(
+                class="icon-button",
+                type_="button",
+                title="切换侧栏",
+                attrs=@html.Attrs::build()
+                  .aria_label("切换侧栏")
+                  .aria_pressed(
+                    if model.sidebar_open {
+                      "true"
+                    } else {
+                      "false"
+                    },
+                  ),
+                on_click=emit(ToggleSidebar),
+                icon("menu"),
+              ),
+              div(class="conversation-heading", [
+                h1(active.title),
+                span(
+                  class="conversation-meta",
+                  if model.workspace.name == "" {
+                    "MoonSage · \{active.detail}"
                   } else {
-                    @rabbita.none
-                  }
-                }),
-              on_input=emit.map(value => DraftChanged(value)),
-              "",
+                    "工作区 · \{model.workspace.name} · \{active.detail}"
+                  },
+                ),
+              ]),
+              div(
+                class="runtime-info",
+                attrs=@html.Attrs::build().role("status").aria_live("polite"),
+                [
+                  span(class=request_dot_class(model.request), ""),
+                  span(request_label(model.request)),
+                ],
+              ),
+              button(
+                class="icon-button topbar-theme-toggle",
+                type_="button",
+                title=if model.theme == "dark" {
+                  "切换浅色主题"
+                } else {
+                  "切换暗色主题"
+                },
+                attrs=@html.Attrs::build()
+                  .aria_label(
+                    if model.theme == "dark" {
+                      "切换浅色主题"
+                    } else {
+                      "切换暗色主题"
+                    },
+                  )
+                  .aria_pressed(
+                    if model.theme == "dark" {
+                      "true"
+                    } else {
+                      "false"
+                    },
+                  ),
+                on_click=emit(ToggleTheme),
+                if model.theme == "dark" {
+                  icon("sun")
+                } else {
+                  icon("moon")
+                },
+              ),
+              button(
+                class=if model.workspace.open {
+                  "workspace-toggle active"
+                } else {
+                  "workspace-toggle"
+                },
+                type_="button",
+                title="切换工作区",
+                attrs=@html.Attrs::build()
+                  .aria_label("切换工作区")
+                  .aria_pressed(
+                    if model.workspace.open {
+                      "true"
+                    } else {
+                      "false"
+                    },
+                  ),
+                on_click=emit(ToggleWorkspace),
+                icon("panel-right"),
+              ),
+            ]),
+            section(
+              class="message-scroll",
+              attrs=@html.Attrs::build().aria_label("对话内容"),
+              [
+                div(class="message-column", [
+                  if content.length() == 0 {
+                    div(class="empty-state", [
+                      div(class="empty-mark", [icon("file-code-2")]),
+                      h1("开始新的对话"),
+                      p("描述任务，或输入 / 查看命令。"),
+                    ])
+                  } else {
+                    div(content)
+                  },
+                  if active.messages.length() == 2 && model.active_session == 0 {
+                    prompt_suggestions(emit)
+                  } else {
+                    div(class="prompt-placeholder", "")
+                  },
+                  request_state_view(model.request, active.id, emit),
+                ]),
+              ],
             ),
-            button(
-              class="send-button",
-              type_="submit",
-              title="发送消息",
-              attrs=@html.Attrs::build().aria_label("发送消息"),
-              disabled=sending || model.draft.trim().is_empty(),
-              if sending {
-                "···"
+            section(class="composer-area", [
+              if model.command_open && !sending {
+                command_menu(model.draft, emit)
               } else {
-                "↑"
+                div(class="menu-placeholder", "")
               },
-            ),
-          ]),
-          div(
-            class="composer-hint",
-            "MoonSage 可能会出错，请核对重要信息",
-          ),
-        ]),
-      ]),
-      if model.workspace.open {
-        workspace_view(model.workspace, emit)
-      } else {
-        div(class="workspace-placeholder", "")
-      },
-    ])
+              form(
+                class="composer",
+                attrs=@html.Attrs::build().aria_label("发送消息"),
+                on_submit=emit(Submit),
+                [
+                  button(
+                    class="composer-tool",
+                    type_="button",
+                    title="添加上下文",
+                    attrs=@html.Attrs::build().aria_label("添加上下文"),
+                    on_click=emit(
+                      UsePrompt("请先了解当前项目上下文"),
+                    ),
+                    icon("paperclip"),
+                  ),
+                  textarea(
+                    class="composer-input",
+                    value=model.draft,
+                    rows=1,
+                    placeholder="输入消息，或输入 / 查看命令",
+                    autofocus=true,
+                    disabled=sending,
+                    attrs=@html.Attrs::build()
+                      .aria_label("消息")
+                      .on_keydown(event => {
+                        if event.key() == "Enter" &&
+                          !event.shift_key() &&
+                          !event.is_composing() {
+                          event.prevent_default()
+                          emit(Submit)
+                        } else {
+                          @rabbita.none
+                        }
+                      }),
+                    on_input=emit.map(value => DraftChanged(value)),
+                    "",
+                  ),
+                  button(
+                    class="send-button",
+                    type_="submit",
+                    title="发送消息",
+                    attrs=@html.Attrs::build().aria_label("发送消息"),
+                    disabled=sending || model.draft.trim().is_empty(),
+                    if sending {
+                      icon("loader-circle")
+                    } else {
+                      icon("arrow-up")
+                    },
+                  ),
+                ],
+              ),
+              div(
+                class="composer-hint",
+                "MoonSage 可能会出错，请核对重要信息",
+              ),
+            ]),
+          ],
+        ),
+        if model.workspace.open {
+          workspace_view(model.workspace, workspace_modal, emit)
+        } else {
+          div(class="workspace-placeholder", "")
+        },
+      ],
+    )
   })
 }
 

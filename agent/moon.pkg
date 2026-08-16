@@ -6,6 +6,8 @@ import {
   "moonsage/agent/protocol",
   "moonsage/agent/research",
   "moonsage/agent/runtime",
+  "moonsage/editing",
+  "moonsage/local",
   "moonsage/llm",
   "moonsage/tools",
 }
