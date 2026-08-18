@@ -41,6 +41,7 @@ pub(all) struct AuditPackageResult {
   workspace : String
   project_dir : String
   source_revision : String
+  skipped : Bool
   audit : StructuredAuditResult
 }
 
@@ -50,17 +51,22 @@ pub async fn ignore_audit_stage(_stage : String) -> Unit {
 }
 
 ///|
+async fn never_skip_package(
+  _owner : String,
+  _repo : String,
+  _revision : String,
+) -> Bool {
+  false
+}
+
+///|
 async fn source_revision(project_dir : String) -> String {
   let (exit, output, _) = @process.collect_output(
     "git",
     ["rev-parse", "HEAD"],
     cwd=project_dir,
-    extra_env={
-      "GIT_TERMINAL_PROMPT": "0",
-      "GH_TOKEN": "",
-      "GITHUB_TOKEN": "",
-      "MOONSAGE_API_KEY": "",
-    },
+    extra_env=audit_repo_environment(),
+    inherit_env=false,
     no_console_window=true,
   ) catch {
     _ => return ""
@@ -110,7 +116,10 @@ fn finalize_controller_evidence(
 }
 
 ///|
-fn structured_failure(project_dir : String, message : String) -> StructuredAuditResult {
+fn structured_failure(
+  project_dir : String,
+  message : String,
+) -> StructuredAuditResult {
   {
     status: Failed,
     project_dir,
@@ -148,12 +157,10 @@ pub async fn run_structured_audit_project(
   guard is_moon_project(project_dir) else {
     return structured_failure(project_dir, "workspace has no moon.mod")
   }
-  let ctx : AuditContext = {
-    project_dir,
-    fix: true,
-    confirm: ConfirmYes,
+  let ctx : AuditContext = { project_dir, fix: true, confirm: ConfirmYes }
+  on_stage("auditing") catch {
+    _ => ()
   }
-  on_stage("auditing") catch { _ => () }
   let analysis_events : Array[@runtime.EngineEvent] = []
   let analysis = run_analysis_agent(
     api_key,
@@ -164,6 +171,7 @@ pub async fn run_structured_audit_project(
       analysis_events.push(event)
       on_event(event)
     },
+    restricted_moon=true,
     provider~,
   ) catch {
     error => {
@@ -174,7 +182,9 @@ pub async fn run_structured_audit_project(
       }
     }
   }
-  on_stage("fixing") catch { _ => () }
+  on_stage("fixing") catch {
+    _ => ()
+  }
   let fix_events : Array[@runtime.EngineEvent] = []
   let answer = run_fix_agent(
     api_key,
@@ -188,6 +198,7 @@ pub async fn run_structured_audit_project(
       fix_events.push(event)
       on_event(event)
     },
+    restricted_moon=true,
     provider~,
   ) catch {
     error => {
@@ -201,7 +212,9 @@ pub async fn run_structured_audit_project(
   }
   let evidence = build_audit_evidence(Some(analysis), answer, true)
   let before_diff = @local.git_diff(project_dir, None)
-  on_stage("verifying") catch { _ => () }
+  on_stage("verifying") catch {
+    _ => ()
+  }
   let validation = run_final_audit_verification(project_dir, timeout_ms~)
   let diff = @local.git_diff(project_dir, None)
   let evidence = finalize_controller_evidence(evidence, before_diff, diff)
@@ -233,8 +246,11 @@ pub async fn run_structured_audit_package(
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
   on_stage? : async (String) -> Unit = ignore_audit_stage,
   provider? : @llm.ProviderKind = OpenAi,
+  should_skip? : async (String, String, String) -> Bool = never_skip_package,
 ) -> AuditPackageResult {
-  on_stage("fetching") catch { _ => () }
+  on_stage("fetching") catch {
+    _ => ()
+  }
   let actual_workspace = if workspace == "" {
     @fs.tmpdir(prefix="moonsage-mode1-")
   } else {
@@ -247,6 +263,7 @@ pub async fn run_structured_audit_package(
           workspace,
           project_dir: "",
           source_revision: "",
+          skipped: false,
           audit: structured_failure("", error.to_string()),
         }
     }
@@ -260,6 +277,7 @@ pub async fn run_structured_audit_package(
       workspace: actual_workspace,
       project_dir: "",
       source_revision: "",
+      skipped: false,
       audit: structured_failure("", "invalid Mooncakes module name"),
     }
   }
@@ -275,6 +293,7 @@ pub async fn run_structured_audit_package(
         workspace: actual_workspace,
         project_dir: "",
         source_revision: "",
+        skipped: false,
         audit: structured_failure("", error.to_string()),
       }
   }
@@ -287,6 +306,7 @@ pub async fn run_structured_audit_package(
         workspace: actual_workspace,
         project_dir: "",
         source_revision: "",
+        skipped: false,
         audit: structured_failure("", error.to_string()),
       }
   }
@@ -298,6 +318,7 @@ pub async fn run_structured_audit_package(
       workspace: actual_workspace,
       project_dir: "",
       source_revision: "",
+      skipped: false,
       audit: structured_failure("", "unsupported repository: \{repository}"),
     }
   }
@@ -310,10 +331,25 @@ pub async fn run_structured_audit_package(
         workspace: actual_workspace,
         project_dir: "",
         source_revision: "",
+        skipped: false,
         audit: structured_failure("", error.to_string()),
       }
   }
   let revision = source_revision(project_dir)
+  if should_skip(owner, repo, revision) {
+    return {
+      module_name,
+      owner,
+      repo,
+      workspace: actual_workspace,
+      project_dir,
+      source_revision: revision,
+      skipped: true,
+      audit: structured_failure(
+        project_dir, "already processed with the same source revision and policy",
+      ),
+    }
+  }
   let result = run_structured_audit_project(
     api_key,
     base_url,
@@ -333,6 +369,7 @@ pub async fn run_structured_audit_package(
     workspace: actual_workspace,
     project_dir,
     source_revision: revision,
+    skipped: false,
     audit: result,
   }
 }

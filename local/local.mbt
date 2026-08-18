@@ -131,12 +131,51 @@ async fn collect_project_files(
       continue
     }
     let path = dir + "/" + entry
-    if @fs.kind(path) is @fs.FileKind::Directory {
-      collect_project_files(path, root, out, max)
-    } else {
-      out.push(relative_to_root(root, path))
+    let kind = @fs.kind(path, follow_symlink=false) catch { _ => continue }
+    match kind {
+      Directory => collect_project_files(path, root, out, max)
+      Regular => out.push(relative_to_root(root, path))
+      // Never follow repository-controlled symlinks or special files while
+      // collecting source for an agent.
+      _ => ()
     }
   }
+}
+
+///|
+async fn checked_project_path(
+  root : String,
+  rel : String,
+  require_directory? : Bool = false,
+) -> String {
+  guard !is_ignored_project_path(rel) else { fail("path is ignored: \{rel}") }
+  let target = @util.safe_path(root, rel)
+  let segments = rel
+    .replace_all(old="\\", new="/")
+    .split("/")
+    .filter(fn(segment) { segment != "" && segment != "." })
+    .map(fn(segment) { segment.to_owned() })
+    .to_array()
+  let mut current = root.trim_end(chars="\\/").to_owned()
+  for index, segment in segments {
+    current = current + "/" + segment
+    let kind = @fs.kind(current, follow_symlink=false) catch {
+      _ => fail("path does not exist: \{rel}")
+    }
+    guard !(kind is SymLink) else {
+      fail("symbolic links are not accessible: \{rel}")
+    }
+    if index + 1 < segments.length() {
+      guard kind is Directory else {
+        fail("path contains a non-directory component: \{rel}")
+      }
+    } else if require_directory {
+      guard kind is Directory else { fail("path is not a directory: \{rel}") }
+    } else {
+      guard kind is Regular else { fail("path is not a regular file: \{rel}") }
+    }
+  }
+  target
 }
 
 ///|
@@ -177,7 +216,11 @@ async fn list_project_files_tool(root : String, arguments : String) -> String {
   guard sub == "" || !is_ignored_project_path(sub) else {
     fail("path is ignored: \{sub}")
   }
-  let dir = if sub == "" { root } else { @util.safe_path(root, sub) }
+  let dir = if sub == "" {
+    root
+  } else {
+    checked_project_path(root, sub, require_directory=true)
+  }
   let files : Array[String] = []
   collect_project_files(dir, root, files, collect_files_hard_cap)
   let filtered = if pattern != "" {
@@ -210,7 +253,11 @@ async fn grep_files_tool(root : String, arguments : String) -> String {
   guard sub == "" || !is_ignored_project_path(sub) else {
     fail("path is ignored: \{sub}")
   }
-  let dir = if sub == "" { root } else { @util.safe_path(root, sub) }
+  let dir = if sub == "" {
+    root
+  } else {
+    checked_project_path(root, sub, require_directory=true)
+  }
   let needle = pattern.to_lower()
   let files : Array[String] = []
   collect_project_files(dir, root, files, collect_files_hard_cap)
@@ -219,7 +266,9 @@ async fn grep_files_tool(root : String, arguments : String) -> String {
     if matches.length() >= max_matches {
       break
     }
-    let read_result = Some(@fs.read_file(@util.safe_path(root, file)).text()) catch {
+    let read_result = Some(
+      @fs.read_file(checked_project_path(root, file)).text(),
+    ) catch {
       _ => None
     }
     match read_result {
@@ -253,8 +302,7 @@ async fn grep_files_tool(root : String, arguments : String) -> String {
 async fn read_file_tool(root : String, arguments : String) -> String {
   let document = @json.parse(arguments)
   let rel = @util.json_string_arg(document, "path")
-  guard !is_ignored_project_path(rel) else { fail("path is ignored: \{rel}") }
-  let path = @util.safe_path(root, rel)
+  let path = checked_project_path(root, rel)
   let start = @util.json_string_arg(document, "start")
   let end = @util.json_string_arg(document, "end")
   let data = @fs.read_file(path)
@@ -302,25 +350,38 @@ fn verification_args(command : String) -> Array[String] raise {
 ///|
 fn verification_environment() -> Map[String, String] {
   let environment : Map[String, String] = Map([])
-  for name in [
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "LOCALAPPDATA",
-    "APPDATA",
-    "TEMP",
-    "TMP",
-    "MOON_HOME",
-    "MOONBIT_HOME",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-  ] {
+  for
+    name in [
+      "PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "MOON_HOME",
+      "MOONBIT_HOME", "SystemRoot", "ComSpec", "PATHEXT",
+    ] {
     match @sys.get_env_var(name) {
       Some(value) if value != "" => environment[name] = value
       _ => ()
     }
   }
+  environment
+}
+
+///|
+#cfg(platform="windows")
+fn local_git_null_device() -> String {
+  "NUL"
+}
+
+///|
+#cfg(not(platform="windows"))
+fn local_git_null_device() -> String {
+  "/dev/null"
+}
+
+///|
+fn repository_read_environment() -> Map[String, String] {
+  let environment = verification_environment()
+  environment["GIT_CONFIG_GLOBAL"] = local_git_null_device()
+  environment["GIT_LFS_SKIP_SMUDGE"] = "1"
+  environment["GIT_TERMINAL_PROMPT"] = "0"
+  environment["GCM_INTERACTIVE"] = "Never"
   environment
 }
 
@@ -447,11 +508,30 @@ fn command_timeout_json(timeout_ms : Int) -> String {
 
 ///|
 pub async fn git_diff(root : String, path : String?) -> String {
-  let args = if path is Some(p) { ["diff", "--", p] } else { ["diff"] }
+  let args = [
+    "-c",
+    "core.hooksPath=\{local_git_null_device()}",
+    "-c",
+    "credential.helper=",
+    "-c",
+    "submodule.recurse=false",
+    "diff",
+    "--no-ext-diff",
+    "--no-textconv",
+  ]
+  match path {
+    Some(value) => {
+      args.push("--")
+      args.push(value)
+    }
+    None => ()
+  }
   let (exit, out, _) = @process.collect_output(
     "git",
     args,
     cwd=root,
+    extra_env=repository_read_environment(),
+    inherit_env=false,
     no_console_window=true,
   )
   if exit != 0 {

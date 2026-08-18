@@ -46,8 +46,7 @@ pub fn batch_item_can_transition(
     Fetching => to is (Queued | Auditing | Failed | Skipped | Cancelled)
     Auditing => to is (Fixing | NoChanges | Skipped | Failed | Cancelled)
     Fixing => to is (Verifying | NoChanges | Failed | Cancelled)
-    Verifying =>
-      to is (VerifiedPendingPublish | NoChanges | Failed | Cancelled)
+    Verifying => to is (VerifiedPendingPublish | NoChanges | Failed | Cancelled)
     VerifiedPendingPublish => to is (Publishing | Queued | Cancelled)
     Publishing => to is (Created | VerifiedPendingPublish | Failed | Cancelled)
     Created => to is Queued
@@ -80,14 +79,13 @@ pub fn batch_item_is_active(status : BatchItemStatus) -> Bool {
 
 ///|
 pub fn batch_item_is_settled(status : BatchItemStatus) -> Bool {
-  status is (
-    VerifiedPendingPublish |
-    Created |
-    NoChanges |
-    Skipped |
-    Failed |
-    Cancelled
-  )
+  status
+  is (VerifiedPendingPublish
+  | Created
+  | NoChanges
+  | Skipped
+  | Failed
+  | Cancelled)
 }
 
 ///|
@@ -218,9 +216,8 @@ pub fn sensitive_changed_path(path : String) -> Bool {
 pub fn binary_changed_path(path : String) -> Bool {
   let normalized = normalized_changed_path(path)
   [
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip",
-    ".gz", ".tar", ".7z", ".exe", ".dll", ".so", ".dylib", ".wasm",
-    ".woff", ".woff2", ".ttf", ".otf",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz", ".tar",
+    ".7z", ".exe", ".dll", ".so", ".dylib", ".wasm", ".woff", ".woff2", ".ttf", ".otf",
   ].any(fn(extension) { normalized.has_suffix(extension) })
 }
 
@@ -270,11 +267,12 @@ pub fn apply_audit_result(
   item.retryable = result.retryable
   item.updated_at_ms = now_ms
   match result.status {
-    VerifiedPendingPublish => {
+    VerifiedPendingPublish =>
       if !result.evidence_conflicts.is_empty() {
         item.status = Failed
         item.retryable = false
-        item.error = "audit evidence conflict: " + result.evidence_conflicts.join("; ")
+        item.error = "audit evidence conflict: " +
+          result.evidence_conflicts.join("; ")
       } else if !result.validation.passed() {
         item.status = Failed
         item.retryable = false
@@ -297,7 +295,6 @@ pub fn apply_audit_result(
       } else {
         item.status = VerifiedPendingPublish
       }
-    }
     NoChanges => {
       item.status = NoChanges
       item.error = ""
@@ -315,6 +312,7 @@ pub fn apply_audit_result(
 
 ///|
 pub fn can_auto_publish(record : BatchRecord, item : BatchItem) -> Bool {
+  !(record.status is Cancelled) &&
   item.status is VerifiedPendingPublish &&
   item.validation.passed() &&
   publish_context_is_complete(item) &&
@@ -349,6 +347,7 @@ pub fn prepare_publish(
   now_ms : Int64,
   approved? : Bool = false,
 ) -> BatchPublishRequest? {
+  guard !(record.status is Cancelled) else { return None }
   guard record.find_item(item_key) is Some(item) else { return None }
   let evidence_ok = item.status is VerifiedPendingPublish &&
     item.validation.passed() &&
@@ -420,7 +419,11 @@ pub fn apply_publish_result(
     item.retryable = true
   } else {
     item.status = Failed
-    item.error = if result.error == "" { "publish failed" } else { result.error }
+    item.error = if result.error == "" {
+      "publish failed"
+    } else {
+      result.error
+    }
     item.retryable = false
   }
   item.updated_at_ms = now_ms
@@ -434,7 +437,8 @@ pub fn completed_fingerprints(
   let completed : Map[String, String] = Map([])
   for record in records {
     for item in record.items {
-      if item.fingerprint != "" && item.status is (Created | NoChanges | Skipped) {
+      if item.fingerprint != "" &&
+        item.status is (Created | NoChanges | Skipped) {
         completed[item.fingerprint] = item.pr_url
       }
     }
@@ -475,14 +479,20 @@ pub fn merge_snapshot(
   for selected in modules {
     match record.find_item(selected.key) {
       None => {
-        record.items.push(BatchItem::from_module(selected, record.cycle, now_ms))
+        record.items.push(
+          BatchItem::from_module(selected, record.cycle, now_ms),
+        )
         enqueued += 1
       }
       Some(existing) =>
         if existing.module_version != selected.version {
           // Module versions are immutable on Mooncakes, so a changed version is
           // a deterministic signal that the repository needs another audit.
-          let replacement = BatchItem::from_module(selected, record.cycle, now_ms)
+          let replacement = BatchItem::from_module(
+            selected,
+            record.cycle,
+            now_ms,
+          )
           existing.module_names = replacement.module_names
           existing.module_version = replacement.module_version
           existing.source_revision = ""

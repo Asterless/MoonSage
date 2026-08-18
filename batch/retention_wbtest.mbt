@@ -60,7 +60,7 @@ test "retention boundaries distinguish item and batch terminal states" {
     0L,
   )
   let item = record.items[0]
-  for status in [Created, NoChanges, Skipped] {
+  for status in [Created, NoChanges, Skipped, Cancelled] {
     item.status = status
     item.updated_at_ms = now_ms + retention_test_day_ms
     assert_true(batch_item_workspace_retention_due(item, now_ms))
@@ -73,7 +73,12 @@ test "retention boundaries distinguish item and batch terminal states" {
   item.status = VerifiedPendingPublish
   item.updated_at_ms = 0L
   assert_true(!batch_item_workspace_retention_due(item, now_ms))
-  let resumable_statuses : Array[BatchStatus] = [Queued, Running, Paused, Watching]
+  let resumable_statuses : Array[BatchStatus] = [
+    Queued,
+    Running,
+    Paused,
+    Watching,
+  ]
   for status in resumable_statuses {
     record.status = status
     record.updated_at_ms = 0L
@@ -96,13 +101,14 @@ async test "item retention removes only canonical eligible workspaces" {
   let record = BatchRecord::new(
     "batch-item-retention",
     default_batch_config(),
-    retention_test_modules(6),
+    retention_test_modules(7),
     0L,
   )
   let statuses = [
     Created,
     NoChanges,
     Skipped,
+    Cancelled,
     Failed,
     Failed,
     VerifiedPendingPublish,
@@ -110,9 +116,9 @@ async test "item retention removes only canonical eligible workspaces" {
   let paths : Array[String] = []
   for index, item in record.items {
     item.status = statuses[index]
-    item.updated_at_ms = if index == 3 {
+    item.updated_at_ms = if index == 4 {
       now_ms - 7L * retention_test_day_ms
-    } else if index == 4 {
+    } else if index == 5 {
       now_ms - 7L * retention_test_day_ms + 1L
     } else {
       now_ms
@@ -125,12 +131,12 @@ async test "item retention removes only canonical eligible workspaces" {
     "must remain",
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
-  assert_eq(cleanup_batch_item_workspaces(data_root, record, now_ms), 4)
-  for index in 0..<4 {
+  assert_eq(cleanup_batch_item_workspaces(data_root, record, now_ms), 5)
+  for index in 0..<5 {
     assert_true(!@fs.exists(paths[index]))
   }
-  assert_true(@fs.exists(paths[4]))
   assert_true(@fs.exists(paths[5]))
+  assert_true(@fs.exists(paths[6]))
   assert_true(@fs.exists(outside + "/outside.txt"))
   @fs.rmdir(data_root, recursive=true)
   @fs.rmdir(outside, recursive=true)

@@ -95,7 +95,11 @@ fn audit_validation(
 }
 
 ///|
-fn audit_diff_summary(files : Array[String], additions : Int, deletions : Int) -> String {
+fn audit_diff_summary(
+  files : Array[String],
+  additions : Int,
+  deletions : Int,
+) -> String {
   if files.is_empty() && additions == 0 && deletions == 0 {
     ""
   } else {
@@ -140,12 +144,24 @@ pub async fn run_mode1_audit_item(
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
   on_stage? : async (String) -> Unit = @audit.ignore_audit_stage,
   provider? : @llm.ProviderKind = OpenAi,
+  should_skip? : async (String, String, String) -> Bool = async fn(
+    _owner,
+    _repo,
+    _revision,
+  ) {
+    false
+  },
 ) -> BatchAuditResult {
   guard !item.module_names.is_empty() else {
-    return failed_audit_result("batch item has no Mooncakes module name", false)
+    return {
+      ..failed_audit_result("batch item has no Mooncakes module name", false),
+      workspace: item.workspace,
+    }
   }
   guard item.workspace != "" else {
-    return failed_audit_result("batch item has no deterministic workspace", false)
+    return failed_audit_result(
+      "batch item has no deterministic workspace", false,
+    )
   }
   let attempt = if item.attempts < 1 { 1 } else { item.attempts }
   let attempt_workspace = item.workspace + "/attempt-" + attempt.to_string()
@@ -164,6 +180,7 @@ pub async fn run_mode1_audit_item(
     on_event~,
     on_stage=report_stage,
     provider~,
+    should_skip~,
   )
   guard package_result.owner.to_lower() == item.owner.to_lower() &&
     package_result.repo.to_lower() == item.repo.to_lower() else {
@@ -172,6 +189,17 @@ pub async fn run_mode1_audit_item(
         "Mooncakes manifest repository changed from \{item.owner}/\{item.repo}",
         false,
       ),
+      workspace: item.workspace,
+      project_dir: package_result.project_dir,
+      source_revision: package_result.source_revision,
+    }
+  }
+  if package_result.skipped {
+    return {
+      ..failed_audit_result(
+        "already processed with the same source revision and policy", false,
+      ),
+      status: NoChanges,
       workspace: item.workspace,
       project_dir: package_result.project_dir,
       source_revision: package_result.source_revision,
@@ -190,7 +218,13 @@ pub async fn run_mode1_audit_item(
   } else {
     let path = attempt_workspace + "/audit-report.md"
     @fs.write_file(path, result.report, create_mode=CreateOrTruncate) catch {
-      _ => return failed_audit_result("failed to persist audit report", false)
+      _ =>
+        return {
+          ..failed_audit_result("failed to persist audit report", false),
+          workspace: item.workspace,
+          project_dir: package_result.project_dir,
+          source_revision: package_result.source_revision,
+        }
     }
     path
   }
@@ -231,8 +265,8 @@ pub async fn run_mode1_audit_item(
     additions,
     deletions,
     sensitive_changes: has_symlink ||
-      diff_has_unsafe_file_kind(result.diff) ||
-      (result.diff.trim() != "" && files.is_empty()),
+    diff_has_unsafe_file_kind(result.diff) ||
+    (result.diff.trim() != "" && files.is_empty()),
     validation,
     evidence_conflicts: result.evidence.conflicts.copy(),
     error,

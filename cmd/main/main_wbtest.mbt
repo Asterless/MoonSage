@@ -131,21 +131,18 @@ test "mode 1 is normalized to the batch-audit parser path" {
     normalize_mode_one_args([
       "moonsage", "mode", "1", "start", "--watch", "--include", "acme/*",
     ]),
-    [
-      "moonsage", "batch-audit", "start", "--watch", "--include", "acme/*",
-    ],
+    ["moonsage", "batch-audit", "start", "--watch", "--include", "acme/*"],
   )
-  assert_eq(
-    normalize_mode_one_args(["moonsage", "mode", "2"]),
-    ["moonsage", "mode", "2"],
-  )
+  assert_eq(normalize_mode_one_args(["moonsage", "mode", "2"]), [
+    "moonsage", "mode", "2",
+  ])
 }
 
 ///|
 test "batch-audit parser accepts start and control operations" {
   let start = root_command().parse(argv=[
-    "batch-audit", "start", "--watch", "--include", "acme/*", "--include",
-    "moonbitlang/*", "--concurrency", "4", "--max-prs", "10",
+    "batch-audit", "start", "--watch", "--include", "acme/*", "--include", "moonbitlang/*",
+    "--concurrency", "4", "--max-prs", "10",
   ])
   guard start.subcommand is Some(("batch-audit", matches)) else {
     fail("batch-audit subcommand was not selected")
@@ -179,12 +176,7 @@ test "batch-audit parses bounded integers and durations" {
   } noraise {
     _ => fail("out-of-range concurrency must be rejected")
   }
-  try parse_batch_duration(
-    "forever",
-    "interval",
-    1000,
-    2_000_000_000,
-  ) catch {
+  try parse_batch_duration("forever", "interval", 1000, 2_000_000_000) catch {
     error => assert_true(error.to_string().contains("must use"))
   } noraise {
     _ => fail("invalid duration must be rejected")
@@ -194,9 +186,8 @@ test "batch-audit parses bounded integers and durations" {
 ///|
 test "batch-audit config uses mode 1 defaults and repeated filters" {
   let parsed = root_command().parse(argv=[
-    "batch-audit", "start", "--include", "acme/*", "--owner", "acme",
-    "--keyword", "parser", "--exclude", "*/old", "--concurrency", "3",
-    "--package-timeout", "15m",
+    "batch-audit", "start", "--include", "acme/*", "--owner", "acme", "--keyword",
+    "parser", "--exclude", "*/old", "--concurrency", "3", "--package-timeout", "15m",
   ])
   guard parsed.subcommand is Some(("batch-audit", matches)) else {
     fail("batch-audit subcommand was not selected")

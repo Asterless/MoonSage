@@ -1,11 +1,7 @@
 ///|
 fn batch_secret_values() -> Array[String] {
   let values : Array[String] = []
-  for name in [
-    "MOONSAGE_API_KEY",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-  ] {
+  for name in ["MOONSAGE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"] {
     let value = @sys.get_env_var(name).unwrap_or("")
     if value != "" {
       values.push(value)
@@ -25,7 +21,10 @@ fn batch_strings(values : Array[String]) -> Json {
 }
 
 ///|
-async fn output_batch_event(event : @batch.BatchEvent, stream_json : Bool) -> Unit {
+async fn output_batch_event(
+  event : @batch.BatchEvent,
+  stream_json : Bool,
+) -> Unit {
   if stream_json {
     write_batch_event(event)
   } else {
@@ -65,9 +64,7 @@ fn batch_state_event(record : @batch.BatchRecord) -> @batch.BatchEvent {
 async fn fetch_batch_snapshot(retries : Int) -> Array[@moonsage.ModuleSummary] {
   let mut attempt = 0
   for ;; {
-    let fetched = Some(@mooncakes.fetch_modules()) catch {
-      _ => None
-    }
+    let fetched = Some(@mooncakes.fetch_modules()) catch { _ => None }
     match fetched {
       Some(snapshot) => return snapshot
       None => {
@@ -87,7 +84,7 @@ async fn hydrate_empty_batch(
   record : @batch.BatchRecord,
   stream_json : Bool,
   secrets : Array[String],
-) -> Unit raise {
+) -> Unit {
   guard record.items.is_empty() else { return }
   let snapshot = fetch_batch_snapshot(record.config.network_retries)
   let selected = @batch.filter_modules(snapshot, record.config)
@@ -157,7 +154,7 @@ async fn refresh_batch_snapshot(
   record : @batch.BatchRecord,
   stream_json : Bool,
   secrets : Array[String],
-) -> Unit raise {
+) -> Unit {
   let snapshot = fetch_batch_snapshot(record.config.network_retries)
   let selected = @batch.filter_modules(snapshot, record.config)
   let previous_cycle = record.cycle
@@ -276,6 +273,14 @@ async fn publish_mode1_request(
     mode1_publish_report(request),
     title="fix: apply MoonSage audit fixes",
     branch=request.branch,
+    verified_paths=request.changed_files,
+    source_revision=request.source_revision,
+    idempotency_key=request.batch_id +
+      ":" +
+      request.item_key +
+      ":" +
+      request.fingerprint,
+    quiet=true,
   ) catch {
     error => {
       let message = error.to_string()
@@ -288,18 +293,15 @@ async fn publish_mode1_request(
     }
   }
   match published {
-    Some(url) if url != "" => {
-      created: true,
-      pr_url: url,
-      error: "",
-      retryable: false,
-    }
-    _ => {
-      created: false,
-      pr_url: "",
-      error: "publisher did not return a pull request URL",
-      retryable: false,
-    }
+    Some(url) if url != "" =>
+      { created: true, pr_url: url, error: "", retryable: false }
+    _ =>
+      {
+        created: false,
+        pr_url: "",
+        error: "publisher did not return a pull request URL",
+        retryable: false,
+      }
   }
 }
 
@@ -321,15 +323,16 @@ async fn publish_batch_items(
   }
   let mut current = initial
   for key in approved {
-    match @batch.publish_batch_item_by_id(
-      data_root,
-      current.id,
-      key,
-      publish_mode1_request,
-      approved=true,
-      on_event~,
-      secrets~,
-    ) {
+    match
+      @batch.publish_batch_item_by_id(
+        data_root,
+        current.id,
+        key,
+        publish_mode1_request,
+        approved=true,
+        on_event~,
+        secrets~,
+      ) {
       Some(record) => current = record
       None => ()
     }
@@ -338,14 +341,15 @@ async fn publish_batch_items(
     if current.pr_count >= current.config.max_prs {
       break
     }
-    match @batch.publish_batch_item_by_id(
-      data_root,
-      current.id,
-      key,
-      publish_mode1_request,
-      on_event~,
-      secrets~,
-    ) {
+    match
+      @batch.publish_batch_item_by_id(
+        data_root,
+        current.id,
+        key,
+        publish_mode1_request,
+        on_event~,
+        secrets~,
+      ) {
       Some(record) => current = record
       None => ()
     }
@@ -366,12 +370,75 @@ async fn publish_batch_items(
 }
 
 ///|
-async fn cleanup_finished_batch_workspaces(record : @batch.BatchRecord) -> Unit {
+async fn cleanup_finished_batch_workspaces(
+  data_root : String,
+  record : @batch.BatchRecord,
+) -> Unit {
   for item in record.items {
-    if item.workspace != "" && item.status is (@batch.Created | @batch.NoChanges | @batch.Skipped) {
-      @fs.rmdir(item.workspace, recursive=true) catch { _ => () }
+    if item.status
+      is (@batch.Created | @batch.NoChanges | @batch.Skipped | @batch.Cancelled) {
+      let workspace = @batch.batch_item_workspace(
+        data_root,
+        record.id,
+        item.key,
+      ) catch {
+        _ => ""
+      }
+      if workspace != "" {
+        @fs.rmdir(workspace, recursive=true) catch {
+          _ => ()
+        }
+      }
     }
   }
+}
+
+///|
+async fn persist_worker_cancellation(
+  data_root : String,
+  record : @batch.BatchRecord,
+  stream_json : Bool,
+  secrets : Array[String],
+) -> @batch.BatchRecord {
+  @batch.cancel_batch(record, @async.now())
+  @batch.save_batch(data_root, record, secrets~)
+  cleanup_finished_batch_workspaces(data_root, record)
+  persist_worker_event(
+    data_root,
+    batch_state_event(record),
+    stream_json,
+    secrets,
+  )
+  record
+}
+
+///|
+async fn settle_pending_worker_control(
+  data_root : String,
+  record : @batch.BatchRecord,
+  stream_json : Bool,
+  secrets : Array[String],
+) -> @batch.BatchRecord? {
+  let control = @batch.load_batch_control(data_root, record.id)
+  if control.cancel {
+    return Some(
+      persist_worker_cancellation(data_root, record, stream_json, secrets),
+    )
+  }
+  if control.pause {
+    let paused = @batch.recover_batch(record, @async.now())
+    paused.status = @batch.Paused
+    paused.updated_at_ms = @async.now()
+    @batch.save_batch(data_root, paused, secrets~)
+    persist_worker_event(
+      data_root,
+      batch_state_event(paused),
+      stream_json,
+      secrets,
+    )
+    return Some(paused)
+  }
+  None
 }
 
 ///|
@@ -401,7 +468,10 @@ async fn run_mode1_worker(
   data_root : String,
   batch_id : String,
   stream_json : Bool,
-) -> @batch.BatchRecord raise {
+) -> @batch.BatchRecord {
+  ignore(@batch.cleanup_batch_retention(data_root, @async.now())) catch {
+    _ => ()
+  }
   guard @batch.load_batch(data_root, batch_id) is Some(saved) else {
     fail("batch not found: \{batch_id}")
   }
@@ -411,6 +481,22 @@ async fn run_mode1_worker(
     "mode1-worker-" + @async.now().to_string(),
   ) else {
     fail("batch is already running: \{batch_id}")
+  }
+  let secrets = batch_secret_values()
+  let settled = settle_pending_worker_control(
+    data_root, saved, stream_json, secrets,
+  ) catch {
+    error => {
+      @batch.release_batch_lock(data_root, batch_id)
+      raise error
+    }
+  }
+  match settled {
+    Some(record) => {
+      @batch.release_batch_lock(data_root, batch_id)
+      return record
+    }
+    None => ()
   }
   let result = try {
     let api_key = @sys.get_env_var("MOONSAGE_API_KEY").unwrap_or("")
@@ -424,7 +510,6 @@ async fn run_mode1_worker(
     let provider = @llm.provider_from_string(
       @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
     )
-    let secrets = batch_secret_values()
     let on_event = async fn(event) { output_batch_event(event, stream_json) }
     let mut current = @batch.recover_batch(saved, @async.now())
     hydrate_empty_batch(data_root, current, stream_json, secrets)
@@ -453,54 +538,45 @@ async fn run_mode1_worker(
                 ),
               )
             },
+            should_skip=async fn(owner, repo, revision) {
+              if item.force_run || revision == "" {
+                false
+              } else {
+                let fingerprint = @batch.batch_fingerprint(
+                  owner,
+                  repo,
+                  revision,
+                  current.config.policy_hash,
+                )
+                prior.contains(fingerprint)
+              }
+            },
             provider~,
           )
-          let fingerprint = if outcome.source_revision == "" {
-            ""
-          } else {
-            @batch.batch_fingerprint(
-              item.owner,
-              item.repo,
-              outcome.source_revision,
-              current.config.policy_hash,
-            )
-          }
-          if fingerprint != "" && prior.contains(fingerprint) {
-            item.pr_url = prior.get(fingerprint).unwrap_or("")
-            {
-              ..outcome,
-              status: @batch.Skipped,
-              error: "already processed with the same source revision and policy",
-              retryable: false,
-            }
-          } else {
-            outcome
-          }
+          outcome
         },
         on_event~,
         secrets~,
       )
+      if current.status is @batch.Cancelled {
+        cleanup_finished_batch_workspaces(data_root, current)
+        break
+      }
       current = publish_batch_items(data_root, current, stream_json, secrets)
-      cleanup_finished_batch_workspaces(current)
+      cleanup_finished_batch_workspaces(data_root, current)
+      if current.status is @batch.Cancelled {
+        break
+      }
       guard current.config.watch else { break }
-      match wait_for_watch_interval(
-        data_root,
-        current.id,
-        current.config.interval_ms,
-      ) {
+      match
+        wait_for_watch_interval(
+          data_root,
+          current.id,
+          current.config.interval_ms,
+        ) {
         "cancel" => {
-          @batch.cancel_batch(current, @async.now())
-          for item in current.items {
-            if item.workspace != "" && item.status is @batch.Cancelled {
-              @fs.rmdir(item.workspace, recursive=true) catch { _ => () }
-            }
-          }
-          @batch.save_batch(data_root, current, secrets~)
-          persist_worker_event(
-            data_root,
-            batch_state_event(current),
-            stream_json,
-            secrets,
+          current = persist_worker_cancellation(
+            data_root, current, stream_json, secrets,
           )
           break
         }
@@ -516,7 +592,7 @@ async fn run_mode1_worker(
           )
           break
         }
-        _ => {
+        _ =>
           refresh_batch_snapshot(data_root, current, stream_json, secrets) catch {
             error => {
               current.status = @batch.Watching
@@ -531,27 +607,38 @@ async fn run_mode1_worker(
               )
             }
           }
-        }
       }
     }
     current
   } catch {
     error => {
       let failed = @batch.load_batch(data_root, batch_id).unwrap_or(saved)
-      if !(failed.status is (@batch.Cancelled | @batch.Paused)) {
-        failed.status = @batch.Failed
-        failed.last_error = error.to_string()
-        failed.updated_at_ms = @async.now()
-        @batch.save_batch(
-          data_root,
-          failed,
-          secrets=batch_secret_values(),
+      let control = @batch.load_batch_control(data_root, batch_id)
+      if control.cancel {
+        ignore(
+          persist_worker_cancellation(data_root, failed, stream_json, secrets),
         ) catch {
-          _ => ()
+          _ => {
+            @batch.cancel_batch(failed, @async.now())
+            @batch.save_batch(data_root, failed, secrets~) catch {
+              _ => ()
+            }
+            cleanup_finished_batch_workspaces(data_root, failed)
+          }
         }
+        failed
+      } else {
+        if !(failed.status is (@batch.Cancelled | @batch.Paused)) {
+          failed.status = @batch.Failed
+          failed.last_error = error.to_string()
+          failed.updated_at_ms = @async.now()
+          @batch.save_batch(data_root, failed, secrets~) catch {
+            _ => ()
+          }
+        }
+        @batch.release_batch_lock(data_root, batch_id)
+        raise error
       }
-      @batch.release_batch_lock(data_root, batch_id)
-      raise error
     }
   }
   @batch.release_batch_lock(data_root, batch_id)

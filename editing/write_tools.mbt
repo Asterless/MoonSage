@@ -20,13 +20,7 @@ fn is_protected_write_path(rel : String) -> Bool {
     .to_array()
   guard segments.length() > 0 else { return true }
   let ignored = [
-    ".git",
-    ".mooncakes",
-    ".moonsage",
-    ".cache",
-    "_build",
-    "_build.bak",
-    "node_modules",
+    ".git", ".mooncakes", ".moonsage", ".cache", "_build", "_build.bak", "node_modules",
     "target",
   ]
   for segment in segments {
@@ -46,20 +40,18 @@ async fn checked_write_path(
   rel : String,
   require_file? : Bool = false,
 ) -> String {
-  guard !is_protected_write_path(rel) else {
-    fail("path is protected: \{rel}")
-  }
+  guard !is_protected_write_path(rel) else { fail("path is protected: \{rel}") }
   let target = @util.safe_path(root, rel)
   let normalized = rel.replace_all(old="\\", new="/")
-  let segments = normalized.split("/").filter(fn(segment) {
-    segment != "" && segment != "."
-  }).map(fn(segment) { segment.to_owned() }).to_array()
+  let segments = normalized
+    .split("/")
+    .filter(fn(segment) { segment != "" && segment != "." })
+    .map(fn(segment) { segment.to_owned() })
+    .to_array()
   let mut current = root.trim_end(chars="\\/").to_owned()
   for index, segment in segments {
     current = current + "/" + segment
-    let kind = @fs.kind(current, follow_symlink=false) catch {
-      _ => Unknown
-    }
+    let kind = @fs.kind(current, follow_symlink=false) catch { _ => Unknown }
     guard !(kind is SymLink) else {
       fail("symbolic links are not writable: \{rel}")
     }

@@ -3,6 +3,8 @@ package "moonsage/batch"
 
 import {
   "moonbitlang/core/debug",
+  "moonsage/agent/runtime",
+  "moonsage/llm",
 }
 
 // Values
@@ -28,6 +30,8 @@ pub fn batch_fingerprint(String, String, String, String) -> String
 
 pub fn batch_glob_match(String, String) -> Bool
 
+pub fn batch_history_retention_due(BatchRecord, Int64) -> Bool
+
 pub fn batch_item_can_transition(BatchItemStatus, BatchItemStatus) -> Bool
 
 pub fn batch_item_is_active(BatchItemStatus) -> Bool
@@ -35,6 +39,8 @@ pub fn batch_item_is_active(BatchItemStatus) -> Bool
 pub fn batch_item_is_settled(BatchItemStatus) -> Bool
 
 pub fn batch_item_workspace(String, String, String) -> String raise
+
+pub fn batch_item_workspace_retention_due(BatchItem, Int64) -> Bool
 
 pub fn batch_lock_path(String, String) -> String raise
 
@@ -51,6 +57,10 @@ pub fn cancel_batch(BatchRecord, Int64) -> Unit
 pub async fn cancel_batch_by_id(String, String) -> BatchRecord?
 
 pub fn claim_batch_items(BatchRecord, Int64) -> Array[BatchItem]
+
+pub async fn cleanup_batch_item_workspaces(String, BatchRecord, Int64) -> Int
+
+pub async fn cleanup_batch_retention(String, Int64) -> BatchRetentionReport
 
 pub async fn clear_batch_control(String, String) -> Unit
 
@@ -92,6 +102,8 @@ pub fn prepare_publish(BatchRecord, String, Int64, approved? : Bool) -> BatchPub
 
 pub async fn publish_batch_item_by_id(String, String, String, async (BatchPublishRequest) -> BatchPublishResult, approved? : Bool, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
 
+pub async fn publish_ready_batch_items(String, BatchRecord, async (BatchPublishRequest) -> BatchPublishResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+
 pub fn recover_batch(BatchRecord, Int64) -> BatchRecord
 
 pub fn redact_batch_text(String, Array[String], max_chars? : Int) -> String
@@ -110,6 +122,10 @@ pub async fn run_batch_once(String, BatchRecord, async (BatchItem) -> BatchAudit
 
 pub async fn run_batch_watch(String, BatchRecord, async () -> Array[@moonsage.ModuleSummary], async (BatchItem) -> BatchAuditResult, async () -> Bool, max_cycles? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
 
+pub async fn run_batch_watch_by_id(String, String, async () -> Array[@moonsage.ModuleSummary], async (BatchItem) -> BatchAuditResult, async () -> Bool, max_cycles? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
+
+pub async fn run_mode1_audit_item(BatchItem, BatchConfig, String, String, String, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @llm.ProviderKind, should_skip? : async (String, String, String) -> Bool) -> BatchAuditResult
+
 pub async fn save_batch(String, BatchRecord, secrets? : Array[String]) -> Unit
 
 pub async fn save_batch_control(String, String, BatchControl) -> Unit
@@ -125,6 +141,8 @@ pub fn transition_batch_item(BatchItem, BatchItemStatus, Int64) -> Unit raise
 pub fn truncate_batch_text(String, Int) -> String
 
 pub async fn try_acquire_batch_lock(String, String, String) -> Bool
+
+pub async fn update_batch_item_stage_by_id(String, String, String, String, attempts? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> Bool
 
 pub fn validate_batch_config(BatchConfig) -> Unit raise
 
@@ -144,6 +162,7 @@ pub(all) struct BatchAuditResult {
   changed_files : Array[String]
   additions : Int
   deletions : Int
+  sensitive_changes : Bool
   validation : ValidationSummary
   evidence_conflicts : Array[String]
   error : String
@@ -171,6 +190,7 @@ pub fn BatchConfig::to_json(Self) -> Json
 pub(all) struct BatchControl {
   pause : Bool
   cancel : Bool
+  retry_items : Array[String]
   approved_items : Array[String]
   updated_at_ms : Int64
 } derive(Eq, @debug.Debug)
@@ -213,6 +233,7 @@ pub(all) struct BatchItem {
   mut deletions : Int
   mut sensitive_changes : Bool
   mut retryable : Bool
+  mut force_run : Bool
   mut pr_url : String
   mut error : String
   created_at_ms : Int64
@@ -246,7 +267,7 @@ pub(all) struct BatchModule {
   repository : String
   primary_name : String
   module_names : Array[String]
-  version : String
+  mut version : String
 } derive(Eq, @debug.Debug)
 
 pub(all) struct BatchPublishRequest {
@@ -293,6 +314,11 @@ pub fn BatchRecord::queued_count(Self) -> Int
 pub fn BatchRecord::settled(Self) -> Bool
 pub fn BatchRecord::status_counts(Self) -> Map[String, Int]
 pub fn BatchRecord::to_json(Self) -> Json
+
+pub(all) struct BatchRetentionReport {
+  item_workspaces_removed : Int
+  batches_removed : Int
+} derive(Eq, @debug.Debug)
 
 pub(all) enum BatchStatus {
   Queued

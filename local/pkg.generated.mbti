@@ -11,6 +11,10 @@ pub async fn git_diff(String, String?) -> String
 
 pub fn local_tools(@editing.Workspace) -> Array[@tools.Tool]
 
+pub async fn run_moon_verification(String, String, timeout_ms? : Int) -> String
+
+pub fn verification_tools(@editing.Workspace) -> Array[@tools.Tool]
+
 // Errors
 
 // Types and methods

@@ -4,8 +4,16 @@ fn batch_audit_command() -> @argparse.Command {
     "batch-audit",
     about="Audit, fix, verify and publish Mooncakes repositories in batches.",
     options=[
-      @argparse.OptionArg("interval", long="interval", about="Watch interval (default: 6h)."),
-      @argparse.OptionArg("limit", long="limit", about="Maximum repositories; 0 means unlimited."),
+      @argparse.OptionArg(
+        "interval",
+        long="interval",
+        about="Watch interval (default: 6h).",
+      ),
+      @argparse.OptionArg(
+        "limit",
+        long="limit",
+        about="Maximum repositories; 0 means unlimited.",
+      ),
       @argparse.OptionArg(
         "include",
         long="include",
@@ -30,12 +38,36 @@ fn batch_audit_command() -> @argparse.Command {
         action=Append,
         about="Module name glob to exclude; repeatable.",
       ),
-      @argparse.OptionArg("concurrency", long="concurrency", about="Concurrent packages (1-4)."),
-      @argparse.OptionArg("max-prs", long="max-prs", about="Ready PR limit per cycle."),
-      @argparse.OptionArg("package-timeout", long="package-timeout", about="Per-package timeout (default: 20m)."),
-      @argparse.OptionArg("max-calls", long="max-calls", about="Maximum fix tool calls per package."),
-      @argparse.OptionArg("resume", long="resume", about="Resume an existing batch id."),
-      @argparse.OptionArg("item", long="item", about="Repository item key for retry or publish."),
+      @argparse.OptionArg(
+        "concurrency",
+        long="concurrency",
+        about="Concurrent packages (1-4).",
+      ),
+      @argparse.OptionArg(
+        "max-prs",
+        long="max-prs",
+        about="Ready PR limit per cycle.",
+      ),
+      @argparse.OptionArg(
+        "package-timeout",
+        long="package-timeout",
+        about="Per-package timeout (default: 20m).",
+      ),
+      @argparse.OptionArg(
+        "max-calls",
+        long="max-calls",
+        about="Maximum fix tool calls per package.",
+      ),
+      @argparse.OptionArg(
+        "resume",
+        long="resume",
+        about="Resume an existing batch id.",
+      ),
+      @argparse.OptionArg(
+        "item",
+        long="item",
+        about="Repository item key for retry or publish.",
+      ),
       @argparse.OptionArg(
         "batch-id",
         long="batch-id",
@@ -44,10 +76,27 @@ fn batch_audit_command() -> @argparse.Command {
       ),
     ],
     flags=[
-      @argparse.FlagArg("watch", long="watch", about="Refresh Mooncakes continuously."),
-      @argparse.FlagArg("stream-json", long="stream-json", about="Write batch events as JSON Lines."),
-      @argparse.FlagArg("worker", long="worker", about="Run as a Web worker.", hidden=true),
-      @argparse.FlagArg("force", long="force", about="Force a settled item to be retried."),
+      @argparse.FlagArg(
+        "watch",
+        long="watch",
+        about="Refresh Mooncakes continuously.",
+      ),
+      @argparse.FlagArg(
+        "stream-json",
+        long="stream-json",
+        about="Write batch events as JSON Lines.",
+      ),
+      @argparse.FlagArg(
+        "worker",
+        long="worker",
+        about="Run as a Web worker.",
+        hidden=true,
+      ),
+      @argparse.FlagArg(
+        "force",
+        long="force",
+        about="Force a settled item to be retried.",
+      ),
     ],
     positionals=[
       @argparse.PositionArg(

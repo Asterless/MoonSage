@@ -6,6 +6,7 @@ fn batch_value(m : @argparse.Matches, name : String) -> String {
   }
 }
 
+///|
 /// MoonBit's Int is signed 32-bit on the native CLI target. Keep the CLI
 /// duration bound below that limit while the persisted batch schema remains
 /// Int-compatible.
@@ -84,12 +85,8 @@ fn batch_config_from_matches(m : @argparse.Matches) -> @batch.BatchConfig raise 
   }
   let package_timeout_ms = match batch_value(m, "package-timeout") {
     "" => defaults.package_timeout_ms
-    value => parse_batch_duration(
-      value,
-      "package-timeout",
-      1000,
-      24 * 60 * 60 * 1000,
-    )
+    value =>
+      parse_batch_duration(value, "package-timeout", 1000, 24 * 60 * 60 * 1000)
   }
   let max_calls = match batch_value(m, "max-calls") {
     "" => defaults.max_calls
@@ -97,12 +94,8 @@ fn batch_config_from_matches(m : @argparse.Matches) -> @batch.BatchConfig raise 
   }
   let interval_ms = match batch_value(m, "interval") {
     "" => defaults.interval_ms
-    value => parse_batch_duration(
-      value,
-      "interval",
-      1000,
-      max_batch_duration_ms,
-    )
+    value =>
+      parse_batch_duration(value, "interval", 1000, max_batch_duration_ms)
   }
   let config : @batch.BatchConfig = {
     includes: values_of(m, "include"),
@@ -141,9 +134,9 @@ fn batch_data_root() -> String {
   if xdg != "" {
     return xdg.trim_end(chars="/\\").to_owned() + "/moonsage"
   }
-  let home = @sys.get_env_var("HOME").unwrap_or(
-    @sys.get_env_var("USERPROFILE").unwrap_or(""),
-  ).trim()
+  let home = @sys.get_env_var("HOME")
+    .unwrap_or(@sys.get_env_var("USERPROFILE").unwrap_or(""))
+    .trim()
   if home != "" {
     home.trim_end(chars="/\\").to_owned() + "/.local/share/moonsage"
   } else {
@@ -170,17 +163,14 @@ async fn print_batch_record(record : @batch.BatchRecord) -> Unit {
 async fn batch_command_error(message : String, stream_json : Bool) -> Unit {
   if stream_json {
     write_batch_event(
-      @batch.BatchEvent::new(
-        "error",
-        "",
-        @async.now(),
-        message=message,
-      ),
+      @batch.BatchEvent::new("error", "", @async.now(), message~),
     ) catch {
       _ => ()
     }
   } else {
-    @stdio.stderr.write("error: " + message + "\n") catch { _ => () }
+    @stdio.stderr.write("error: " + message + "\n") catch {
+      _ => ()
+    }
   }
 }
 

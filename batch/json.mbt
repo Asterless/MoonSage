@@ -34,11 +34,7 @@ fn optional_string(
 }
 
 ///|
-fn optional_int(
-  fields : Map[String, Json],
-  key : String,
-  default : Int,
-) -> Int {
+fn optional_int(fields : Map[String, Json], key : String, default : Int) -> Int {
   match fields.get(key) {
     Some(Number(value, ..)) => value.to_int()
     _ => default
@@ -106,7 +102,9 @@ pub fn BatchConfig::to_json(self : BatchConfig) -> Json {
 
 ///|
 pub fn BatchConfig::from_json(document : Json) -> BatchConfig raise {
-  guard document is Object(fields) else { fail("batch config must be an object") }
+  guard document is Object(fields) else {
+    fail("batch config must be an object")
+  }
   let defaults = default_batch_config()
   let config : BatchConfig = {
     includes: optional_strings(fields, "includes"),
@@ -129,11 +127,7 @@ pub fn BatchConfig::from_json(document : Json) -> BatchConfig raise {
     ),
     watch: optional_bool(fields, "watch", defaults.watch),
     interval_ms: optional_int(fields, "interval_ms", defaults.interval_ms),
-    policy_hash: optional_string(
-      fields,
-      "policy_hash",
-      defaults.policy_hash,
-    ),
+    policy_hash: optional_string(fields, "policy_hash", defaults.policy_hash),
   }
   validate_batch_config(config)
   config
@@ -276,7 +270,9 @@ pub fn BatchRecord::to_json(self : BatchRecord) -> Json {
 
 ///|
 pub fn BatchRecord::from_json(document : Json) -> BatchRecord raise {
-  guard document is Object(fields) else { fail("batch record must be an object") }
+  guard document is Object(fields) else {
+    fail("batch record must be an object")
+  }
   let schema_version = optional_int(fields, "schema_version", 1)
   guard schema_version == 1 else {
     fail("unsupported batch schema version: \{schema_version}")
@@ -324,7 +320,9 @@ pub fn BatchEvent::to_json(self : BatchEvent) -> Json {
 
 ///|
 pub fn BatchEvent::from_json(document : Json) -> BatchEvent raise {
-  guard document is Object(fields) else { fail("batch event must be an object") }
+  guard document is Object(fields) else {
+    fail("batch event must be an object")
+  }
   {
     kind: required_string(fields, "kind"),
     batch_id: required_string(fields, "batch_id"),

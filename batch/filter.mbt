@@ -25,9 +25,9 @@ pub fn parse_github_repository(url : String) -> (String, String)? {
   let value = url.trim().to_owned()
   let prefix = "https://github.com/"
   guard value.to_lower().has_prefix(prefix) else { return None }
-  guard !value.contains("?") &&
-    !value.contains("#") &&
-    !value.contains("\\") else { return None }
+  guard !value.contains("?") && !value.contains("#") && !value.contains("\\") else {
+    return None
+  }
   let path = value[prefix.length():].trim_end(chars="/").to_owned()
   let parts = path.split("/").to_array()
   guard parts.length() == 2 else { return None }
@@ -75,7 +75,10 @@ fn glob_match_from(
     return false
   }
   if value_index < value.length() &&
-    (pattern[pattern_index] == '?' || pattern[pattern_index] == value[value_index]) {
+    (
+      pattern[pattern_index] == '?' ||
+      pattern[pattern_index] == value[value_index]
+    ) {
     return glob_match_from(pattern, pattern_index + 1, value, value_index + 1)
   }
   false
@@ -87,7 +90,10 @@ pub fn batch_glob_match(pattern : String, value : String) -> Bool {
 }
 
 ///|
-fn any_pattern_matches(patterns : Array[String], values : Array[String]) -> Bool {
+fn any_pattern_matches(
+  patterns : Array[String],
+  values : Array[String],
+) -> Bool {
   if patterns.is_empty() {
     return true
   }
@@ -144,7 +150,12 @@ fn compare_batch_module(a : BatchModule, b : BatchModule) -> Int {
   if repository_order != 0 {
     repository_order
   } else {
-    a.primary_name.compare(b.primary_name)
+    // `module_names` is kept sorted as repositories are merged. Using its
+    // first entry makes the final order independent of snapshot response
+    // order, which is important before applying `limit`.
+    let a_name = a.module_names.get(0).unwrap_or(a.primary_name)
+    let b_name = b.module_names.get(0).unwrap_or(b.primary_name)
+    a_name.compare(b_name)
   }
 }
 
@@ -170,7 +181,7 @@ pub fn filter_modules(
     }
     let key = owner + "--" + repo
     match indexes.get(repository) {
-      Some(index) => {
+      Some(index) =>
         if !grouped[index].module_names.contains(summary.name) {
           grouped[index].module_names.push(summary.name)
           grouped[index].module_names.sort_by(fn(a, b) { a.compare(b) })
@@ -179,7 +190,6 @@ pub fn filter_modules(
           entries.sort_by(fn(a, b) { a.compare(b) })
           grouped[index].version = entries.join("|")
         }
-      }
       None => {
         indexes[repository] = grouped.length()
         versions[repository] = [summary.name + "@" + summary.version]

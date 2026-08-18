@@ -83,34 +83,25 @@ test "snapshot filtering combines categories and deduplicates repositories" {
     keywords: ["parser", "json"],
     excludes: ["*/private-*"],
   }
-  let selected = filter_modules([
-    summary(
-      "acme/parser",
-      "https://github.com/Acme/shared.git",
-      keywords=["parser"],
-    ),
-    summary(
-      "acme/json",
-      "https://github.com/acme/shared",
-      keywords=["json"],
-    ),
-    summary(
-      "acme/private-parser",
-      "https://github.com/acme/private",
-      keywords=["parser"],
-    ),
-    summary(
-      "other/parser",
-      "https://github.com/other/parser",
-      keywords=["parser"],
-    ),
-    summary(
-      "acme/no-keyword",
-      "https://github.com/acme/no-keyword",
-      keywords=["http"],
-    ),
-    summary("acme/not-github", "https://gitlab.com/acme/no"),
-  ], config)
+  let selected = filter_modules(
+    [
+      summary("acme/parser", "https://github.com/Acme/shared.git", keywords=[
+        "parser",
+      ]),
+      summary("acme/json", "https://github.com/acme/shared", keywords=["json"]),
+      summary("acme/private-parser", "https://github.com/acme/private", keywords=[
+        "parser",
+      ]),
+      summary("other/parser", "https://github.com/other/parser", keywords=[
+        "parser",
+      ]),
+      summary("acme/no-keyword", "https://github.com/acme/no-keyword", keywords=[
+        "http",
+      ]),
+      summary("acme/not-github", "https://gitlab.com/acme/no"),
+    ],
+    config,
+  )
   assert_eq(selected.length(), 1)
   assert_eq(selected[0].repository, "https://github.com/acme/shared")
   assert_eq(selected[0].module_names, ["acme/json", "acme/parser"])
@@ -119,10 +110,13 @@ test "snapshot filtering combines categories and deduplicates repositories" {
 ///|
 test "limit applies after stable repository ordering" {
   let config = { ..default_batch_config(), limit: 1 }
-  let selected = filter_modules([
-    summary("z/mod", "https://github.com/z/z"),
-    summary("a/mod", "https://github.com/a/a"),
-  ], config)
+  let selected = filter_modules(
+    [
+      summary("z/mod", "https://github.com/z/z"),
+      summary("a/mod", "https://github.com/a/a"),
+    ],
+    config,
+  )
   assert_eq(selected.length(), 1)
   assert_eq(selected[0].repository, "https://github.com/a/a")
 }
@@ -147,10 +141,16 @@ test "configuration rejects unsafe execution budgets" {
 
 ///|
 test "record JSON round trips lowercase states and config" {
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-  ], default_batch_config())
-  let record = BatchRecord::new("batch-1", default_batch_config(), selected, 10L)
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
+  let record = BatchRecord::new(
+    "batch-1",
+    default_batch_config(),
+    selected,
+    10L,
+  )
   record.items[0].status = Failed
   record.items[0].error = "network"
   let encoded = record.to_json().stringify()
@@ -164,10 +164,13 @@ test "record JSON round trips lowercase states and config" {
 
 ///|
 test "recovery requeues only interrupted item states" {
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-    summary("acme/b", "https://github.com/acme/b"),
-  ], default_batch_config())
+  let selected = filter_modules(
+    [
+      summary("acme/a", "https://github.com/acme/a"),
+      summary("acme/b", "https://github.com/acme/b"),
+    ],
+    default_batch_config(),
+  )
   let record = BatchRecord::new("batch-2", default_batch_config(), selected, 1L)
   record.status = Running
   record.items[0].status = Verifying
@@ -181,9 +184,10 @@ test "recovery requeues only interrupted item states" {
 
 ///|
 test "verification and change evidence gate publishing" {
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-  ], default_batch_config())
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
   let record = BatchRecord::new("batch-3", default_batch_config(), selected, 1L)
   let item = record.items[0]
   item.status = Verifying
@@ -197,10 +201,12 @@ test "verification and change evidence gate publishing" {
   assert_true(item.error.contains("source revision"))
   retry_batch_item(record, item.key, 5L)
   item.status = Verifying
-  apply_audit_result(record, item, {
-    ..verified_result(),
-    changed_files: [],
-  }, 6L)
+  apply_audit_result(
+    record,
+    item,
+    { ..verified_result(), changed_files: [] },
+    6L,
+  )
   assert_true(item.status is Failed)
   assert_true(item.error.contains("changed file evidence"))
   retry_batch_item(record, item.key, 7L)
@@ -213,9 +219,10 @@ test "verification and change evidence gate publishing" {
 
 ///|
 test "sensitive and oversized changes require explicit approval" {
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-  ], default_batch_config())
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
   let record = BatchRecord::new("batch-4", default_batch_config(), selected, 1L)
   let item = record.items[0]
   item.status = Verifying
@@ -232,20 +239,26 @@ test "sensitive and oversized changes require explicit approval" {
 
 ///|
 test "publish result records ready PR and idempotency fingerprint" {
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-  ], default_batch_config())
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
   let record = BatchRecord::new("batch-5", default_batch_config(), selected, 1L)
   let item = record.items[0]
   item.status = Verifying
   apply_audit_result(record, item, verified_result(), 2L)
   ignore(prepare_publish(record, item.key, 3L))
-  apply_publish_result(record, item.key, {
-    created: true,
-    pr_url: "https://github.com/acme/a/pull/1",
-    error: "",
-    retryable: false,
-  }, 4L)
+  apply_publish_result(
+    record,
+    item.key,
+    {
+      created: true,
+      pr_url: "https://github.com/acme/a/pull/1",
+      error: "",
+      retryable: false,
+    },
+    4L,
+  )
   assert_true(item.status is Created)
   assert_eq(record.pr_count, 1)
   let seen = completed_fingerprints([record])
@@ -255,22 +268,23 @@ test "publish result records ready PR and idempotency fingerprint" {
 ///|
 async test "record event control and lock persistence is resumable" {
   let data_root = @fs.tmpdir(prefix="moonsage-batch-test-")
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-  ], default_batch_config())
-  let record = BatchRecord::new("batch-store", default_batch_config(), selected, 1L)
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
+  let record = BatchRecord::new(
+    "batch-store",
+    default_batch_config(),
+    selected,
+    1L,
+  )
   save_batch(data_root, record)
   let loaded = load_batch(data_root, "batch-store")
   assert_true(loaded is Some(_))
   assert_eq(loaded.unwrap().items.length(), 1)
   append_batch_event(
     data_root,
-    BatchEvent::new(
-      "item_state",
-      "batch-store",
-      2L,
-      message="secret-value",
-    ),
+    BatchEvent::new("item_state", "batch-store", 2L, message="secret-value"),
     secrets=["secret-value"],
   )
   let events = load_batch_events(data_root, "batch-store")
@@ -325,9 +339,9 @@ async test "runner honors concurrency and retry budget without network" {
   })
   assert_true(peak <= 2)
   assert_true(finished.status is Completed)
-  assert_true(finished.items.all(fn(item) {
-    item.status is VerifiedPendingPublish
-  }))
+  assert_true(
+    finished.items.all(fn(item) { item.status is VerifiedPendingPublish }),
+  )
   assert_eq(attempts.get("acme--a"), Some(3))
   assert_eq(finished.find_item("acme--a").unwrap().attempts, 3)
   let persisted = load_batch(data_root, "batch-run").unwrap()
@@ -347,18 +361,28 @@ async test "runner skips completed fingerprints unless retry is forced" {
   )
   let previous_item = previous.items[0]
   previous_item.status = Verifying
-  apply_audit_result(previous, previous_item, {
-    ..verified_result(revision="same-revision"),
-    workspace: previous_item.workspace,
-    project_dir: previous_item.workspace + "/attempt-1/repo",
-  }, 2L)
+  apply_audit_result(
+    previous,
+    previous_item,
+    {
+      ..verified_result(revision="same-revision"),
+      workspace: previous_item.workspace,
+      project_dir: previous_item.workspace + "/attempt-1/repo",
+    },
+    2L,
+  )
   ignore(prepare_publish(previous, previous_item.key, 3L))
-  apply_publish_result(previous, previous_item.key, {
-    created: true,
-    pr_url: "https://github.com/acme/a/pull/7",
-    error: "",
-    retryable: false,
-  }, 4L)
+  apply_publish_result(
+    previous,
+    previous_item.key,
+    {
+      created: true,
+      pr_url: "https://github.com/acme/a/pull/7",
+      error: "",
+      retryable: false,
+    },
+    4L,
+  )
   save_batch(data_root, previous)
   let current = create_batch(
     data_root,
@@ -366,22 +390,18 @@ async test "runner skips completed fingerprints unless retry is forced" {
     default_batch_config(),
     snapshot,
   )
-  let skipped = run_batch_once(data_root, current, (item) => {
-    {
-      ..verified_result(revision="same-revision"),
-      workspace: item.workspace,
-      project_dir: item.workspace + "/attempt-1/repo",
-    }
+  let skipped = run_batch_once(data_root, current, item => {
+    ..verified_result(revision="same-revision"),
+    workspace: item.workspace,
+    project_dir: item.workspace + "/attempt-1/repo",
   })
   assert_true(skipped.items[0].status is Skipped)
   assert_eq(skipped.items[0].pr_url, "https://github.com/acme/a/pull/7")
   retry_batch_item(skipped, skipped.items[0].key, 5L, force=true)
-  let forced = run_batch_once(data_root, skipped, (item) => {
-    {
-      ..verified_result(revision="same-revision"),
-      workspace: item.workspace,
-      project_dir: item.workspace + "/attempt-2/repo",
-    }
+  let forced = run_batch_once(data_root, skipped, item => {
+    ..verified_result(revision="same-revision"),
+    workspace: item.workspace,
+    project_dir: item.workspace + "/attempt-2/repo",
   })
   assert_true(forced.items[0].status is VerifiedPendingPublish)
   assert_true(!forced.items[0].force_run)
@@ -391,19 +411,22 @@ async test "runner skips completed fingerprints unless retry is forced" {
 ///|
 test "watch snapshot requeues only changed module versions" {
   let config = { ..default_batch_config(), watch: true }
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a", version="1.0.0"),
-  ], config)
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a", version="1.0.0")],
+    config,
+  )
   let record = BatchRecord::new("batch-watch", config, selected, 1L)
   record.items[0].status = Created
-  let unchanged = filter_modules([
-    summary("acme/a", "https://github.com/acme/a", version="1.0.0"),
-  ], config)
+  let unchanged = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a", version="1.0.0")],
+    config,
+  )
   assert_eq(merge_snapshot(record, unchanged, 2L), 0)
   assert_true(record.items[0].status is Created)
-  let changed = filter_modules([
-    summary("acme/a", "https://github.com/acme/a", version="1.1.0"),
-  ], config)
+  let changed = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a", version="1.1.0")],
+    config,
+  )
   assert_eq(merge_snapshot(record, changed, 3L), 1)
   assert_true(record.items[0].status is Queued)
   assert_eq(record.items[0].module_version, "1.1.0")
@@ -412,36 +435,23 @@ test "watch snapshot requeues only changed module versions" {
 ///|
 test "watch fingerprint includes every module sharing a repository" {
   let config = { ..default_batch_config(), watch: true }
-  let selected = filter_modules([
-    summary(
-      "acme/parser",
-      "https://github.com/acme/shared",
-      version="1.0.0",
-    ),
-    summary(
-      "acme/runtime",
-      "https://github.com/acme/shared",
-      version="2.0.0",
-    ),
-  ], config)
-  assert_eq(
-    selected[0].version,
-    "acme/parser@1.0.0|acme/runtime@2.0.0",
+  let selected = filter_modules(
+    [
+      summary("acme/parser", "https://github.com/acme/shared", version="1.0.0"),
+      summary("acme/runtime", "https://github.com/acme/shared", version="2.0.0"),
+    ],
+    config,
   )
+  assert_eq(selected[0].version, "acme/parser@1.0.0|acme/runtime@2.0.0")
   let record = BatchRecord::new("batch-shared-watch", config, selected, 1L)
   record.items[0].status = Created
-  let changed = filter_modules([
-    summary(
-      "acme/runtime",
-      "https://github.com/acme/shared",
-      version="2.1.0",
-    ),
-    summary(
-      "acme/parser",
-      "https://github.com/acme/shared",
-      version="1.0.0",
-    ),
-  ], config)
+  let changed = filter_modules(
+    [
+      summary("acme/runtime", "https://github.com/acme/shared", version="2.1.0"),
+      summary("acme/parser", "https://github.com/acme/shared", version="1.0.0"),
+    ],
+    config,
+  )
   assert_eq(merge_snapshot(record, changed, 2L), 1)
   assert_true(record.items[0].status is Queued)
   assert_eq(
@@ -476,9 +486,10 @@ test "audit adapter parses diff evidence and retryable failures" {
   assert_true(diff_has_unsafe_file_kind("new file mode 120000\n"))
   assert_true(diff_has_unsafe_file_kind("GIT binary patch\n"))
   assert_true(!diff_has_unsafe_file_kind(diff))
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-  ], default_batch_config())
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
   let item = BatchItem::from_module(selected[0], 1, 1L)
   item.status = Fetching
   assert_true(apply_audit_stage(item, "fetching", 2L))
@@ -492,9 +503,10 @@ test "audit adapter parses diff evidence and retryable failures" {
 
 ///|
 async test "mode1 adapter rejects invalid items before network access" {
-  let selected = filter_modules([
-    summary("acme/a", "https://github.com/acme/a"),
-  ], default_batch_config())
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
   let item = BatchItem::from_module(selected[0], 1, 1L)
   item.module_names = []
   item.workspace = "unused"
@@ -517,7 +529,10 @@ async test "mode1 adapter rejects invalid items before network access" {
     "",
   )
   assert_true(missing_workspace.status is Failed)
-  assert_eq(missing_workspace.error, "batch item has no deterministic workspace")
+  assert_eq(
+    missing_workspace.error,
+    "batch item has no deterministic workspace",
+  )
 }
 
 ///|
@@ -553,7 +568,7 @@ async test "runner consumes persisted retry requests once" {
     default_batch_config(),
     [summary("acme/a", "https://github.com/acme/a")],
   )
-  let failed = run_batch_once(data_root, record, (_) => {
+  let failed = run_batch_once(data_root, record, _ => {
     failed_audit_result("moon test failed", false)
   })
   let key = failed.items[0].key
@@ -565,7 +580,7 @@ async test "runner consumes persisted retry requests once" {
     approved_items: [],
     updated_at_ms: 2L,
   })
-  let retried = run_batch_once(data_root, failed, (item) => {
+  let retried = run_batch_once(data_root, failed, item => {
     verified_result(revision="retry-" + item.key)
   })
   assert_true(retried.items[0].status is VerifiedPendingPublish)
@@ -593,7 +608,7 @@ async test "concurrent stage callbacks merge persisted item state" {
   }
   save_batch(data_root, record)
   let updates : Array[async () -> Bool] = record.items.map(fn(item) {
-    () =>
+    () => {
       update_batch_item_stage_by_id(
         data_root,
         record.id,
@@ -601,6 +616,7 @@ async test "concurrent stage callbacks merge persisted item state" {
         "auditing",
         attempts=1,
       )
+    }
   })
   let results = @async.all(updates, max_concurrent=2)
   assert_true(results.all(fn(value) { value }))
@@ -616,7 +632,10 @@ async test "concurrent stage callbacks merge persisted item state" {
       attempts=2,
     ),
   )
-  let retried = load_batch(data_root, record.id).unwrap().find_item(first.key).unwrap()
+  let retried = load_batch(data_root, record.id)
+    .unwrap()
+    .find_item(first.key)
+    .unwrap()
   assert_true(retried.status is Fetching)
   assert_eq(retried.attempts, 2)
   assert_true(
@@ -635,21 +654,12 @@ async test "concurrent stage callbacks merge persisted item state" {
 ///|
 async test "publisher honors auto cap approvals and retry budget" {
   let data_root = @fs.tmpdir(prefix="moonsage-publish-queue-test-")
-  let config = {
-    ..default_batch_config(),
-    max_prs: 1,
-    network_retries: 2,
-  }
-  let record = create_batch(
-    data_root,
-    "batch-publish-queue",
-    config,
-    [
-      summary("acme/a", "https://github.com/acme/a"),
-      summary("acme/b", "https://github.com/acme/b"),
-      summary("acme/c", "https://github.com/acme/c"),
-    ],
-  )
+  let config = { ..default_batch_config(), max_prs: 1, network_retries: 2 }
+  let record = create_batch(data_root, "batch-publish-queue", config, [
+    summary("acme/a", "https://github.com/acme/a"),
+    summary("acme/b", "https://github.com/acme/b"),
+    summary("acme/c", "https://github.com/acme/c"),
+  ])
   for item in record.items {
     item.status = Verifying
     let result = if item.key == "acme--c" {
@@ -657,12 +667,17 @@ async test "publisher honors auto cap approvals and retry budget" {
     } else {
       verified_result(path="src/" + item.repo + ".mbt")
     }
-    apply_audit_result(record, item, {
-      ..result,
-      workspace: item.workspace,
-      project_dir: item.workspace + "/attempt-1/repo",
-      source_revision: "rev-" + item.key,
-    }, 2L)
+    apply_audit_result(
+      record,
+      item,
+      {
+        ..result,
+        workspace: item.workspace,
+        project_dir: item.workspace + "/attempt-1/repo",
+        source_revision: "rev-" + item.key,
+      },
+      2L,
+    )
   }
   save_batch(data_root, record)
   save_batch_control(data_root, record.id, {
@@ -673,7 +688,7 @@ async test "publisher honors auto cap approvals and retry budget" {
     updated_at_ms: 3L,
   })
   let attempts : Map[String, Int] = Map([])
-  let published = publish_ready_batch_items(data_root, record, (request) => {
+  let published = publish_ready_batch_items(data_root, record, request => {
     let count = attempts.get(request.item_key).unwrap_or(0) + 1
     attempts[request.item_key] = count
     if request.item_key == "acme--c" && count == 1 {
@@ -686,7 +701,11 @@ async test "publisher honors auto cap approvals and retry budget" {
     } else {
       {
         created: true,
-        pr_url: "https://github.com/" + request.owner + "/" + request.repo + "/pull/1",
+        pr_url: "https://github.com/" +
+        request.owner +
+        "/" +
+        request.repo +
+        "/pull/1",
         error: "",
         retryable: false,
       }
@@ -717,13 +736,11 @@ async test "run by id refuses lock contention and releases its own lock" {
     [summary("acme/a", "https://github.com/acme/a")],
   )
   assert_true(try_acquire_batch_lock(data_root, record.id, "held-worker"))
-  let blocked = run_batch_by_id(data_root, record.id, (_) => {
-    verified_result()
-  }).unwrap()
+  let blocked = run_batch_by_id(data_root, record.id, _ => verified_result()).unwrap()
   assert_eq(blocked.last_error, "batch is already running")
   assert_true(blocked.items[0].status is Queued)
   release_batch_lock(data_root, record.id)
-  let finished = run_batch_by_id(data_root, record.id, (item) => {
+  let finished = run_batch_by_id(data_root, record.id, item => {
     verified_result(revision="locked-" + item.key)
   }).unwrap()
   assert_true(finished.status is Completed)

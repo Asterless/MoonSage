@@ -501,8 +501,18 @@ async test "stage_changed_paths excludes ignored files" {
     "one\n",
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
-  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
-  let add = @process.collect_output("git", ["add", "a.txt"], cwd=repo, no_console_window=true)
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "a.txt"],
+    cwd=repo,
+    no_console_window=true,
+  )
   let commit = @process.collect_output(
     "git",
     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
@@ -773,42 +783,36 @@ test "publish command environments isolate repository credentials" {
   let read_args = secure_git_args(["status", "--short"])
   assert_true(read_args.contains("credential.helper="))
   assert_true(read_args.contains("submodule.recurse=false"))
-  assert_true(!read_args.any(fn(arg) {
-    arg.contains("gh auth git-credential")
-  }))
+  assert_true(
+    !read_args.any(fn(arg) { arg.contains("gh auth git-credential") }),
+  )
   let push_args = secure_git_args(
     ["push", "origin", "HEAD:refs/heads/x"],
     github_auth=true,
   )
-  assert_true(push_args.any(fn(arg) {
-    arg.contains("gh auth git-credential")
-  }))
+  assert_true(push_args.any(fn(arg) { arg.contains("gh auth git-credential") }))
 }
 
 ///|
 test "publish URL path and PR metadata validation is strict" {
-  assert_true(canonical_github_url_matches(
-    "https://github.com/Owner/Repo.git",
-    "owner",
-    "repo",
-  ))
-  assert_true(!canonical_github_url_matches(
-    "git@github.com:owner/repo.git",
-    "owner",
-    "repo",
-  ))
-  assert_true(!canonical_github_url_matches(
-    "https://github.com/owner/repo/tree/main",
-    "owner",
-    "repo",
-  ))
+  assert_true(
+    canonical_github_url_matches(
+      "https://github.com/Owner/Repo.git", "owner", "repo",
+    ),
+  )
+  assert_true(
+    !canonical_github_url_matches(
+      "git@github.com:owner/repo.git", "owner", "repo",
+    ),
+  )
+  assert_true(
+    !canonical_github_url_matches(
+      "https://github.com/owner/repo/tree/main", "owner", "repo",
+    ),
+  )
   assert_eq(
     validated_pr_record(
-      "https://github.com/o/r/pull/12\tfalse\tmain\tmode1\to",
-      "o",
-      "r",
-      "o",
-      "mode1",
+      "https://github.com/o/r/pull/12\tfalse\tmain\tmode1\to", "o", "r", "o", "mode1",
       "main",
     ),
     Some("https://github.com/o/r/pull/12"),
@@ -816,11 +820,7 @@ test "publish URL path and PR metadata validation is strict" {
   let draft_rejected = try {
     ignore(
       validated_pr_record(
-        "https://github.com/o/r/pull/12\ttrue\tmain\tmode1\to",
-        "o",
-        "r",
-        "o",
-        "mode1",
+        "https://github.com/o/r/pull/12\ttrue\tmain\tmode1\to", "o", "r", "o", "mode1",
         "main",
       ),
     )
@@ -833,20 +833,19 @@ test "publish URL path and PR metadata validation is strict" {
 
 ///|
 test "publish path and diff classifiers reject unsafe values" {
-  assert_eq(
-    nul_separated_paths("src/a.mbt\u{0000}README.md\u{0000}"),
-    ["src/a.mbt", "README.md"],
-  )
+  assert_eq(nul_separated_paths("src/a.mbt\u{0000}README.md\u{0000}"), [
+    "src/a.mbt", "README.md",
+  ])
   assert_true(valid_repo_relative_path("src/a.mbt"))
   assert_true(!valid_repo_relative_path("../outside"))
   assert_true(!valid_repo_relative_path("src\\outside"))
   assert_true(!valid_repo_relative_path("bad\nname"))
-  assert_true(raw_diff_has_symlink_mode(
-    ":100644 120000 abc def M\u{0000}link\u{0000}",
-  ))
-  assert_true(raw_diff_has_symlink_mode(
-    ":120000 000000 abc def D\u{0000}link\u{0000}",
-  ))
+  assert_true(
+    raw_diff_has_symlink_mode(":100644 120000 abc def M\u{0000}link\u{0000}"),
+  )
+  assert_true(
+    raw_diff_has_symlink_mode(":120000 000000 abc def D\u{0000}link\u{0000}"),
+  )
   assert_true(numstat_has_binary("-\t-\timage.bin\u{0000}"))
   assert_true(!numstat_has_binary("2\t1\tsrc/a.mbt\u{0000}"))
   assert_true(valid_git_revision("0123456789abcdef0123456789abcdef01234567"))
@@ -861,8 +860,18 @@ async test "verified changed-file allowlist must match before staging" {
     "one\n",
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
-  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
-  let add = @process.collect_output("git", ["add", "a.txt"], cwd=repo, no_console_window=true)
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "a.txt"],
+    cwd=repo,
+    no_console_window=true,
+  )
   let commit = @process.collect_output(
     "git",
     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
@@ -888,10 +897,7 @@ async test "verified changed-file allowlist must match before staging" {
     }
     assert_true(rejected)
     assert_eq(git_text(["diff", "--cached", "--name-only"], repo).trim(), "")
-    let staged = stage_changed_paths(
-      repo,
-      verified_paths=["b.txt", "a.txt"],
-    )
+    let staged = stage_changed_paths(repo, verified_paths=["b.txt", "a.txt"])
     assert_eq(staged, ["a.txt", "b.txt"])
   }
   @fs.rmdir(repo, recursive=true) catch {
@@ -907,8 +913,18 @@ async test "publisher rejects binary changes before staging" {
     "text\n",
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
-  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
-  let add = @process.collect_output("git", ["add", "blob.bin"], cwd=repo, no_console_window=true)
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "blob.bin"],
+    cwd=repo,
+    no_console_window=true,
+  )
   let commit = @process.collect_output(
     "git",
     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
@@ -943,8 +959,18 @@ async test "publisher rejects staged git symlink mode" {
     "target\n",
     create_mode=@fs.CreateMode::CreateOrTruncate,
   )
-  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
-  let add = @process.collect_output("git", ["add", "target.txt"], cwd=repo, no_console_window=true)
+  let init = @process.collect_output(
+    "git",
+    ["init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let add = @process.collect_output(
+    "git",
+    ["add", "target.txt"],
+    cwd=repo,
+    no_console_window=true,
+  )
   let commit = @process.collect_output(
     "git",
     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
@@ -1002,4 +1028,30 @@ async test "publisher detects symlink or junction path components when supported
   @fs.rmdir(root, recursive=true) catch {
     _ => ()
   }
+}
+
+///|
+test "publish idempotency marker is stable, searchable, and legacy-compatible" {
+  let key = "batch-1:item-1:owner/repo@0123456789abcdef0123456789abcdef01234567#mode1-v1"
+  let token = publish_idempotency_token(key)
+  assert_eq(token, publish_idempotency_token(key))
+  assert_true(token.has_prefix("moonsage-publish-id:"))
+  assert_true(token.length() <= 80)
+  assert_true(token != publish_idempotency_token(key + ":retry"))
+  assert_eq(
+    publish_marker("owner", "repo", "moonsage/mode1/x", ""),
+    "<!-- moonsage-publish:owner/repo:moonsage/mode1/x -->",
+  )
+  let keyed = publish_marker("owner", "repo", "moonsage/mode1/x", key)
+  assert_true(keyed.contains(token))
+  let search = publish_idempotency_search(key)
+  assert_true(search.contains(token))
+  assert_true(search.contains("in:body"))
+  let rejected = try {
+    ignore(publish_idempotency_token("   "))
+    false
+  } catch {
+    _ => true
+  }
+  assert_true(rejected)
 }

@@ -13,36 +13,30 @@ async fn write_batch_control_action(
   id : String,
   action : String,
   item_key? : String = "",
-) -> Unit raise {
+) -> Unit {
   let previous = @batch.load_batch_control(data_root, id)
   let next : @batch.BatchControl = match action {
     "pause" => { ..previous, pause: true, updated_at_ms: @async.now() }
-    "cancel" => {
-      ..previous,
-      pause: false,
-      cancel: true,
-      updated_at_ms: @async.now(),
-    }
-    "resume" => {
-      ..previous,
-      pause: false,
-      cancel: false,
-      updated_at_ms: @async.now(),
-    }
-    "retry" => {
-      ..previous,
-      pause: false,
-      cancel: false,
-      retry_items: unique_batch_keys(previous.retry_items, item_key),
-      updated_at_ms: @async.now(),
-    }
-    "publish" => {
-      ..previous,
-      pause: false,
-      cancel: false,
-      approved_items: unique_batch_keys(previous.approved_items, item_key),
-      updated_at_ms: @async.now(),
-    }
+    "cancel" =>
+      { ..previous, pause: false, cancel: true, updated_at_ms: @async.now() }
+    "resume" =>
+      { ..previous, pause: false, cancel: false, updated_at_ms: @async.now() }
+    "retry" =>
+      {
+        ..previous,
+        pause: false,
+        cancel: false,
+        retry_items: unique_batch_keys(previous.retry_items, item_key),
+        updated_at_ms: @async.now(),
+      }
+    "publish" =>
+      {
+        ..previous,
+        pause: false,
+        cancel: false,
+        approved_items: unique_batch_keys(previous.approved_items, item_key),
+        updated_at_ms: @async.now(),
+      }
     _ => fail("unknown batch control action: \{action}")
   }
   @batch.save_batch_control(data_root, id, next)
@@ -53,7 +47,7 @@ async fn run_batch_start_command(
   m : @argparse.Matches,
   data_root : String,
   stream_json : Bool,
-) -> Unit raise {
+) -> Unit {
   let worker = flag_of(m, "worker")
   let resume_id = batch_value(m, "resume")
   let id = if worker {
@@ -66,11 +60,7 @@ async fn run_batch_start_command(
     let new_id = new_batch_id()
     let record = @batch.BatchRecord::new(new_id, config, [], @async.now())
     @batch.save_batch(data_root, record, secrets=batch_secret_values())
-    @batch.save_batch_control(
-      data_root,
-      new_id,
-      @batch.empty_batch_control(),
-    )
+    @batch.save_batch_control(data_root, new_id, @batch.empty_batch_control())
     new_id
   }
   if resume_id != "" {
@@ -87,7 +77,7 @@ async fn run_batch_control_command(
   m : @argparse.Matches,
   data_root : String,
   operation : String,
-) -> Unit raise {
+) -> Unit {
   let id = required_batch_id(m)
   guard @batch.load_batch(data_root, id) is Some(record) else {
     fail("batch not found: \{id}")
@@ -119,17 +109,16 @@ async fn run_batch_control_command(
       guard record.find_item(item_key) is Some(item) else {
         fail("batch item not found: \{item_key}")
       }
-      guard item.status is (@batch.Failed | @batch.Cancelled | @batch.Skipped | @batch.NoChanges) else {
+      guard item.status
+        is (@batch.Failed
+        | @batch.Cancelled
+        | @batch.Skipped
+        | @batch.NoChanges) else {
         fail("item cannot be retried from \{item.status.to_string()}")
       }
       if flag_of(m, "force") {
         ignore(
-          @batch.retry_batch_item_by_id(
-            data_root,
-            id,
-            item_key,
-            force=true,
-          ),
+          @batch.retry_batch_item_by_id(data_root, id, item_key, force=true),
         )
       } else {
         write_batch_control_action(data_root, id, "retry", item_key~)
@@ -148,11 +137,7 @@ async fn run_batch_control_command(
         fail("only verified_pending_publish items can be approved")
       }
       write_batch_control_action(data_root, id, "publish", item_key~)
-      let published = run_mode1_worker(
-        data_root,
-        id,
-        flag_of(m, "stream-json"),
-      )
+      let published = run_mode1_worker(data_root, id, flag_of(m, "stream-json"))
       if !flag_of(m, "stream-json") {
         print_batch_record(published)
       }

@@ -8,18 +8,9 @@ test "parse_github_repo extracts owner and repo" {
     parse_github_repo("https://github.com/owner/repo.git"),
     Some(("owner", "repo")),
   )
-  assert_eq(
-    parse_github_repo("https://github.com/owner/repo/"),
-    None,
-  )
-  assert_eq(
-    parse_github_repo("https://github.com/owner/repo/tree/main"),
-    None,
-  )
-  assert_eq(
-    parse_github_repo("https://github.com/owner/repo.git/"),
-    None,
-  )
+  assert_eq(parse_github_repo("https://github.com/owner/repo/"), None)
+  assert_eq(parse_github_repo("https://github.com/owner/repo/tree/main"), None)
+  assert_eq(parse_github_repo("https://github.com/owner/repo.git/"), None)
   assert_eq(parse_github_repo("https://github.com/owner/repo?x=1"), None)
   assert_eq(parse_github_repo("https://github.com/owner/repo#readme"), None)
   // http is rejected: only https GitHub URLs are supported
@@ -111,6 +102,22 @@ test "audit tools include write_file only in fix mode" {
   // git_diff tool is always present
   let always = fix.filter(fn(t) { t.schema.name == "git_diff" })
   assert_eq(always.length(), 1)
+}
+
+///|
+test "mode 1 audit tools replace arbitrary moon arguments with fixed verification" {
+  let ctx : AuditContext = {
+    project_dir: "C:/p",
+    fix: true,
+    confirm: ConfirmYes,
+  }
+  let tools = audit_tools(ctx, restricted_moon=true)
+  assert_eq(tools.length(), 8)
+  let moon = tools.filter(fn(tool) { tool.schema.name == "run_moon" })
+  assert_eq(moon.length(), 1)
+  assert_true(moon[0].schema.description.contains("target is always native"))
+  assert_true(tools.map(fn(tool) { tool.schema.name }).contains("write_file"))
+  assert_true(!tools.map(fn(tool) { tool.schema.name }).contains("create_pr"))
 }
 
 ///|
@@ -459,10 +466,7 @@ test "structured audit publish gate requires evidence diff and all validations" 
   assert_true(result.publishable())
   let failed = {
     ..result,
-    validation: {
-      ..result.validation,
-      test_passed: false,
-    },
+    validation: { ..result.validation, test_passed: false },
   }
   assert_true(!failed.publishable())
 }
@@ -476,24 +480,18 @@ test "controller verification invalidates evidence when the final diff changes" 
     conflicts: [],
   }
   let unchanged = finalize_controller_evidence(
-    evidence,
-    "diff --git a/a.mbt b/a.mbt\n+before\n",
-    "diff --git a/a.mbt b/a.mbt\n+before\n",
+    evidence, "diff --git a/a.mbt b/a.mbt\n+before\n", "diff --git a/a.mbt b/a.mbt\n+before\n",
   )
   assert_true(unchanged.verified)
   assert_true(unchanged.conflicts.is_empty())
   let changed = finalize_controller_evidence(
-    evidence,
-    "diff --git a/a.mbt b/a.mbt\n+before\n",
-    "diff --git a/a.mbt b/a.mbt\n+after\n",
+    evidence, "diff --git a/a.mbt b/a.mbt\n+before\n", "diff --git a/a.mbt b/a.mbt\n+after\n",
   )
   assert_true(!changed.verified)
   assert_true(changed.conflicts.length() == 1)
   assert_true(changed.conflicts[0].contains("changed during"))
   let unreadable = finalize_controller_evidence(
-    evidence,
-    "diff --git a/a.mbt b/a.mbt\n+before\n",
-    "(git diff failed)",
+    evidence, "diff --git a/a.mbt b/a.mbt\n+before\n", "(git diff failed)",
   )
   assert_true(!unreadable.verified)
   assert_true(unreadable.conflicts[0].contains("could not read"))
@@ -502,10 +500,7 @@ test "controller verification invalidates evidence when the final diff changes" 
 ///|
 async test "structured audit rejects missing credentials before external work" {
   let result = run_structured_audit_project(
-    "",
-    "https://example.invalid",
-    "model",
-    "C:/not-used",
+    "", "https://example.invalid", "model", "C:/not-used",
   )
   assert_true(result.status is Failed)
   assert_true(result.error.contains("MOONSAGE_API_KEY"))
@@ -515,10 +510,7 @@ async test "structured audit rejects missing credentials before external work" {
 async test "structured audit rejects a non MoonBit workspace before the model" {
   let workspace = @fs.tmpdir(prefix="moonsage-structured-audit-test-")
   let result = run_structured_audit_project(
-    "test-key",
-    "https://example.invalid",
-    "model",
-    workspace,
+    "test-key", "https://example.invalid", "model", workspace,
   )
   assert_true(result.status is Failed)
   assert_true(result.error.contains("moon.mod"))

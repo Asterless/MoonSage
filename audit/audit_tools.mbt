@@ -20,9 +20,21 @@ priv struct AuditContext {
 ///|
 // 组装审计工具集：只读工具来自共享 local 包；修复模式下追加共享写工具
 // （write_file / multi_edit / remove），确认方式映射为共享 WriteConfirm。
-fn audit_tools(ctx : AuditContext) -> Array[@tools.Tool] {
+fn audit_tools(
+  ctx : AuditContext,
+  restricted_moon? : Bool = false,
+) -> Array[@tools.Tool] {
   let ws = @editing.Workspace::new(ctx.project_dir)
-  let base = @local.local_tools(ws)
+  let available = @local.local_tools(ws)
+  // Mode 1 runs against untrusted repositories. Replace the general-purpose
+  // `run_moon` tool with the controller-owned check/build/test-only variant;
+  // ordinary interactive audits keep their existing tool surface.
+  let base = if restricted_moon {
+    available.filter(fn(tool) { tool.schema.name != "run_moon" }) +
+    @local.verification_tools(ws)
+  } else {
+    available
+  }
   if ctx.fix {
     let confirm = if ctx.confirm is ConfirmPrompt {
       @editing.Prompt

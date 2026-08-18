@@ -27,14 +27,19 @@ fn failed_audit_result(message : String, retryable : Bool) -> BatchAuditResult {
   }
 }
 
+///|
 async fn emit_event(
   data_root : String,
   event : BatchEvent,
   on_event : async (BatchEvent) -> Unit,
   secrets : Array[String],
 ) -> Unit {
-  append_batch_event(data_root, event, secrets~) catch { _ => () }
-  on_event(event) catch { _ => () }
+  append_batch_event(data_root, event, secrets~) catch {
+    _ => ()
+  }
+  on_event(event) catch {
+    _ => ()
+  }
 }
 
 ///|
@@ -69,6 +74,35 @@ fn batch_state_event(record : BatchRecord) -> BatchEvent {
       "pr_count": json_int(record.pr_count),
     }),
   )
+}
+
+///|
+async fn persist_cancelled_batch(
+  data_root : String,
+  record : BatchRecord,
+  on_event : async (BatchEvent) -> Unit,
+  secrets : Array[String],
+) -> Unit {
+  let now_ms = @async.now()
+  cancel_batch(record, now_ms)
+  save_batch(data_root, record, secrets~) catch {
+    _ => ()
+  }
+  ignore(cleanup_batch_item_workspaces(data_root, record, now_ms))
+  emit_event(data_root, batch_state_event(record), on_event, secrets)
+}
+
+///|
+async fn cancel_batch_if_requested(
+  data_root : String,
+  record : BatchRecord,
+  on_event : async (BatchEvent) -> Unit,
+  secrets : Array[String],
+) -> Bool {
+  let control = load_batch_control(data_root, record.id)
+  guard control.cancel || record.status is Cancelled else { return false }
+  persist_cancelled_batch(data_root, record, on_event, secrets)
+  true
 }
 
 ///|
@@ -116,7 +150,11 @@ pub async fn update_batch_item_stage_by_id(
             } catch {
               _ => false
             }
-            if saved { Some(item_state_event(record, item)) } else { None }
+            if saved {
+              Some(item_state_event(record, item))
+            } else {
+              None
+            }
           }
         }
       }
@@ -169,7 +207,7 @@ pub async fn create_batch(
   snapshot : Array[@moonsage.ModuleSummary],
   on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
   secrets? : Array[String] = [],
-) -> BatchRecord raise {
+) -> BatchRecord {
   let now = @async.now()
   let selected = filter_modules(snapshot, config)
   let record = BatchRecord::new(id, config, selected, now)
@@ -238,9 +276,12 @@ pub async fn run_batch_once(
   execute : async (BatchItem) -> BatchAuditResult,
   on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
   secrets? : Array[String] = [],
-) -> BatchRecord raise {
+) -> BatchRecord {
   validate_batch_config(record.config)
-  guard !(record.status is Cancelled) else { return record }
+  if record.status is Cancelled {
+    ignore(cleanup_batch_item_workspaces(data_root, record, @async.now()))
+    return record
+  }
   if record.status is (Queued | Paused | Watching | Completed | Failed) {
     record.status = Running
     record.updated_at_ms = @async.now()
@@ -251,7 +292,9 @@ pub async fn run_batch_once(
     let control = load_batch_control(data_root, record.id)
     if !control.retry_items.is_empty() {
       for key in control.retry_items {
-        retry_batch_item(record, key, @async.now(), force=true) catch { _ => () }
+        retry_batch_item(record, key, @async.now(), force=true) catch {
+          _ => ()
+        }
       }
       save_batch_control(data_root, record.id, {
         ..control,
@@ -262,9 +305,7 @@ pub async fn run_batch_once(
       }
     }
     if control.cancel {
-      cancel_batch(record, @async.now())
-      save_batch(data_root, record, secrets~)
-      emit_event(data_root, batch_state_event(record), on_event, secrets)
+      persist_cancelled_batch(data_root, record, on_event, secrets)
       return record
     }
     if control.pause {
@@ -282,38 +323,50 @@ pub async fn run_batch_once(
       emit_event(data_root, item_state_event(record, item), on_event, secrets)
     }
     save_batch(data_root, record, secrets~)
-    let tasks : Array[async () -> (BatchItem, BatchAuditResult)] = claimed.map(
-      fn(item) {
-        () => {
-          let result = execute_with_retries(item, record.config, execute)
-          (item, result)
-        }
-      },
-    )
-    let outcomes = @async.all(
-      tasks,
-      max_concurrent=record.config.concurrency,
-    )
-    let completed = completed_fingerprints(list_batches(data_root))
-    for outcome in outcomes {
-      let (item, result) = outcome
-      apply_audit_result(record, item, result, @async.now())
-      ignore(apply_idempotency(item, completed, @async.now()))
-      item.force_run = false
-      emit_event(data_root, item_state_event(record, item), on_event, secrets)
-      emit_event(
-        data_root,
-        BatchEvent::new(
-          "validation",
-          record.id,
-          @async.now(),
-          item_key=item.key,
-          cycle=record.cycle,
-          data=item.validation.to_json(),
-        ),
-        on_event,
-        secrets,
-      )
+    let tasks : Array[async () -> (BatchItem, BatchAuditResult)] = claimed.map(fn(
+      item,
+    ) {
+      () => {
+        let result = execute_with_retries(item, record.config, execute)
+        (item, result)
+      }
+    })
+    let outcomes = @async.all(tasks, max_concurrent=record.config.concurrency)
+    let cancellation = load_batch_control(data_root, record.id)
+    if cancellation.cancel {
+      // A cancellation request wins over results that were already in flight:
+      // never let a late model response resurrect an item or make it eligible
+      // for publishing after the user asked to stop the batch.
+      cancel_batch(record, @async.now())
+      for outcome in outcomes {
+        let (item, _) = outcome
+        item.force_run = false
+        emit_event(data_root, item_state_event(record, item), on_event, secrets)
+      }
+      persist_cancelled_batch(data_root, record, on_event, secrets)
+      return record
+    } else {
+      let completed = completed_fingerprints(list_batches(data_root))
+      for outcome in outcomes {
+        let (item, result) = outcome
+        apply_audit_result(record, item, result, @async.now())
+        ignore(apply_idempotency(item, completed, @async.now()))
+        item.force_run = false
+        emit_event(data_root, item_state_event(record, item), on_event, secrets)
+        emit_event(
+          data_root,
+          BatchEvent::new(
+            "validation",
+            record.id,
+            @async.now(),
+            item_key=item.key,
+            cycle=record.cycle,
+            data=item.validation.to_json(),
+          ),
+          on_event,
+          secrets,
+        )
+      }
     }
     save_batch(data_root, record, secrets~)
   }
@@ -332,7 +385,7 @@ pub async fn start_batch(
   execute : async (BatchItem) -> BatchAuditResult,
   on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
   secrets? : Array[String] = [],
-) -> BatchRecord raise {
+) -> BatchRecord {
   guard try_acquire_batch_lock(
     data_root,
     id,
@@ -353,13 +406,7 @@ pub async fn start_batch(
       raise error
     }
   }
-  let result = run_batch_once(
-    data_root,
-    record,
-    execute,
-    on_event~,
-    secrets~,
-  ) catch {
+  let result = run_batch_once(data_root, record, execute, on_event~, secrets~) catch {
     error => {
       release_batch_lock(data_root, id)
       raise error
@@ -394,7 +441,9 @@ pub async fn run_batch_by_id(
       record.status = Failed
       record.last_error = error.to_string()
       record.updated_at_ms = @async.now()
-      save_batch(data_root, record, secrets~) catch { _ => () }
+      save_batch(data_root, record, secrets~) catch {
+        _ => ()
+      }
       Some(record)
     }
   }
@@ -403,18 +452,12 @@ pub async fn run_batch_by_id(
 }
 
 ///|
-pub async fn get_batch_status(
-  data_root : String,
-  id : String,
-) -> BatchRecord? {
+pub async fn get_batch_status(data_root : String, id : String) -> BatchRecord? {
   load_batch(data_root, id)
 }
 
 ///|
-pub async fn pause_batch_by_id(
-  data_root : String,
-  id : String,
-) -> BatchRecord? {
+pub async fn pause_batch_by_id(data_root : String, id : String) -> BatchRecord? {
   guard load_batch(data_root, id) is Some(record) else { return None }
   save_batch_control(data_root, id, {
     pause: true,
@@ -428,7 +471,9 @@ pub async fn pause_batch_by_id(
   if !(record.status is Cancelled) {
     record.status = Paused
     record.updated_at_ms = @async.now()
-    save_batch(data_root, record) catch { _ => () }
+    save_batch(data_root, record) catch {
+      _ => ()
+    }
   }
   Some(record)
 }
@@ -451,7 +496,9 @@ pub async fn resume_batch_by_id(
   }
   record.status = Queued
   record.updated_at_ms = @async.now()
-  save_batch(data_root, record) catch { _ => () }
+  save_batch(data_root, record) catch {
+    _ => ()
+  }
   Some(record)
 }
 
@@ -470,8 +517,7 @@ pub async fn cancel_batch_by_id(
   }) catch {
     _ => ()
   }
-  cancel_batch(record, @async.now())
-  save_batch(data_root, record) catch { _ => () }
+  persist_cancelled_batch(data_root, record, ignore_batch_event, [])
   Some(record)
 }
 
@@ -486,7 +532,9 @@ pub async fn retry_batch_item_by_id(
   retry_batch_item(record, item_key, @async.now(), force~) catch {
     _ => return Some(record)
   }
-  save_batch(data_root, record) catch { _ => () }
+  save_batch(data_root, record) catch {
+    _ => ()
+  }
   append_batch_event(
     data_root,
     BatchEvent::new(
@@ -514,10 +562,16 @@ pub async fn publish_batch_item_by_id(
   secrets? : Array[String] = [],
 ) -> BatchRecord? {
   guard load_batch(data_root, id) is Some(record) else { return None }
-  guard prepare_publish(record, item_key, @async.now(), approved~) is Some(request) else {
+  if cancel_batch_if_requested(data_root, record, on_event, secrets) {
     return Some(record)
   }
-  save_batch(data_root, record, secrets~) catch { _ => () }
+  guard prepare_publish(record, item_key, @async.now(), approved~)
+    is Some(request) else {
+    return Some(record)
+  }
+  save_batch(data_root, record, secrets~) catch {
+    _ => ()
+  }
   emit_event(
     data_root,
     BatchEvent::new(
@@ -532,26 +586,19 @@ pub async fn publish_batch_item_by_id(
     on_event,
     secrets,
   )
-  let result = @async.with_timeout(record.config.package_timeout_ms, () => {
-    publish(request)
-  }) catch {
-    @async.TimeoutError(_) => {
-      created: false,
-      pr_url: "",
-      error: "publish timed out",
-      retryable: true,
-    }
-    error => {
-      created: false,
-      pr_url: "",
-      error: error.to_string(),
-      retryable: true,
-    }
+  if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+    return Some(record)
+  }
+  let result = execute_publish_with_retries(request, record.config, publish)
+  if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+    return Some(record)
   }
   apply_publish_result(record, item_key, result, @async.now()) catch {
     _ => return Some(record)
   }
-  save_batch(data_root, record, secrets~) catch { _ => () }
+  save_batch(data_root, record, secrets~) catch {
+    _ => ()
+  }
   emit_event(
     data_root,
     BatchEvent::new(
@@ -583,18 +630,20 @@ async fn execute_publish_with_retries(
     let result = @async.with_timeout(config.package_timeout_ms, () => {
       publish(request)
     }) catch {
-      @async.TimeoutError(_) => {
-        created: false,
-        pr_url: "",
-        error: "publish timed out",
-        retryable: true,
-      }
-      error => {
-        created: false,
-        pr_url: "",
-        error: error.to_string(),
-        retryable: true,
-      }
+      @async.TimeoutError(_) =>
+        {
+          created: false,
+          pr_url: "",
+          error: "publish timed out",
+          retryable: true,
+        }
+      error =>
+        {
+          created: false,
+          pr_url: "",
+          error: error.to_string(),
+          retryable: true,
+        }
     }
     if result.created || !result.retryable || retries >= config.network_retries {
       return result
@@ -616,24 +665,29 @@ pub async fn publish_ready_batch_items(
   secrets? : Array[String] = [],
 ) -> BatchRecord {
   let control = load_batch_control(data_root, record.id)
+  if control.cancel || record.status is Cancelled {
+    persist_cancelled_batch(data_root, record, on_event, secrets)
+    return record
+  }
   let mut consumed_approval = false
   let remaining_approvals = control.approved_items.copy()
   for item in record.items {
+    if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+      return record
+    }
     let approved = remaining_approvals.contains(item.key)
     guard approved || can_auto_publish(record, item) else { continue }
-    guard prepare_publish(
-      record,
-      item.key,
-      @async.now(),
-      approved~,
-    ) is Some(request) else {
+    guard prepare_publish(record, item.key, @async.now(), approved~)
+      is Some(request) else {
       continue
     }
     if approved {
       remaining_approvals.retain(fn(key) { key != item.key })
       consumed_approval = true
     }
-    save_batch(data_root, record, secrets~) catch { _ => () }
+    save_batch(data_root, record, secrets~) catch {
+      _ => ()
+    }
     emit_event(
       data_root,
       BatchEvent::new(
@@ -648,9 +702,19 @@ pub async fn publish_ready_batch_items(
       on_event,
       secrets,
     )
+    if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+      return record
+    }
     let result = execute_publish_with_retries(request, record.config, publish)
-    apply_publish_result(record, item.key, result, @async.now()) catch { _ => () }
-    save_batch(data_root, record, secrets~) catch { _ => () }
+    if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+      return record
+    }
+    apply_publish_result(record, item.key, result, @async.now()) catch {
+      _ => ()
+    }
+    save_batch(data_root, record, secrets~) catch {
+      _ => ()
+    }
     emit_event(
       data_root,
       BatchEvent::new(
@@ -679,7 +743,9 @@ pub async fn publish_ready_batch_items(
       _ => ()
     }
   }
-  save_batch(data_root, record, secrets~) catch { _ => () }
+  save_batch(data_root, record, secrets~) catch {
+    _ => ()
+  }
   emit_event(data_root, batch_state_event(record), on_event, secrets)
   record
 }
@@ -697,8 +763,10 @@ pub async fn run_batch_watch(
   max_cycles? : Int = 0,
   on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
   secrets? : Array[String] = [],
-) -> BatchRecord raise {
-  guard record.config.watch else { fail("batch is not configured for watch mode") }
+) -> BatchRecord {
+  guard record.config.watch else {
+    fail("batch is not configured for watch mode")
+  }
   let mut completed_cycles = 0
   let current = run_batch_once(data_root, record, execute, on_event~, secrets~)
   for ;; {
@@ -709,8 +777,7 @@ pub async fn run_batch_watch(
     @async.sleep(current.config.interval_ms)
     let control = load_batch_control(data_root, current.id)
     if control.cancel {
-      cancel_batch(current, @async.now())
-      save_batch(data_root, current, secrets~)
+      persist_cancelled_batch(data_root, current, on_event, secrets)
       return current
     }
     if control.pause {
@@ -805,7 +872,9 @@ pub async fn run_batch_watch_by_id(
       record.status = Failed
       record.last_error = error.to_string()
       record.updated_at_ms = @async.now()
-      save_batch(data_root, record, secrets~) catch { _ => () }
+      save_batch(data_root, record, secrets~) catch {
+        _ => ()
+      }
       Some(record)
     }
   }

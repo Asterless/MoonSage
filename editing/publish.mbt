@@ -20,7 +20,9 @@ pub fn build_pr_body(report : String, owner : String, repo : String) -> String {
 
 ///|
 fn valid_branch_name(branch : String) -> Bool {
-  if branch == "" || branch.length() > 180 || branch.has_prefix("-") ||
+  if branch == "" ||
+    branch.length() > 180 ||
+    branch.has_prefix("-") ||
     branch.has_prefix("/") ||
     branch.has_suffix("/") ||
     branch.has_suffix(".") ||
@@ -84,17 +86,8 @@ fn copy_publish_environment(names : Array[String]) -> Map[String, String] {
 ///|
 fn repository_command_environment() -> Map[String, String] {
   let environment = copy_publish_environment([
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "LOCALAPPDATA",
-    "APPDATA",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
+    "PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "SystemRoot", "ComSpec",
+    "PATHEXT", "TEMP", "TMP", "TMPDIR",
   ])
   environment["GIT_CONFIG_GLOBAL"] = publish_null_device()
   environment["GIT_LFS_SKIP_SMUDGE"] = "1"
@@ -109,21 +102,9 @@ fn github_command_environment() -> Map[String, String] {
   // Repository commands get the environment above and cannot read these
   // tokens, model credentials, SSH agents, or repository .env files.
   copy_publish_environment([
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "LOCALAPPDATA",
-    "APPDATA",
-    "XDG_CONFIG_HOME",
-    "GH_CONFIG_DIR",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
+    "PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "XDG_CONFIG_HOME",
+    "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "SystemRoot", "ComSpec", "PATHEXT",
+    "TEMP", "TMP", "TMPDIR",
   ])
 }
 
@@ -198,11 +179,12 @@ async fn collect_publish_output(
   })
   match result {
     Some(value) => value
-    None => (
-      -1,
-      "",
-      "\{cmd} command timed out after \{publish_command_timeout_ms} ms",
-    )
+    None =>
+      (
+        -1,
+        "",
+        "\{cmd} command timed out after \{publish_command_timeout_ms} ms",
+      )
   }
 }
 
@@ -266,11 +248,12 @@ async fn validate_remote_repository(
   owner : String,
   repo : String,
 ) -> Unit {
-  let fetch_url = git_text(["remote", "get-url", remote], project_dir).trim().to_owned()
-  let push_url = git_text(
-    ["remote", "get-url", "--push", remote],
-    project_dir,
-  ).trim().to_owned()
+  let fetch_url = git_text(["remote", "get-url", remote], project_dir)
+    .trim()
+    .to_owned()
+  let push_url = git_text(["remote", "get-url", "--push", remote], project_dir)
+    .trim()
+    .to_owned()
   guard canonical_github_url_matches(fetch_url, owner, repo) else {
     fail(
       "\{remote} fetch URL is not canonical https://github.com/\{owner}/\{repo}.git",
@@ -336,13 +319,19 @@ async fn remote_default_branch(
   _current : String,
 ) -> String {
   let head = git_text(
-    ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    project_dir,
-  ).trim().to_owned()
+      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      project_dir,
+    )
+    .trim()
+    .to_owned()
   let prefix = "origin/"
   let local_head = if head.has_prefix(prefix) {
     let value = head[prefix.length():].to_owned()
-    if valid_branch_name(value) { Some(value) } else { None }
+    if valid_branch_name(value) {
+      Some(value)
+    } else {
+      None
+    }
   } else {
     None
   }
@@ -377,34 +366,23 @@ fn is_moonsage_publish_branch(branch : String) -> Bool {
 ///|
 // GitHub 提交身份：优先从 gh 读取；失败时退回通用身份。
 async fn github_identity() -> (String, String) {
-  let (name_exit, name_out, _) = collect_publish_output(
-    "gh",
-    ["api", "user", "--jq", ".name"],
-  )
-  let (id_exit, id_out, _) = collect_publish_output(
-    "gh",
-    ["api", "user", "--jq", ".id"],
-  )
-  let (login_exit, login_out, _) = collect_publish_output(
-    "gh",
-    ["api", "user", "--jq", ".login"],
-  )
-  let login = if login_exit == 0 {
-    login_out
-  } else {
-    ""
-  }
+  let (name_exit, name_out, _) = collect_publish_output("gh", [
+    "api", "user", "--jq", ".name",
+  ])
+  let (id_exit, id_out, _) = collect_publish_output("gh", [
+    "api", "user", "--jq", ".id",
+  ])
+  let (login_exit, login_out, _) = collect_publish_output("gh", [
+    "api", "user", "--jq", ".login",
+  ])
+  let login = if login_exit == 0 { login_out } else { "" }
   let login = login.trim().to_owned()
   let id = if id_exit == 0 {
     @util.parse_int_or(id_out.trim().to_owned(), 0)
   } else {
     0
   }
-  let name = if name_exit == 0 {
-    name_out.trim().to_owned()
-  } else {
-    ""
-  }
+  let name = if name_exit == 0 { name_out.trim().to_owned() } else { "" }
   let name = if name != "" {
     name
   } else if login != "" {
@@ -456,7 +434,9 @@ async fn required_git_text(
 
 ///|
 fn valid_repo_relative_path(path : String) -> Bool {
-  if path == "" || path.has_prefix("/") || path.has_prefix("\\") ||
+  if path == "" ||
+    path.has_prefix("/") ||
+    path.has_prefix("\\") ||
     path.contains("\\") ||
     path.contains("\u{0000}") ||
     path.contains("\n") ||
@@ -464,7 +444,8 @@ fn valid_repo_relative_path(path : String) -> Bool {
     return false
   }
   let segments = path.split("/").to_array()
-  !segments.is_empty() && segments.all(fn(segment) {
+  !segments.is_empty() &&
+  segments.all(fn(segment) {
     segment != "" && segment != "." && segment != ".."
   })
 }
@@ -472,10 +453,10 @@ fn valid_repo_relative_path(path : String) -> Bool {
 ///|
 fn nul_separated_paths(text : String) -> Array[String] {
   text
-    .split("\u{0000}")
-    .filter(fn(path) { path != "" })
-    .map(fn(path) { path.to_owned() })
-    .to_array()
+  .split("\u{0000}")
+  .filter(fn(path) { path != "" })
+  .map(fn(path) { path.to_owned() })
+  .to_array()
 }
 
 ///|
@@ -512,11 +493,12 @@ fn same_publish_paths(left : Array[String], right : Array[String]) -> Bool {
 ///|
 async fn git_changed_paths(project_dir : String) -> Array[String] {
   let paths : Array[String] = []
-  for args in [
-    ["diff", "--name-only", "-z", "--"],
-    ["diff", "--cached", "--name-only", "-z", "--"],
-    ["ls-files", "--others", "--exclude-standard", "-z", "--"],
-  ] {
+  for
+    args in [
+      ["diff", "--name-only", "-z", "--"],
+      ["diff", "--cached", "--name-only", "-z", "--"],
+      ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+    ] {
     let text = required_git_text(project_dir, args, "enumerating changed files")
     for path in nul_separated_paths(text) {
       if !paths.contains(path) {
@@ -557,7 +539,7 @@ async fn path_tree_has_link_or_special(
 ///|
 async fn file_sample_has_nul(path : String) -> Bool {
   let file = @fs.open(path, mode=@fs.Mode::ReadOnly)
-  let sample = try file.read_some(max_len=8192) catch {
+  let sample = file.read_some(max_len=8192) catch {
     error => {
       file.close()
       raise error
@@ -593,26 +575,28 @@ async fn validate_changed_file_kinds(
   paths : Array[String],
 ) -> Unit {
   let raw = required_git_text(
-    project_dir,
-    ["diff", "--raw", "-z", "--"],
-    "checking worktree file modes",
-  ) + required_git_text(
-    project_dir,
-    ["diff", "--cached", "--raw", "-z", "--"],
-    "checking staged file modes",
-  )
+      project_dir,
+      ["diff", "--raw", "-z", "--"],
+      "checking worktree file modes",
+    ) +
+    required_git_text(
+      project_dir,
+      ["diff", "--cached", "--raw", "-z", "--"],
+      "checking staged file modes",
+    )
   guard !raw_diff_has_symlink_mode(raw) else {
     fail("refusing to publish a symbolic-link mode change")
   }
   let numstat = required_git_text(
-    project_dir,
-    ["diff", "--numstat", "-z", "--"],
-    "checking worktree binary changes",
-  ) + required_git_text(
-    project_dir,
-    ["diff", "--cached", "--numstat", "-z", "--"],
-    "checking staged binary changes",
-  )
+      project_dir,
+      ["diff", "--numstat", "-z", "--"],
+      "checking worktree binary changes",
+    ) +
+    required_git_text(
+      project_dir,
+      ["diff", "--cached", "--numstat", "-z", "--"],
+      "checking staged binary changes",
+    )
   guard !numstat_has_binary(numstat) else {
     fail("refusing to publish a binary change")
   }
@@ -647,7 +631,9 @@ async fn stage_changed_paths(
     fail("worktree changes do not match the verified changed-file allowlist")
   }
   let paths = expected
-  guard paths.length() > 0 else { fail("no changes to publish (git diff is empty)") }
+  guard paths.length() > 0 else {
+    fail("no changes to publish (git diff is empty)")
+  }
   validate_changed_file_kinds(project_dir, paths)
   for path in paths {
     let add = collect_publish_output(
@@ -655,15 +641,17 @@ async fn stage_changed_paths(
       ["add", "--", path],
       cwd=project_dir,
     )
-    guard add.0 == 0 else {
-      fail("git add failed for \{path}: \{add.2}")
-    }
+    guard add.0 == 0 else { fail("git add failed for \{path}: \{add.2}") }
   }
-  let staged = normalize_publish_paths(nul_separated_paths(required_git_text(
-    project_dir,
-    ["diff", "--cached", "--name-only", "-z", "--"],
-    "checking staged files",
-  )))
+  let staged = normalize_publish_paths(
+    nul_separated_paths(
+      required_git_text(
+        project_dir,
+        ["diff", "--cached", "--name-only", "-z", "--"],
+        "checking staged files",
+      ),
+    ),
+  )
   guard same_publish_paths(staged, paths) else {
     fail("staged files do not match the verified changed-file allowlist")
   }
@@ -721,10 +709,8 @@ async fn remote_branch_revision(
   for line_view in out.split("\n") {
     let line = line_view.trim().to_owned()
     match line.split_once("\t") {
-      Some((revision, reference)) if
-        reference == "refs/heads/\{branch}" &&
-        valid_git_revision(revision.to_owned()) =>
-        return revision.to_owned()
+      Some((revision, reference)) if reference == "refs/heads/\{branch}" &&
+        valid_git_revision(revision.to_owned()) => return revision.to_owned()
       _ => ()
     }
   }
@@ -738,6 +724,54 @@ fn valid_pull_request_url(url : String, owner : String, repo : String) -> Bool {
   guard lower.has_prefix(prefix) else { return false }
   let number = url[prefix.length():].to_owned()
   number != "" && number.all(fn(code) { code >= '0' && code <= '9' })
+}
+
+///|
+fn padded_publish_hash(value : Int) -> String {
+  let raw = value.reinterpret_as_uint().to_string(radix=16)
+  if raw.length() >= 8 {
+    raw
+  } else {
+    "00000000"[:8 - raw.length()].to_owned() + raw
+  }
+}
+
+///|
+// Use explicit seeds rather than String::hash so the marker is stable on every
+// backend and process. Two independent xxHash32 values keep the searchable
+// token short without putting the (potentially long) batch key in the PR body.
+fn publish_idempotency_token(key : String) -> String raise {
+  let normalized = key.trim().to_owned()
+  guard normalized != "" && normalized.length() <= 4096 else {
+    fail("invalid publish idempotency key")
+  }
+  let first = Hasher(seed=0)
+  first.combine_string(normalized)
+  let second = Hasher(seed=0x4D534731)
+  second.combine_string(normalized)
+  "moonsage-publish-id:" +
+  padded_publish_hash(first.finalize()) +
+  padded_publish_hash(second.finalize())
+}
+
+///|
+fn publish_marker(
+  owner : String,
+  repo : String,
+  branch : String,
+  idempotency_key : String,
+) -> String raise {
+  if idempotency_key == "" {
+    // Keep the original audit --pr marker byte-for-byte compatible.
+    "<!-- moonsage-publish:\{owner}/\{repo}:\{branch} -->"
+  } else {
+    "<!-- \{publish_idempotency_token(idempotency_key)} -->"
+  }
+}
+
+///|
+fn publish_idempotency_search(key : String) -> String raise {
+  "\"\{publish_idempotency_token(key)}\" in:body"
 }
 
 ///|
@@ -766,9 +800,17 @@ fn validated_pr_record(
   guard draft == "false" else {
     fail("refusing to reuse or report a draft pull request")
   }
-  guard base == base_branch && head == head_branch &&
+  guard valid_branch_name(base) &&
+    valid_branch_name(head) &&
+    valid_component(actual_owner) else {
+    fail("gh returned invalid pull request head/base metadata")
+  }
+  guard base == base_branch &&
+    head == head_branch &&
     actual_owner.to_lower() == head_owner.to_lower() else {
-    fail("existing pull request head/base metadata does not match the publish request")
+    fail(
+      "existing pull request head/base metadata does not match the publish request",
+    )
   }
   Some(url)
 }
@@ -781,36 +823,55 @@ async fn find_existing_ready_pr(
   head_branch : String,
   base_branch : String,
 ) -> String? {
-  let (exit, out, err) = collect_publish_output(
-    "gh",
-    [
-      "pr",
-      "list",
-      "--repo",
-      "\{owner}/\{repo}",
-      "--head",
-      "\{head_owner}:\{head_branch}",
-      "--state",
-      "all",
-      "--limit",
-      "1",
-      "--json",
-      "url,isDraft,baseRefName,headRefName,headRepositoryOwner",
-      "--jq",
-      ".[0] | [.url, (.isDraft|tostring), .baseRefName, .headRefName, .headRepositoryOwner.login] | @tsv",
-    ],
-  )
+  let (exit, out, err) = collect_publish_output("gh", [
+    "pr",
+    "list",
+    "--repo",
+    "\{owner}/\{repo}",
+    "--head",
+    "\{head_owner}:\{head_branch}",
+    "--state",
+    "all",
+    "--limit",
+    "1",
+    "--json",
+    "url,isDraft,baseRefName,headRefName,headRepositoryOwner",
+    "--jq",
+    ".[0] | [.url, (.isDraft|tostring), .baseRefName, .headRefName, .headRepositoryOwner.login] | @tsv",
+  ])
+  guard exit == 0 else { fail("cannot query existing pull requests: \{err}") }
+  validated_pr_record(out, owner, repo, head_owner, head_branch, base_branch)
+}
+
+///|
+async fn find_existing_ready_pr_by_marker(
+  owner : String,
+  repo : String,
+  head_owner : String,
+  head_branch : String,
+  base_branch : String,
+  idempotency_key : String,
+) -> String? {
+  let (exit, out, err) = collect_publish_output("gh", [
+    "pr",
+    "list",
+    "--repo",
+    "\{owner}/\{repo}",
+    "--state",
+    "all",
+    "--search",
+    publish_idempotency_search(idempotency_key),
+    "--limit",
+    "1",
+    "--json",
+    "url,isDraft,baseRefName,headRefName,headRepositoryOwner",
+    "--jq",
+    ".[0] | [.url, (.isDraft|tostring), .baseRefName, .headRefName, .headRepositoryOwner.login] | @tsv",
+  ])
   guard exit == 0 else {
-    fail("cannot query existing pull requests: \{err}")
+    fail("cannot query existing pull requests by publish marker: \{err}")
   }
-  validated_pr_record(
-    out,
-    owner,
-    repo,
-    head_owner,
-    head_branch,
-    base_branch,
-  )
+  validated_pr_record(out, owner, repo, head_owner, head_branch, base_branch)
 }
 
 ///|
@@ -822,32 +883,24 @@ async fn verify_ready_pr(
   head_branch : String,
   base_branch : String,
 ) -> String {
-  let (exit, out, err) = collect_publish_output(
-    "gh",
-    [
-      "pr",
-      "view",
-      url,
-      "--repo",
-      "\{owner}/\{repo}",
-      "--json",
-      "url,isDraft,baseRefName,headRefName,headRepositoryOwner",
-      "--jq",
-      "[.url, (.isDraft|tostring), .baseRefName, .headRefName, .headRepositoryOwner.login] | @tsv",
-    ],
-  )
+  let (exit, out, err) = collect_publish_output("gh", [
+    "pr",
+    "view",
+    url,
+    "--repo",
+    "\{owner}/\{repo}",
+    "--json",
+    "url,isDraft,baseRefName,headRefName,headRepositoryOwner",
+    "--jq",
+    "[.url, (.isDraft|tostring), .baseRefName, .headRefName, .headRepositoryOwner.login] | @tsv",
+  ])
   guard exit == 0 else {
     fail("cannot verify the created pull request: \{err}")
   }
-  guard
-    validated_pr_record(
-      out,
-      owner,
-      repo,
-      head_owner,
-      head_branch,
-      base_branch,
-    ) is Some(verified) else {
+  guard validated_pr_record(
+      out, owner, repo, head_owner, head_branch, base_branch,
+    )
+    is Some(verified) else {
     fail("created pull request metadata is missing")
   }
   verified
@@ -866,9 +919,12 @@ pub async fn publish_changes(
   branch? : String = "",
   verified_paths? : Array[String] = [],
   source_revision? : String = "",
+  quiet? : Bool = false,
+  idempotency_key? : String = "",
 ) -> String? {
   let requested = branch.trim().to_owned()
   let expected_revision = source_revision.trim().to_owned()
+  let idempotency = idempotency_key.trim().to_owned()
   guard valid_component(owner) && valid_component(repo) else {
     fail("invalid GitHub repository: \{owner}/\{repo}")
   }
@@ -877,6 +933,12 @@ pub async fn publish_changes(
   }
   guard expected_revision == "" || valid_git_revision(expected_revision) else {
     fail("invalid verified source revision")
+  }
+  if idempotency != "" {
+    guard requested != "" else {
+      fail("an explicit branch is required with a publish idempotency key")
+    }
+    ignore(publish_idempotency_token(idempotency))
   }
   // Validate both fetch and push URLs before any local mutation. This rejects
   // SSH remotes, URL rewrites, alternate push targets, and path-shaped URLs.
@@ -891,7 +953,9 @@ pub async fn publish_changes(
       project_dir,
       ["rev-list", "--count", "\{remote_base}..HEAD"],
       "checking publish branch ancestry",
-    ).trim().to_owned(),
+    )
+    .trim()
+    .to_owned(),
     0,
   )
   let has_changes = git_has_changes(project_dir)
@@ -939,16 +1003,26 @@ pub async fn publish_changes(
   }
   // Authenticate before creating a branch or commit. A missing credential must
   // leave the user's working tree untouched.
-  let (login_exit, login_out, login_err) = collect_publish_output(
-    "gh",
-    ["api", "user", "--jq", ".login"],
-  )
+  let (login_exit, login_out, login_err) = collect_publish_output("gh", [
+    "api", "user", "--jq", ".login",
+  ])
   guard login_exit == 0 else {
     fail("gh is not authenticated; cannot publish a pull request: \{login_err}")
   }
   let login = login_out.trim().to_owned()
   guard valid_component(login) else {
     fail("gh returned an invalid login; cannot publish a pull request")
+  }
+  let direct = owner.to_lower() == login.to_lower()
+  let head_owner = if direct { owner } else { login }
+  if idempotency != "" {
+    match
+      find_existing_ready_pr_by_marker(
+        owner, repo, head_owner, requested, base_branch, idempotency,
+      ) {
+      Some(url) => return Some(url)
+      None => ()
+    }
   }
   let diff_stat = git_text(["diff", "--stat"], project_dir)
   let status_short = git_text(["status", "--short"], project_dir)
@@ -957,11 +1031,13 @@ pub async fn publish_changes(
   } else {
     pr_title(owner, repo)
   }
-  @stdio.stdout.write("\n── PR 预览 ──\n")
-  @stdio.stdout.write("标题: \{title}\n")
-  @stdio.stdout.write("\{diff_stat}\n")
-  if status_short != "" {
-    @stdio.stdout.write("\{status_short}\n")
+  if !quiet {
+    @stdio.stdout.write("\n── PR 预览 ──\n")
+    @stdio.stdout.write("标题: \{title}\n")
+    @stdio.stdout.write("\{diff_stat}\n")
+    if status_short != "" {
+      @stdio.stdout.write("\{status_short}\n")
+    }
   }
   if !(confirm is Auto) {
     @stdio.stdout.write("? 推送分支并创建 PR？[y/N] ")
@@ -971,7 +1047,9 @@ pub async fn publish_changes(
       None => false
     }
     if !ok {
-      println("已取消，工作区保留供检查。")
+      if !quiet {
+        println("已取消，工作区保留供检查。")
+      }
       return None
     }
   }
@@ -993,9 +1071,7 @@ pub async fn publish_changes(
         ["checkout", "-b", branch],
         cwd=project_dir,
       )
-      guard checkout.0 == 0 else {
-        fail("git checkout failed: \{checkout.2}")
-      }
+      guard checkout.0 == 0 else { fail("git checkout failed: \{checkout.2}") }
     }
     let checked_out = git_text(["branch", "--show-current"], project_dir)
       .trim()
@@ -1022,13 +1098,15 @@ pub async fn publish_changes(
       cwd=project_dir,
     )
     guard commit.0 == 0 else { fail("git commit failed: \{commit.2}") }
-    let committed_paths = normalize_publish_paths(nul_separated_paths(
-      required_git_text(
-        project_dir,
-        ["show", "--format=", "--name-only", "-z", "HEAD", "--"],
-        "checking committed files",
+    let committed_paths = normalize_publish_paths(
+      nul_separated_paths(
+        required_git_text(
+          project_dir,
+          ["show", "--format=", "--name-only", "-z", "HEAD", "--"],
+          "checking committed files",
+        ),
       ),
-    ))
+    )
     guard same_publish_paths(committed_paths, staged_paths) else {
       fail("committed files do not match the verified changed-file allowlist")
     }
@@ -1039,51 +1117,48 @@ pub async fn publish_changes(
         "checking publish commit parent",
       )
       guard parent.trim().to_lower() == expected_revision.to_lower() else {
-        fail("publish commit parent does not match the verified source revision")
+        fail(
+          "publish commit parent does not match the verified source revision",
+        )
       }
     }
   }
 
-  let direct = owner.to_lower() == login.to_lower()
   let push_remote = if direct {
     "origin"
   } else {
     let fork_url = "https://github.com/\{login}/\{repo}.git"
-    let fork = collect_publish_output(
-      "gh",
-      ["repo", "fork", "\{owner}/\{repo}", "--clone=false"],
-    )
+    let fork = collect_publish_output("gh", [
+      "repo",
+      "fork",
+      "\{owner}/\{repo}",
+      "--clone=false",
+    ])
     if fork.0 != 0 {
       // 已 fork 时 gh 可能报错；确认 fork 是否已存在。
-      let probe = collect_publish_output(
-        "gh",
-        [
-          "repo",
-          "view",
-          "\{login}/\{repo}",
-          "--json",
-          "nameWithOwner",
-          "--jq",
-          ".nameWithOwner",
-        ],
-      )
+      let probe = collect_publish_output("gh", [
+        "repo",
+        "view",
+        "\{login}/\{repo}",
+        "--json",
+        "nameWithOwner",
+        "--jq",
+        ".nameWithOwner",
+      ])
       guard probe.0 == 0 &&
         probe.1.trim().to_lower() == "\{login}/\{repo}".to_lower() else {
         fail("cannot fork \{owner}/\{repo}: \{fork.2}")
       }
     }
-    let parent = collect_publish_output(
-      "gh",
-      [
-        "repo",
-        "view",
-        "\{login}/\{repo}",
-        "--json",
-        "parent",
-        "--jq",
-        ".parent.nameWithOwner",
-      ],
-    )
+    let parent = collect_publish_output("gh", [
+      "repo",
+      "view",
+      "\{login}/\{repo}",
+      "--json",
+      "parent",
+      "--jq",
+      ".parent.nameWithOwner",
+    ])
     let parent_name = if parent.0 == 0 {
       parent.1.trim().to_lower()
     } else {
@@ -1111,21 +1186,18 @@ pub async fn publish_changes(
     "moonsage-fork"
   }
   let local_revision = required_git_text(
-    project_dir,
-    ["rev-parse", "HEAD"],
-    "checking publish head",
-  ).trim().to_owned()
+      project_dir,
+      ["rev-parse", "HEAD"],
+      "checking publish head",
+    )
+    .trim()
+    .to_owned()
   guard valid_git_revision(local_revision) else {
     fail("git returned an invalid publish revision")
   }
   let push = collect_publish_output(
     "git",
-    [
-      "push",
-      "--porcelain",
-      push_remote,
-      "HEAD:refs/heads/\{branch}",
-    ],
+    ["push", "--porcelain", push_remote, "HEAD:refs/heads/\{branch}"],
     cwd=project_dir,
   )
   guard push.0 == 0 else {
@@ -1147,22 +1219,18 @@ pub async fn publish_changes(
       fail("git push failed: \{detail}")
     }
   }
-  let pushed_revision = remote_branch_revision(
-    project_dir,
-    push_remote,
-    branch,
-  )
+  let pushed_revision = remote_branch_revision(project_dir, push_remote, branch)
   guard pushed_revision.to_lower() == local_revision.to_lower() else {
     fail("pushed branch revision does not match the verified local commit")
   }
-  let head_owner = if direct { owner } else { login }
   match find_existing_ready_pr(owner, repo, head_owner, branch, base_branch) {
     Some(url) => return Some(url)
     None => ()
   }
   let head = "\{head_owner}:\{branch}"
   let body = build_pr_body(report, owner, repo) +
-    "\n\n<!-- moonsage-publish:\{owner}/\{repo}:\{branch} -->"
+    "\n\n" +
+    publish_marker(owner, repo, branch, idempotency)
   let body_dir = @fs.tmpdir(prefix="moonsage-pr-body-")
   let result = try {
     let body_file = body_dir + "/body.md"
@@ -1171,34 +1239,25 @@ pub async fn publish_changes(
       body,
       create_mode=@fs.CreateMode::CreateOrTruncate,
     )
-    let pr = collect_publish_output(
-      "gh",
-      [
-        "pr",
-        "create",
-        "--repo",
-        "\{owner}/\{repo}",
-        "--head",
-        head,
-        "--base",
-        base_branch,
-        "--title",
-        title,
-        "--body-file",
-        body_file,
-      ],
-    )
+    let pr = collect_publish_output("gh", [
+      "pr",
+      "create",
+      "--repo",
+      "\{owner}/\{repo}",
+      "--head",
+      head,
+      "--base",
+      base_branch,
+      "--title",
+      title,
+      "--body-file",
+      body_file,
+    ])
     if pr.0 != 0 {
       let detail = pr.2
       if detail.contains("already exists") {
         match
-          find_existing_ready_pr(
-            owner,
-            repo,
-            head_owner,
-            branch,
-            base_branch,
-          ) {
+          find_existing_ready_pr(owner, repo, head_owner, branch, base_branch) {
           Some(url) => url
           None =>
             fail(

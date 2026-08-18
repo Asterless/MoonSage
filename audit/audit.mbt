@@ -119,11 +119,12 @@ async fn print_final_verification(
   verification : AuditVerificationSummary,
 ) -> Unit {
   @stdio.stdout.write("\n--- final verification ---\n")
-  for entry in [
-    ("check", verification.check_passed, verification.check_output),
-    ("build", verification.build_passed, verification.build_output),
-    ("test", verification.test_passed, verification.test_output),
-  ] {
+  for
+    entry in [
+      ("check", verification.check_passed, verification.check_output),
+      ("build", verification.build_passed, verification.build_output),
+      ("test", verification.test_passed, verification.test_output),
+    ] {
     let (command, passed, output) = entry
     @stdio.stdout.write(
       "moon \{command} --target native: \{if passed { "passed" } else { "failed" }}\n",
@@ -484,6 +485,7 @@ async fn run_analysis_agent(
   model : String,
   ctx : AuditContext,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
+  restricted_moon? : Bool = false,
   provider? : @llm.ProviderKind = OpenAi,
 ) -> @runtime.AgentAnswer {
   let ro_ctx : AuditContext = {
@@ -493,7 +495,7 @@ async fn run_analysis_agent(
   }
   let agent : @runtime.Agent = {
     system_prompt: audit_analysis_prompt(),
-    tools: audit_tools(ro_ctx),
+    tools: audit_tools(ro_ctx, restricted_moon~),
     max_tool_calls: 12,
     max_rounds: 4,
     max_tokens: 4000,
@@ -519,11 +521,12 @@ async fn run_fix_agent(
   max_tool_calls~ : Int,
   max_rounds~ : Int,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
+  restricted_moon? : Bool = false,
   provider? : @llm.ProviderKind = OpenAi,
 ) -> @runtime.AgentAnswer {
   let agent : @runtime.Agent = {
     system_prompt: audit_fix_prompt(),
-    tools: audit_tools(ctx),
+    tools: audit_tools(ctx, restricted_moon~),
     max_tool_calls,
     max_rounds,
     max_tokens: 6000,

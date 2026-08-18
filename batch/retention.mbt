@@ -28,7 +28,7 @@ pub fn batch_item_workspace_retention_due(
   now_ms : Int64,
 ) -> Bool {
   match item.status {
-    Created | NoChanges | Skipped => true
+    Created | NoChanges | Skipped | Cancelled => true
     Failed =>
       retention_period_elapsed(
         item.updated_at_ms,
@@ -129,10 +129,7 @@ async fn cleanup_expired_batch(
   data_root : String,
   record : BatchRecord,
 ) -> Bool {
-  let workspace_path = retention_batch_workspace_path(
-    data_root,
-    record.id,
-  ) catch {
+  let workspace_path = retention_batch_workspace_path(data_root, record.id) catch {
     _ => return false
   }
   // Keep the record until every supporting artifact has been removed. If any
@@ -171,9 +168,7 @@ pub async fn cleanup_batch_retention(
       }
     } else {
       item_workspaces_removed += cleanup_batch_item_workspaces(
-        data_root,
-        record,
-        now_ms,
+        data_root, record, now_ms,
       )
     }
   }

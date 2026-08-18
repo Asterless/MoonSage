@@ -70,15 +70,10 @@ fn audit_repo_environment() -> Map[String, String] {
   // Keep only process-launch and temporary-directory state. In particular,
   // never expose model keys, GitHub tokens, SSH agents, or credential sockets
   // to an untrusted repository operation.
-  for name in [
-    "PATH",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-  ] {
+  for
+    name in [
+      "PATH", "SystemRoot", "ComSpec", "PATHEXT", "TEMP", "TMP", "TMPDIR",
+    ] {
     match @sys.get_env_var(name) {
       Some(value) if value != "" => environment[name] = value
       _ => ()
@@ -146,10 +141,8 @@ async fn run_audit_git(args : Array[String], timeout_ms : Int) -> (Int, String) 
   })
   match result {
     Some(value) => value
-    None => (
-      -1,
-      "git command timed out after \{timeout_ms} ms and was terminated",
-    )
+    None =>
+      (-1, "git command timed out after \{timeout_ms} ms and was terminated")
   }
 }
 
@@ -232,10 +225,15 @@ async fn fetch_repo_source(
   if target_kind is @fs.FileKind::Directory {
     fail("target directory already exists, refusing to delete it: \{target}")
   }
-  // 先试 main，再试 master；网络波动时对同一分支重试几次。
+  // 普通审计先试 main，再试 master；所有分支共享同一个网络重试预算。
+  // full clone 不需要猜默认分支，因此只执行一次分支无关的 clone。
   let mut last_err = "git clone failed"
-  for branch in ["main", "master"] {
-    for retry = 0; retry < 3; retry = retry + 1 {
+  let branches = if full { [""] } else { ["main", "master"] }
+  let mut attempts = 0
+  for branch in branches {
+    for ;; {
+      guard attempts < 4 else { break }
+      attempts += 1
       let clone_args = if full {
         secured_clone_args(url, target)
       } else {
@@ -246,9 +244,7 @@ async fn fetch_repo_source(
         return locate_project_root(dest_dir)
       }
       last_err = err
-      @fs.rmdir(target, recursive=true) catch {
-        _ => ()
-      }
+      remove_workspace_dir(target)
     }
   }
   fail(last_err)

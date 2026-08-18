@@ -46,7 +46,10 @@ pub fn batch_events_path(data_root : String, batch_id : String) -> String raise 
 }
 
 ///|
-pub fn batch_control_path(data_root : String, batch_id : String) -> String raise {
+pub fn batch_control_path(
+  data_root : String,
+  batch_id : String,
+) -> String raise {
   validate_storage_id(batch_id)
   batch_storage_dir(data_root) + "/" + batch_id + ".control.json"
 }
@@ -76,9 +79,10 @@ fn sanitize_json_value(
 ) -> Json {
   match value {
     String(text) => Json::string(redact_batch_text(text, secrets, max_chars~))
-    Array(values) => Json::array(
-      values.map(fn(item) { sanitize_json_value(item, secrets, max_chars) }),
-    )
+    Array(values) =>
+      Json::array(
+        values.map(fn(item) { sanitize_json_value(item, secrets, max_chars) }),
+      )
     Object(fields) => {
       let safe : Map[String, Json] = Map([])
       for key, item in fields {
@@ -102,9 +106,11 @@ pub async fn save_batch(
   data_root : String,
   record : BatchRecord,
   secrets? : Array[String] = [],
-) -> Unit raise {
+) -> Unit {
   let dir = batch_storage_dir(data_root)
-  @fs.mkdir(dir, recursive=true) catch { _ => () }
+  @fs.mkdir(dir, recursive=true) catch {
+    _ => ()
+  }
   let path = batch_record_path(data_root, record.id)
   let temporary = path + ".tmp"
   @fs.write_file(
@@ -120,7 +126,9 @@ pub async fn load_batch(data_root : String, batch_id : String) -> BatchRecord? {
   let path = batch_record_path(data_root, batch_id) catch { _ => return None }
   let text = @fs.read_file(path).text() catch { _ => return None }
   let document = @json.parse(text) catch { _ => return None }
-  Some(BatchRecord::from_json(document)) catch { _ => return None }
+  Some(BatchRecord::from_json(document)) catch {
+    _ => return None
+  }
 }
 
 ///|
@@ -130,8 +138,7 @@ pub async fn list_batches(data_root : String) -> Array[BatchRecord] {
   }
   let records : Array[BatchRecord] = []
   for entry in entries {
-    if entry.has_suffix(".json") &&
-      !entry.has_suffix(".control.json") {
+    if entry.has_suffix(".json") && !entry.has_suffix(".control.json") {
       let id = entry[:entry.length() - 5].to_owned()
       let record = load_batch(data_root, id)
       match record {
@@ -142,7 +149,11 @@ pub async fn list_batches(data_root : String) -> Array[BatchRecord] {
   }
   records.sort_by(fn(a, b) {
     let order = Int64::compare(b.created_at_ms, a.created_at_ms)
-    if order == 0 { a.id.compare(b.id) } else { order }
+    if order == 0 {
+      a.id.compare(b.id)
+    } else {
+      order
+    }
   })
   records
 }
@@ -159,9 +170,11 @@ pub async fn append_batch_event(
   data_root : String,
   event : BatchEvent,
   secrets? : Array[String] = [],
-) -> Unit raise {
+) -> Unit {
   let dir = batch_storage_dir(data_root)
-  @fs.mkdir(dir, recursive=true) catch { _ => () }
+  @fs.mkdir(dir, recursive=true) catch {
+    _ => ()
+  }
   @fs.write_file(
     batch_events_path(data_root, event.batch_id),
     safe_event_json(event, secrets) + "\n",
@@ -195,8 +208,10 @@ pub async fn save_batch_control(
   data_root : String,
   batch_id : String,
   control : BatchControl,
-) -> Unit raise {
-  @fs.mkdir(batch_storage_dir(data_root), recursive=true) catch { _ => () }
+) -> Unit {
+  @fs.mkdir(batch_storage_dir(data_root), recursive=true) catch {
+    _ => ()
+  }
   @fs.write_file(
     batch_control_path(data_root, batch_id),
     control.to_json().stringify(),
@@ -216,13 +231,17 @@ pub async fn load_batch_control(
     _ => return empty_batch_control()
   }
   let document = @json.parse(text) catch { _ => return empty_batch_control() }
-  BatchControl::from_json(document) catch { _ => empty_batch_control() }
+  BatchControl::from_json(document) catch {
+    _ => empty_batch_control()
+  }
 }
 
 ///|
 pub async fn clear_batch_control(data_root : String, batch_id : String) -> Unit {
   let path = batch_control_path(data_root, batch_id) catch { _ => return }
-  @fs.remove(path) catch { _ => () }
+  @fs.remove(path) catch {
+    _ => ()
+  }
 }
 
 ///|
@@ -234,7 +253,9 @@ pub async fn try_acquire_batch_lock(
   owner : String,
 ) -> Bool {
   let path = batch_lock_path(data_root, batch_id) catch { _ => return false }
-  @fs.mkdir(batch_storage_dir(data_root), recursive=true) catch { _ => () }
+  @fs.mkdir(batch_storage_dir(data_root), recursive=true) catch {
+    _ => ()
+  }
   @fs.write_file(
     path,
     redact_batch_text(owner, [], max_chars=256) + "\n",
@@ -248,5 +269,7 @@ pub async fn try_acquire_batch_lock(
 ///|
 pub async fn release_batch_lock(data_root : String, batch_id : String) -> Unit {
   let path = batch_lock_path(data_root, batch_id) catch { _ => return }
-  @fs.remove(path) catch { _ => () }
+  @fs.remove(path) catch {
+    _ => ()
+  }
 }

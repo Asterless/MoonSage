@@ -12,13 +12,15 @@ pub fn audit_publish_block_reason(AuditVerificationSummary, Bool) -> String?
 
 pub fn build_audit_evidence(@runtime.AgentAnswer?, @runtime.AgentAnswer, Bool) -> AuditEvidence
 
+pub async fn ignore_audit_stage(String) -> Unit
+
 pub async fn run_audit(ArrayView[String]) -> Unit
 
 pub async fn run_final_audit_verification(String, timeout_ms? : Int) -> AuditVerificationSummary
 
-pub async fn run_structured_audit_package(String, String, String, String, workspace? : String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, provider? : @llm.ProviderKind) -> AuditPackageResult
+pub async fn run_structured_audit_package(String, String, String, String, workspace? : String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @llm.ProviderKind, should_skip? : async (String, String, String) -> Bool) -> AuditPackageResult
 
-pub async fn run_structured_audit_project(String, String, String, String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, provider? : @llm.ProviderKind) -> StructuredAuditResult
+pub async fn run_structured_audit_project(String, String, String, String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @llm.ProviderKind) -> StructuredAuditResult
 
 // Errors
 
@@ -36,6 +38,8 @@ pub(all) struct AuditPackageResult {
   repo : String
   workspace : String
   project_dir : String
+  source_revision : String
+  skipped : Bool
   audit : StructuredAuditResult
 }
 
