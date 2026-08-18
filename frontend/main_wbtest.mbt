@@ -36,6 +36,7 @@ fn test_model(
     batch: initial_batch(),
     next_id: 100,
     pending_new_session: false,
+    session_filter: "",
   }
 }
 
