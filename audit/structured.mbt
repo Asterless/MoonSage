@@ -21,6 +21,7 @@ pub(all) struct StructuredAuditResult {
   diff : String
   evidence : AuditEvidence
   validation : AuditVerificationSummary
+  needs_review : Bool
   error : String
 }
 
@@ -30,6 +31,7 @@ pub fn StructuredAuditResult::publishable(self : StructuredAuditResult) -> Bool 
   self.diff.trim().length() > 0 &&
   self.evidence.verified &&
   self.evidence.conflicts.is_empty() &&
+  !self.needs_review &&
   self.validation.passed()
 }
 
@@ -116,6 +118,25 @@ fn finalize_controller_evidence(
 }
 
 ///|
+// 修复 Agent 可能在工具预算耗尽后没有调用 run_moon 作为最终验证。此时
+// controller 已对最终 worktree 独立执行 check/build/test；只要验证通过且
+// 没有其他证据冲突，就以 controller 验证作为权威的修复后证据，避免把
+// “Agent 未亲自验证”误判为审计失败。
+fn finalize_with_controller_verification(
+  evidence : AuditEvidence,
+  validation : AuditVerificationSummary,
+) -> AuditEvidence {
+  if validation.passed() &&
+    evidence.conflicts.all(fn(conflict) {
+      conflict.contains("No post-fix moon verification command was run")
+    }) {
+    { ..evidence, verification_ran: true, verified: true, conflicts: [] }
+  } else {
+    evidence
+  }
+}
+
+///|
 fn structured_failure(
   project_dir : String,
   message : String,
@@ -128,6 +149,7 @@ fn structured_failure(
     diff: "",
     evidence: empty_audit_evidence(),
     validation: empty_validation_result(),
+    needs_review: false,
     error: message,
   }
 }
@@ -218,6 +240,8 @@ pub async fn run_structured_audit_project(
   let validation = run_final_audit_verification(project_dir, timeout_ms~)
   let diff = @local.git_diff(project_dir, None)
   let evidence = finalize_controller_evidence(evidence, before_diff, diff)
+  let evidence = finalize_with_controller_verification(evidence, validation)
+  let needs_review = audit_self_review_needs_review(evidence)
   {
     status: Completed,
     project_dir,
@@ -226,6 +250,7 @@ pub async fn run_structured_audit_project(
     diff,
     evidence,
     validation,
+    needs_review,
     error: "",
   }
 }

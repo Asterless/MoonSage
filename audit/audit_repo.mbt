@@ -180,6 +180,35 @@ async fn has_file(dir : String, name : String) -> Bool {
 }
 
 ///|
+// 审计会在克隆后的仓库里运行 moon check/build/test，产生 _build/ 等生成
+// 目录。第三方仓库的 .gitignore 不一定忽略它们；若不排除，构建产物会被
+// 当成待发布改动，甚至触发受保护路径拦截。这里写入 .git/info/exclude
+// （本地排除文件，不修改仓库内容，也不产生 git diff）。
+async fn ignore_audit_generated_dirs(project_dir : String) -> Unit {
+  let exclude_path = project_dir + "/.git/info/exclude"
+  let marker = "# MoonSage audit generated dirs"
+  let existing = @fs.read_file(exclude_path).text() catch { _ => "" }
+  if existing.contains(marker) {
+    return
+  }
+  let additions = marker +
+    "\n_build/\n_build.bak/\nnode_modules/\ntarget/\n.mooncakes/\n" +
+    ".moonsage/\n.cache/\n.env\n_audit_ws_*\n"
+  let combined = if existing.trim() == "" {
+    additions
+  } else {
+    existing.trim_end(chars="\n").to_owned() + "\n\n" + additions
+  }
+  @fs.write_file(
+    exclude_path,
+    combined,
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  ) catch {
+    _ => ()
+  }
+}
+
+///|
 async fn is_moon_project(dir : String) -> Bool {
   has_file(dir, "moon.mod") || has_file(dir, "moon.mod.json")
 }
@@ -241,7 +270,9 @@ async fn fetch_repo_source(
       }
       let (exit, err) = run_audit_git(clone_args, 300_000)
       if exit == 0 {
-        return locate_project_root(dest_dir)
+        let project_root = locate_project_root(dest_dir)
+        ignore_audit_generated_dirs(project_root)
+        return project_root
       }
       last_err = err
       remove_workspace_dir(target)

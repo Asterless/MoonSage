@@ -42,6 +42,7 @@ struct BatchItem {
   pr_url : String
   prepared_branch : String
   prepared_commit : String
+  needs_review : Bool
   error : String
   report : String
 } derive(Eq)
@@ -400,6 +401,7 @@ fn batch_json_items(value : Json) -> Array[BatchItem] {
       pr_url: batch_json_string_any(fields, "pr_url", "pull_request_url"),
       prepared_branch: batch_json_string(fields, "prepared_branch"),
       prepared_commit: batch_json_string(fields, "prepared_commit"),
+      needs_review: json_bool_field(fields, "needs_review", false),
       error: batch_json_string(fields, "error"),
       report: batch_json_string_any(fields, "report", "report_summary"),
     })
@@ -1041,6 +1043,7 @@ fn batch_update(
           "retry" => "重试请求已提交。"
           "prepare" => "拟稿请求已提交，正在本地准备 PR。"
           "approve" => "确认提交已受理，正在推送并创建 PR。"
+          "review" => "已确认放行，可以开始拟稿。"
           _ => "操作已提交。"
         }
         Some(
@@ -1202,6 +1205,8 @@ fn batch_config_view(batch : BatchModel, emit : Emit[Msg]) -> Html {
 fn batch_item_row(item : BatchItem, selected : Bool, emit : Emit[Msg]) -> Html {
   let prepared = item.status == "verified_pending_publish" &&
     item.prepared_commit != ""
+  let awaiting_review = item.status == "verified_pending_publish" &&
+    item.needs_review
   button(
     class=if selected { "batch-item-row active" } else { "batch-item-row" },
     type_="button",
@@ -1223,7 +1228,9 @@ fn batch_item_row(item : BatchItem, selected : Bool, emit : Emit[Msg]) -> Html {
       ]),
       span(
         class=batch_status_class(item.status),
-        if prepared {
+        if awaiting_review {
+          "需人工确认"
+        } else if prepared {
           "已拟稿待确认"
         } else {
           batch_status_label(item.status)
@@ -1247,7 +1254,11 @@ fn batch_item_detail(
 ) -> Html {
   let prepared = item.status == "verified_pending_publish" &&
     item.prepared_commit != ""
-  let can_prepare = item.status == "verified_pending_publish" && !prepared
+  let awaiting_review = item.status == "verified_pending_publish" &&
+    item.needs_review
+  let can_prepare = item.status == "verified_pending_publish" &&
+    !prepared &&
+    !awaiting_review
   let can_retry = item.status == "failed" ||
     item.status == "cancelled" ||
     item.status == "skipped"
@@ -1259,7 +1270,9 @@ fn batch_item_detail(
       ]),
       span(
         class=batch_status_class(item.status),
-        if prepared {
+        if awaiting_review {
+          "需人工确认"
+        } else if prepared {
           "已拟稿待确认"
         } else {
           batch_status_label(item.status)
@@ -1278,7 +1291,14 @@ fn batch_item_detail(
       } else {
         div(class="batch-action-placeholder", "")
       },
-      if can_prepare {
+      if awaiting_review {
+        button(
+          class="batch-primary-button compact",
+          type_="button",
+          on_click=emit(BatchAction("review", batch_id, item.key)),
+          "确认放行",
+        )
+      } else if can_prepare {
         button(
           class="batch-primary-button compact",
           type_="button",
@@ -1300,6 +1320,15 @@ fn batch_item_detail(
       div(class="batch-detail-grid", [
         div([small("拟稿分支"), p(item.prepared_branch)]),
         div([small("本地提交"), p(item.prepared_commit)]),
+      ])
+    } else {
+      div("")
+    },
+    if awaiting_review {
+      div(class="batch-detail-link", [
+        span(
+          "该仓库的修复 Agent 自检未确认全部完成，请人工查看报告后决定是否放行。",
+        ),
       ])
     } else {
       div("")

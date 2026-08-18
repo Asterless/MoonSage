@@ -242,6 +242,40 @@ pub fn build_audit_evidence(
 }
 
 ///|
+// 修复 Agent 必须通过 submit_audit_status 工具显式声明自检结论：
+//   - "done"     全部修复完成
+//   - "partial"  部分修复，剩余问题未能解决
+//   - "blocked"  遇到无法解决的问题
+// 没有声明（工具预算耗尽等）或声明非 done 的一律视为需要人工确认。
+pub fn audit_self_review_needs_review(evidence : AuditEvidence) -> Bool {
+  let mut found_done = false
+  for tool in evidence.tools {
+    if tool.name == "submit_audit_status" && tool.status == "ok" {
+      let status = tool_self_review_status(tool.result)
+      match status {
+        Some("done") => found_done = true
+        Some("partial") | Some("blocked") => return true
+        _ => ()
+      }
+    }
+  }
+  !found_done
+}
+
+///|
+fn tool_self_review_status(result : String) -> String? {
+  let document = @json.parse(result) catch { _ => return None }
+  match document {
+    Object(fields) =>
+      match fields.get("status") {
+        Some(String(value)) => Some(value)
+        _ => None
+      }
+    _ => None
+  }
+}
+
+///|
 async fn print_audit_evidence(evidence : AuditEvidence) -> Unit {
   @stdio.stdout.write("\n--- structured evidence ---\n")
   for tool in evidence.tools {

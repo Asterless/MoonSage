@@ -726,6 +726,7 @@ test "batch view exposes controls, status, item detail, and PR link" {
     pr_url: "https://github.com/moonbitlang/demo/pull/7",
     prepared_branch: "",
     prepared_commit: "",
+    needs_review: false,
     error: "",
     report: "Audit report",
   }
@@ -779,6 +780,26 @@ test "batch view exposes controls, status, item detail, and PR link" {
   assert_true(prepared_html.contains("moonsage/mode1/demo"))
   assert_true(prepared_html.contains("local-commit-abc"))
   assert_true(prepared_html.contains("确认提交 PR"))
+  let review_item : BatchItem = {
+    ..item,
+    key: "moonbitlang--review",
+    needs_review: true,
+  }
+  let review_html = @rabbita.render_to_string(fn() {
+    Val::constant(
+      batch_view(
+        {
+          ..batch,
+          detail: { ..batch.detail, items: [review_item] },
+          selected_item: review_item.key,
+        },
+        "light",
+        emit,
+      ),
+    )
+  })
+  assert_true(review_html.contains("需人工确认"))
+  assert_true(review_html.contains("确认放行"))
 }
 
 ///|

@@ -10,6 +10,8 @@ import {
 // Values
 pub fn audit_publish_block_reason(AuditVerificationSummary, Bool) -> String?
 
+pub fn audit_self_review_needs_review(AuditEvidence) -> Bool
+
 pub fn build_audit_evidence(@runtime.AgentAnswer?, @runtime.AgentAnswer, Bool) -> AuditEvidence
 
 pub async fn ignore_audit_stage(String) -> Unit
@@ -77,6 +79,7 @@ pub(all) struct StructuredAuditResult {
   diff : String
   evidence : AuditEvidence
   validation : AuditVerificationSummary
+  needs_review : Bool
   error : String
 }
 pub fn StructuredAuditResult::publishable(Self) -> Bool

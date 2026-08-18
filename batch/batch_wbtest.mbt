@@ -32,6 +32,7 @@ fn passing_validation() -> ValidationSummary {
 fn verified_result(
   revision? : String = "abc123",
   path? : String = "src/main.mbt",
+  needs_review? : Bool = false,
 ) -> BatchAuditResult {
   {
     status: VerifiedPendingPublish,
@@ -47,6 +48,7 @@ fn verified_result(
     sensitive_changes: false,
     validation: passing_validation(),
     evidence_conflicts: [],
+    needs_review,
     error: "",
     retryable: false,
   }
@@ -284,6 +286,45 @@ test "publish result records ready PR and idempotency fingerprint" {
   assert_eq(record.pr_count, 1)
   let seen = completed_fingerprints([record])
   assert_eq(seen.get(item.fingerprint), Some(item.pr_url))
+}
+
+///|
+test "needs review items stay verified but never auto publish" {
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
+  let record = BatchRecord::new(
+    "batch-review",
+    default_batch_config(),
+    selected,
+    1L,
+  )
+  let item = record.items[0]
+  item.status = Verifying
+  apply_audit_result(record, item, verified_result(needs_review=true), 2L)
+  assert_true(item.status is VerifiedPendingPublish)
+  assert_true(item.needs_review)
+  assert_true(!can_auto_publish(record, item))
+  assert_true(!can_prepare(record, item))
+  // 人工确认后清除标记即可正常拟稿。
+  item.needs_review = false
+  assert_true(can_auto_publish(record, item))
+  assert_true(can_prepare(record, item))
+  // 未通过验证的 needs_review 不应进入待发布。
+  let item2 = record.items[0]
+  item2.status = Verifying
+  apply_audit_result(
+    record,
+    item2,
+    {
+      ..verified_result(needs_review=true),
+      validation: empty_validation_summary(),
+    },
+    3L,
+  )
+  assert_true(item2.status is Failed)
+  assert_true(!item2.needs_review)
 }
 
 ///|
