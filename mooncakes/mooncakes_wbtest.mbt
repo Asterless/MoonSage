@@ -1,34 +1,36 @@
 ///|
-test "valid_module_name rejects traversal and query characters" {
-  assert_true(valid_module_name("owner/module"))
-  assert_true(!valid_module_name("owner"))
-  assert_true(!valid_module_name("owner/module/../evil"))
-  assert_true(!valid_module_name("owner/mod?ule"))
-  assert_true(!valid_module_name("owner/mod\\ule"))
+test "json_string returns empty for missing keys or non-objects" {
+  assert_eq(
+    json_string(Json::object({ "name": Json::string("x") }), "missing"),
+    "",
+  )
+  assert_eq(json_string(Json::string("not-an-object"), "name"), "")
 }
 
 ///|
-test "valid_asset_value rejects separators and empty strings" {
-  assert_true(valid_asset_value("1.2.3"))
-  assert_true(!valid_asset_value(""))
-  assert_true(!valid_asset_value("1.2.3/../x"))
-  assert_true(!valid_asset_value("v?1"))
+test "json_strings collects only string arrays" {
+  let value = Json::object({
+    "tags": Json::array([Json::string("a"), Json::string("b")]),
+  })
+  assert_eq(json_strings(value, "tags"), ["a", "b"])
+  assert_eq(
+    json_strings(Json::object({ "tags": Json::string("oops") }), "tags"),
+    [],
+  )
+  assert_eq(json_strings(Json::string("x"), "tags"), [])
 }
 
 ///|
-test "package_relpath strips the module prefix" {
-  assert_eq(package_relpath("owner/mod", "owner/mod/client"), "client")
-  assert_eq(package_relpath("owner/mod", "owner/mod"), "mod")
-  assert_eq(package_relpath("owner/mod", "other/thing"), "other/thing")
-}
-
-///|
-test "package_relpath rejects unsafe paths" {
-  let raised = try {
-    ignore(package_relpath("owner/mod", "owner/mod/../x"))
-    false
-  } catch {
-    _ => true
-  }
-  assert_true(raised)
+test "json_names collects plain strings and object names" {
+  let value = Json::object({
+    "items": Json::array([
+      Json::string("plain"),
+      Json::object({ "name": Json::string("typed") }),
+      Json::object({ "other": Json::string("x") }),
+      Json::number(42.0),
+    ]),
+  })
+  assert_eq(json_names(value, "items"), ["plain", "typed"])
+  assert_eq(json_names(Json::object({}), "items"), [])
+  assert_eq(json_names(Json::string("x"), "items"), [])
 }

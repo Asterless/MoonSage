@@ -45,8 +45,8 @@ fn join_query(args : Array[String], start : Int) -> String {
 ///|
 async fn run_search(query : String) -> Unit {
   let modules = @mooncakes.fetch_modules()
-  let answer = @moonsage.run_search_agent(modules, query)
-  println(@moonsage.render_search_answer(answer))
+  let answer = @search.run_search_agent(modules, query)
+  println(@search.render_search_answer(answer))
 }
 
 ///|
@@ -84,10 +84,10 @@ async fn run_ask(question : String, stream_json? : Bool = false) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
-  let provider = @llm.provider_from_string(
+  let provider = @ai.provider_from_string(
     @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
   )
-  let client = @llm_adapter.client(key, base_url, model, provider)
+  let client = @ai.client(key, base_url, model, provider)
   let modules = @mooncakes.fetch_modules() catch {
     error => {
       if stream_json {
@@ -173,10 +173,10 @@ fn task_workspace(m : @argparse.Matches) -> String {
 }
 
 ///|
-fn task_permission(m : @argparse.Matches) -> @agent.WorkspacePermission {
+fn task_permission(m : @argparse.Matches) -> @runtime.WorkspacePermission {
   match values_of(m, "permission") {
-    [value, ..] => @agent.workspace_permission_from_string(value)
-    _ => @agent.WorkspacePermission::ControlledWrite
+    [value, ..] => @runtime.workspace_permission_from_string(value)
+    _ => @runtime.WorkspacePermission::ControlledWrite
   }
 }
 
@@ -218,17 +218,17 @@ async fn run_task(m : @argparse.Matches) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
-  let provider = @llm.provider_from_string(
+  let provider = @ai.provider_from_string(
     @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
   )
   let cwd = task_workspace(m)
   let project_instructions = @project.load_project_instructions(cwd)
-  let agent = @agent.workspace_agent(
+  let agent = @runtime.workspace_agent(
     cwd,
     task_permission(m),
     project_instructions,
   )
-  let client = @llm_adapter.client(key, base_url, model, provider)
+  let client = @ai.client(key, base_url, model, provider)
   if stream_json {
     ignore(
       agent.execute(
@@ -302,7 +302,7 @@ async fn run_conversation_cmd(
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
-  let provider = @llm.provider_from_string(
+  let provider = @ai.provider_from_string(
     @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
   )
   let cwd = @env.current_dir().unwrap_or(".")

@@ -35,7 +35,7 @@ test "cli parses subcommands" {
     return
   }
   assert_eq(task_workspace(tm), "D:/work/demo")
-  assert_true(task_permission(tm) is @agent.WorkspacePermission::ReadOnly)
+  assert_true(task_permission(tm) is @runtime.WorkspacePermission::ReadOnly)
   assert_true(flag_of(tm, "stream-json"))
   assert_eq(join_values(tm, "goal"), "检查文件")
 }

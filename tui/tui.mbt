@@ -121,7 +121,7 @@ fn context_text(session : @runtime.Session) -> String {
 ///|
 fn chat_status_text(
   model : String,
-  provider : @llm.ProviderKind,
+  provider : @ai.ProviderKind,
   session_id : String,
   workspace : String,
   session : @runtime.Session,
@@ -129,7 +129,7 @@ fn chat_status_text(
   "Model      " +
   model +
   "\nProvider   " +
-  @llm.provider_to_string(provider) +
+  @ai.provider_to_string(provider) +
   "\nSession    " +
   session_id +
   "\nWorkspace  " +
@@ -188,14 +188,14 @@ fn ChatComposer::new(width : Int) -> ChatComposer {
 fn ChatComposer::set_runtime_status(
   self : ChatComposer,
   model : String,
-  provider : @llm.ProviderKind,
+  provider : @ai.ProviderKind,
   session_id : String,
   session : @runtime.Session,
 ) -> Unit {
   let tokens = session.estimated_tokens()
   self.runtime_status = model +
     "  ·  " +
-    @llm.provider_to_string(provider) +
+    @ai.provider_to_string(provider) +
     "  ·  context " +
     context_percent(tokens).to_string() +
     "%  ·  " +
@@ -248,14 +248,14 @@ fn take_display_width(text : String, max_width : Int) -> String {
 fn startup_info(
   width : Int,
   model : String,
-  provider : @llm.ProviderKind,
+  provider : @ai.ProviderKind,
   session_id : String,
   workspace : String,
   session : @runtime.Session,
 ) -> String {
   let max_width = (width - 1).max(1)
   let lines = [
-    "Model      " + model + " (" + @llm.provider_to_string(provider) + ")",
+    "Model      " + model + " (" + @ai.provider_to_string(provider) + ")",
     "Session    " + session_id,
     "Workspace  " + workspace,
     context_text(session),
@@ -529,7 +529,7 @@ pub async fn run_tui(
   cwd : String,
   session_id : String?,
   continue_latest : Bool,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
     _ => {
@@ -602,9 +602,9 @@ async fn run_tui_session(
   initial_id : String,
   initial_session : @runtime.Session,
   fresh_session : () -> (String, @runtime.Session),
-  provider : @llm.ProviderKind,
+  provider : @ai.ProviderKind,
 ) -> Unit {
-  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  let client = @ai.client(api_key, base_url, model, provider)
   let (width, _) = @termui.get_terminal_size()
   let composer = ChatComposer::new(width)
   let mut current_id = initial_id
@@ -736,7 +736,7 @@ async fn run_tui_session(
                 "Model     " +
                 model +
                 "\nProvider  " +
-                @llm.provider_to_string(provider) +
+                @ai.provider_to_string(provider) +
                 "\n",
               )
             Cwd => @termui.print_raw("Workspace  " + ws.get_root() + "\n")

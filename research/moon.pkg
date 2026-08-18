@@ -1,7 +1,10 @@
 import {
   "moonsage/types",
+  "moonsage/search",
+  "moonsage/ai",
+  "moonsage/runtime",
+  "moonsage/mooncakes",
   "moonsage/tools",
   "moonbitlang/async",
-  "moonbitlang/async/http",
   "moonbitlang/core/json",
 }

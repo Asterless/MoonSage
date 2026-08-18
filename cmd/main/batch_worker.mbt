@@ -87,7 +87,7 @@ async fn emit_agent_event(
     item_key~,
     cycle~,
     message=agent_event_summary(event),
-    data=@agent.event_to_json(event),
+    data=@protocol.event_to_json(event),
   )
   @batch.append_batch_event(data_root, batch_event, secrets~) catch {
     _ => ()
@@ -111,7 +111,7 @@ fn batch_state_event(record : @batch.BatchRecord) -> @batch.BatchEvent {
 }
 
 ///|
-async fn fetch_batch_snapshot(retries : Int) -> Array[@moonsage.ModuleSummary] {
+async fn fetch_batch_snapshot(retries : Int) -> Array[@types.ModuleSummary] {
   let mut attempt = 0
   for ;; {
     let fetched = Some(@mooncakes.fetch_modules()) catch { _ => None }
@@ -628,7 +628,7 @@ async fn run_mode1_worker(
       "https://api.deepseek.com",
     )
     let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
-    let provider = @llm.provider_from_string(
+    let provider = @ai.provider_from_string(
       @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
     )
     let on_event = async fn(event) { output_batch_event(event, stream_json) }

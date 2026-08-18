@@ -492,7 +492,7 @@ async fn run_audit_agent(
   max_tool_calls~ : Int,
   max_rounds~ : Int,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
 ) -> @runtime.AgentAnswer {
   let agent : @runtime.Agent = {
     system_prompt: audit_system_prompt(),
@@ -501,7 +501,7 @@ async fn run_audit_agent(
     max_rounds,
     max_tokens: 6000,
   }
-  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  let client = @ai.client(api_key, base_url, model, provider)
   agent.execute(
     client,
     question,
@@ -520,7 +520,7 @@ async fn run_analysis_agent(
   ctx : AuditContext,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
   restricted_moon? : Bool = false,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
 ) -> @runtime.AgentAnswer {
   let ro_ctx : AuditContext = {
     project_dir: ctx.project_dir,
@@ -534,7 +534,7 @@ async fn run_analysis_agent(
     max_rounds: 4,
     max_tokens: 4000,
   }
-  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  let client = @ai.client(api_key, base_url, model, provider)
   agent.execute(
     client,
     audit_analysis_question(),
@@ -556,7 +556,7 @@ async fn run_fix_agent(
   max_rounds~ : Int,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
   restricted_moon? : Bool = false,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
 ) -> @runtime.AgentAnswer {
   let agent : @runtime.Agent = {
     system_prompt: audit_fix_prompt(),
@@ -565,7 +565,7 @@ async fn run_fix_agent(
     max_rounds,
     max_tokens: 6000,
   }
-  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  let client = @ai.client(api_key, base_url, model, provider)
   agent.execute(
     client,
     audit_fix_question(findings),
@@ -636,7 +636,7 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
     "https://api.deepseek.com",
   )
   let model = @sys.get_env_var("MOONSAGE_MODEL").unwrap_or("deepseek-chat")
-  let provider = @llm.provider_from_string(
+  let provider = @ai.provider_from_string(
     @sys.get_env_var("MOONSAGE_PROVIDER").unwrap_or(""),
   )
 

@@ -1,0 +1,34 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/research"
+
+import {
+  "moonsage/ai",
+  "moonsage/runtime",
+  "moonsage/tools",
+  "moonsage/types",
+}
+
+// Values
+#deprecated
+pub fn ask_agent(Array[@types.ModuleSummary]) -> @runtime.Agent
+
+#deprecated
+pub fn ask_tools(Array[@types.ModuleSummary]) -> Array[@tools.Tool]
+
+pub fn research_agent(Array[@types.ModuleSummary]) -> @runtime.Agent
+
+pub fn research_tools(Array[@types.ModuleSummary]) -> Array[@tools.Tool]
+
+#deprecated
+pub async fn run_llm_agent(String, String, String, Array[@types.ModuleSummary], String, on_delta? : async (String) -> Unit, on_event? : async (@runtime.EngineEvent) -> Unit, provider? : @ai.ProviderKind, extra_tools? : Array[@tools.Tool], project_instructions? : String) -> @runtime.AgentAnswer
+
+pub async fn run_research_agent(@ai.ChatClient, Array[@types.ModuleSummary], String, on_event? : async (@runtime.EngineEvent) -> Unit, extra_tools? : Array[@tools.Tool], project_instructions? : String) -> @runtime.AgentAnswer
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits
+

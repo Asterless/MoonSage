@@ -4,7 +4,7 @@
 let http_timeout_ms = 30000
 
 ///|
-pub async fn fetch_modules() -> Array[@moonsage.ModuleSummary] {
+pub async fn fetch_modules() -> Array[@types.ModuleSummary] {
   let (response, body) = @async.with_timeout(http_timeout_ms, () => {
     @http.get("https://mooncakes.io/api/v0/modules")
   }) catch {
@@ -15,7 +15,7 @@ pub async fn fetch_modules() -> Array[@moonsage.ModuleSummary] {
   guard response.code == 200 else {
     fail("Mooncakes API returned HTTP \{response.code}")
   }
-  @moonsage.parse_modules(body.text())
+  parse_modules(body.text())
 }
 
 ///|
@@ -36,7 +36,7 @@ pub async fn fetch_module_index(arguments : String) -> String {
     fail("invalid module name or version")
   }
   let url = "https://assets.mooncakes.io/assets/\{name}@\{version}/module_index.json"
-  @moonsage.compact_module_index(fetch_asset(url, "Mooncakes module index"))
+  compact_module_index(fetch_asset(url, "Mooncakes module index"))
 }
 
 ///|
@@ -49,7 +49,7 @@ pub async fn fetch_package_docs(arguments : String) -> String {
   }
   let relpath = package_relpath(name, path)
   let url = "https://assets.mooncakes.io/assets/\{name}@\{version}/\{relpath}/package_data.json"
-  @moonsage.compact_package_docs(fetch_asset(url, "Mooncakes package docs"))
+  compact_package_docs(fetch_asset(url, "Mooncakes package docs"))
 }
 
 ///|

@@ -1,18 +1,28 @@
 // Generated using `moon info`, DON'T EDIT IT
 package "moonsage/mooncakes"
 
+import {
+  "moonsage/types",
+}
+
 // Values
+pub fn compact_module_index(String) -> String raise
+
+pub fn compact_package_docs(String) -> String raise
+
 pub async fn fetch_asset(String, String) -> String
 
 pub async fn fetch_manifest(String) -> String
 
 pub async fn fetch_module_index(String) -> String
 
-pub async fn fetch_modules() -> Array[@moonsage.ModuleSummary]
+pub async fn fetch_modules() -> Array[@types.ModuleSummary]
 
 pub async fn fetch_package_docs(String) -> String
 
 pub fn package_relpath(String, String) -> String raise
+
+pub fn parse_modules(String) -> Array[@types.ModuleSummary] raise
 
 pub fn valid_asset_value(String) -> Bool
 

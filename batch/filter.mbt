@@ -117,7 +117,7 @@ fn module_registry_owner(name : String) -> String {
 
 ///|
 fn module_matches_filter(
-  summary : @moonsage.ModuleSummary,
+  summary : @types.ModuleSummary,
   repo_owner : String,
   normalized_repository : String,
   config : BatchConfig,
@@ -164,7 +164,7 @@ fn compare_batch_module(a : BatchModule, b : BatchModule) -> Int {
 /// GitHub repository. The result is deterministic and `limit` is applied only
 /// after repository de-duplication and sorting.
 pub fn filter_modules(
-  modules : Array[@moonsage.ModuleSummary],
+  modules : Array[@types.ModuleSummary],
   config : BatchConfig,
 ) -> Array[BatchModule] raise {
   validate_batch_config(config)
