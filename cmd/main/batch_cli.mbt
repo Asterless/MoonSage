@@ -220,6 +220,7 @@ async fn run_batch_audit_command(m : @argparse.Matches) -> Unit {
       "resume" => run_batch_control_command(m, data_root, "resume")
       "cancel" => run_batch_control_command(m, data_root, "cancel")
       "retry" => run_batch_control_command(m, data_root, "retry")
+      "prepare" => run_batch_control_command(m, data_root, "prepare")
       "publish" => run_batch_control_command(m, data_root, "publish")
       _ => fail("unknown batch-audit operation: \{operation}")
     }

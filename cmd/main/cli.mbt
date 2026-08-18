@@ -102,7 +102,7 @@ fn batch_audit_command() -> @argparse.Command {
       @argparse.PositionArg(
         "operation",
         num_args=@argparse.ValueRange(lower=0, upper=1),
-        about="start, status, pause, resume, cancel, retry, or publish.",
+        about="start, status, pause, resume, cancel, retry, prepare, or publish.",
       ),
       @argparse.PositionArg(
         "batch",

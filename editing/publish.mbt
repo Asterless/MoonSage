@@ -921,6 +921,7 @@ pub async fn publish_changes(
   source_revision? : String = "",
   quiet? : Bool = false,
   idempotency_key? : String = "",
+  prepare_only? : Bool = false,
 ) -> String? {
   let requested = branch.trim().to_owned()
   let expected_revision = source_revision.trim().to_owned()
@@ -964,6 +965,9 @@ pub async fn publish_changes(
   let reuse_branch = !has_changes && on_publish_branch && ahead > 0
   guard has_changes || reuse_branch else {
     fail("no changes to publish (git diff is empty)")
+  }
+  guard !prepare_only || has_changes else {
+    fail("no local changes to prepare")
   }
   guard has_changes || requested == "" || requested == current_branch else {
     fail("current publish branch does not match the requested branch")
@@ -1122,6 +1126,13 @@ pub async fn publish_changes(
         )
       }
     }
+  }
+
+  if prepare_only {
+    // 本地拟稿完成：分支、commit 与全部校验已就绪，但不推送、不创建 PR。
+    // 调用方保留工作区，人工确认后再次调用本函数（无 prepare_only）即可
+    // 通过 reuse_branch 路径直接推送并创建 PR。
+    return Some("")
   }
 
   let push_remote = if direct {

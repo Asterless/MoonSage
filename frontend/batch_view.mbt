@@ -23,6 +23,7 @@ struct BatchSummary {
   mode : String
   total : Int
   completed : Int
+  active : Int
   failed : Int
   created_prs : Int
   created_at : String
@@ -39,6 +40,8 @@ struct BatchItem {
   validation_log : String
   diff_summary : String
   pr_url : String
+  prepared_branch : String
+  prepared_commit : String
   error : String
   report : String
 } derive(Eq)
@@ -53,6 +56,17 @@ struct BatchRecord {
 } derive(Eq)
 
 ///|
+struct BatchActivityEntry {
+  kind : String
+  item_key : String
+  message : String
+  timestamp : String
+  tool : String
+  status : String
+  detail : String
+} derive(Eq)
+
+///|
 struct BatchModel {
   open : Bool
   loading : Bool
@@ -61,6 +75,8 @@ struct BatchModel {
   detail : BatchRecord
   selected_id : String
   selected_item : String
+  activity : Array[BatchActivityEntry]
+  activity_tab : Bool
   poll_scheduled : Bool
   notice : String
   error : String
@@ -91,6 +107,7 @@ fn empty_batch_summary() -> BatchSummary {
     mode: "batch-audit",
     total: 0,
     completed: 0,
+    active: 0,
     failed: 0,
     created_prs: 0,
     created_at: "",
@@ -134,6 +151,8 @@ fn initial_batch() -> BatchModel {
     detail: empty_batch_record(),
     selected_id: "",
     selected_item: "",
+    activity: [],
+    activity_tab: false,
     poll_scheduled: false,
     notice: "",
     error: "",
@@ -181,6 +200,126 @@ fn batch_counter(fields : Map[String, Json], name : String) -> Int {
     _ => 0
   }
 }
+
+///|
+fn batch_count_field(fields : Map[String, Json], name : String) -> Int {
+  match fields.get("counts") {
+    Some(Object(values)) => json_int_field(values, name, 0)
+    _ => 0
+  }
+}
+
+///|
+fn batch_activity_time_text(fields : Map[String, Json]) -> String {
+  match fields.get("timestamp_ms") {
+    Some(Number(value, ..)) => value.to_string()
+    _ => ""
+  }
+}
+
+///|
+fn decode_batch_activity(source : String) -> BatchActivityEntry? {
+  let document = @json.parse(source) catch { _ => return None }
+  guard document is Object(fields) else { return None }
+  let kind = json_string_field(fields, "kind")
+  guard kind != "" else { return None }
+  let (tool, status, detail) = match fields.get("data") {
+    Some(Object(data)) =>
+      (
+        json_string_field(data, "tool"),
+        batch_json_string_any(data, "status", "state"),
+        batch_json_string_any(data, "result", "detail"),
+      )
+    _ => ("", "", "")
+  }
+  Some({
+    kind,
+    item_key: json_string_field(fields, "item_key"),
+    message: json_string_field(fields, "message"),
+    timestamp: batch_activity_time_text(fields),
+    tool,
+    status,
+    detail,
+  })
+}
+
+///|
+let max_batch_activity_entries = 200
+
+///|
+fn prepend_batch_activity(
+  existing : Array[BatchActivityEntry],
+  entry : BatchActivityEntry,
+) -> Array[BatchActivityEntry] {
+  let next = Array::copy(existing)
+  next.insert(0, entry)
+  if next.length() > max_batch_activity_entries {
+    next.truncate(max_batch_activity_entries)
+  }
+  next
+}
+
+///|
+fn batch_activity_class(kind : String) -> String {
+  match kind {
+    "agent_event" => "agent"
+    "validation" => "validation"
+    "publish" => "publish"
+    "item_state" => "item"
+    "batch_state" => "batch"
+    "item_enqueued" => "enqueued"
+    "error" => "error"
+    _ => "other"
+  }
+}
+
+///|
+fn batch_activity_label(entry : BatchActivityEntry) -> String {
+  match entry.kind {
+    "item_state" =>
+      if entry.status != "" {
+        "包任务：" + batch_status_label(entry.status)
+      } else if entry.message != "" {
+        entry.message
+      } else {
+        "任务状态更新"
+      }
+    "validation" =>
+      if entry.message != "" {
+        entry.message
+      } else {
+        "验证完成"
+      }
+    "publish" =>
+      if entry.status != "" {
+        "发布：" + batch_status_label(entry.status)
+      } else {
+        "发布"
+      }
+    "agent_event" =>
+      if entry.message != "" {
+        entry.message
+      } else {
+        "Agent 活动"
+      }
+    "batch_state" =>
+      if entry.status != "" {
+        "批次：" + batch_status_label(entry.status)
+      } else {
+        "批次状态更新"
+      }
+    "item_enqueued" => "任务入队"
+    _ => if entry.message != "" { entry.message } else { entry.kind }
+  }
+}
+
+///|
+extern "js" fn format_batch_time(timestamp : String) -> String =
+  #| (timestamp) => {
+  #|   const value = Number(timestamp);
+  #|   if (!Number.isFinite(value) || value <= 0) return "";
+  #|   return new Date(value).toLocaleTimeString("zh-CN", { hour12: false });
+  #| }
 
 ///|
 fn batch_validation_summary(fields : Map[String, Json]) -> String {
@@ -259,6 +398,8 @@ fn batch_json_items(value : Json) -> Array[BatchItem] {
       validation_log: batch_validation_log(fields),
       diff_summary: batch_json_string_any(fields, "diff_summary", "diff"),
       pr_url: batch_json_string_any(fields, "pr_url", "pull_request_url"),
+      prepared_branch: batch_json_string(fields, "prepared_branch"),
+      prepared_commit: batch_json_string(fields, "prepared_commit"),
       error: batch_json_string(fields, "error"),
       report: batch_json_string_any(fields, "report", "report_summary"),
     })
@@ -296,6 +437,7 @@ fn decode_batch_summary_fields(fields : Map[String, Json]) -> BatchSummary {
     mode: batch_json_string(fields, "mode"),
     total,
     completed,
+    active: batch_count_field(fields, "running"),
     failed: json_int_field(
       fields,
       "failed",
@@ -565,8 +707,9 @@ fn batch_action(
 extern "js" fn watch_batch_event_stream(
   id : String,
   changed : () -> Unit,
+  on_event : (String) -> Unit,
 ) -> Unit =
-  #| (id, changed) => {
+  #| (id, changed, onEvent) => {
   #|   if (!id || typeof EventSource !== "function") return;
   #|   const active = globalThis.__moonsageBatchEvents;
   #|   if (active && active.id === id && active.source.readyState !== EventSource.CLOSED) return;
@@ -577,11 +720,18 @@ extern "js" fn watch_batch_event_stream(
   #|     clearTimeout(timer);
   #|     timer = setTimeout(changed, 120);
   #|   };
-  #|   source.onmessage = notify;
-  #|   source.addEventListener("batch_state", notify);
-  #|   source.addEventListener("item_state", notify);
-  #|   source.addEventListener("validation", notify);
-  #|   source.addEventListener("publish", notify);
+  #|   const deliver = (event) => {
+  #|     try { onEvent(event.data || "{}"); } catch {}
+  #|     notify();
+  #|   };
+  #|   source.onmessage = deliver;
+  #|   source.addEventListener("batch_state", deliver);
+  #|   source.addEventListener("item_state", deliver);
+  #|   source.addEventListener("validation", deliver);
+  #|   source.addEventListener("prepare", deliver);
+  #|   source.addEventListener("prepared", deliver);
+  #|   source.addEventListener("publish", deliver);
+  #|   source.addEventListener("agent_event", deliver);
   #|   source.onerror = () => {
   #|     // EventSource reconnects automatically. Polling remains active as a
   #|     // fallback, so transient stream failures do not surface as UI errors.
@@ -600,7 +750,11 @@ extern "js" fn close_batch_event_stream() -> Unit =
 fn watch_batch_events(emit : Emit[Msg], id : String) -> Cmd {
   @cmd.custom_cmd(
     scheduler => {
-      watch_batch_event_stream(id, () => scheduler.add(emit(BatchStreamChanged)))
+      watch_batch_event_stream(
+        id,
+        () => scheduler.add(emit(BatchStreamChanged)),
+        value => scheduler.add(emit(BatchActivity(value))),
+      )
     },
     kind=AfterRender,
   )
@@ -693,7 +847,16 @@ fn batch_update(
     BatchAction(action, id, item) =>
       Some(
         (
-          { ..model, loading: true, error: "", notice: "" },
+          {
+            ..model
+            // Only the run action needs the blocking "正在启动…" state. Other
+            // controls must not flash their labels while a request is in
+            // flight.
+            ,
+            loading: action == "run",
+            error: "",
+            notice: "",
+          },
           batch_action(emit, action, id, item),
         ),
       )
@@ -709,11 +872,31 @@ fn batch_update(
         Some((model, @rabbita.none))
       }
     BatchStreamChanged =>
+      // SSE events arrive frequently while a batch is running. Refreshing the
+      // list as well would rebuild the whole view on every event and make the
+      // action buttons flash; the selected batch's summary is already upserted
+      // from the detail response.
       if model.open && model.selected_id != "" {
-        Some((model, batch_refresh_command(emit, model.selected_id)))
+        Some((model, batch_load_detail(emit, model.selected_id)))
       } else {
         Some((model, @rabbita.none))
       }
+    BatchActivity(source) =>
+      match decode_batch_activity(source) {
+        Some(entry) =>
+          Some(
+            (
+              {
+                ..model,
+                activity: prepend_batch_activity(model.activity, entry),
+              },
+              @rabbita.none,
+            ),
+          )
+        None => Some((model, @rabbita.none))
+      }
+    BatchActivityTab(open) =>
+      Some(({ ..model, activity_tab: open }, @rabbita.none))
     BatchResponse(operation, source) =>
       if operation == "list" {
         match decode_batch_list(source) {
@@ -737,7 +920,10 @@ fn batch_update(
                   ..model,
                   batches,
                   selected_id,
-                  loading: selected_id != "",
+                  // The detail response owns the loading flag; turning it on
+                  // here again would flicker the start button on every list
+                  // refresh triggered by SSE or polling.
+                  loading: false,
                   error: "",
                 },
                 detail_command,
@@ -847,10 +1033,19 @@ fn batch_update(
         }
       } else {
         // Action responses may contain either the updated batch or only an
-        // acknowledgement. Always reload both summaries and detail.
+        // acknowledgement. Reload the detail so the worker-owned status wins.
+        let notice = match operation {
+          "pause" => "暂停请求已提交，当前包完成后生效。"
+          "resume" => "恢复请求已提交。"
+          "cancel" => "取消请求已提交。"
+          "retry" => "重试请求已提交。"
+          "prepare" => "拟稿请求已提交，正在本地准备 PR。"
+          "approve" => "确认提交已受理，正在推送并创建 PR。"
+          _ => "操作已提交。"
+        }
         Some(
           (
-            { ..model, loading: true, notice: "操作已提交。", error: "" },
+            { ..model, loading: operation == "run", notice, error: "" },
             batch_refresh_command(emit, model.selected_id),
           ),
         )
@@ -892,6 +1087,11 @@ fn batch_summary_card(
       div(class="batch-row-meta", [
         span("\{summary.completed}/\{summary.total} 包"),
         span("\{summary.created_prs} 个 PR"),
+        if summary.active > 0 {
+          span(class="batch-running-badge", "\{summary.active} 运行中")
+        } else {
+          span("")
+        },
       ]),
     ],
   )
@@ -980,7 +1180,15 @@ fn batch_config_view(batch : BatchModel, emit : Emit[Msg]) -> Html {
         type_="button",
         disabled=batch.loading,
         on_click=emit(BatchStart),
-        [span(if batch.loading { "正在启动…" } else { "启动模式 1" })],
+        [
+          span(
+            if batch.loading {
+              "正在启动…"
+            } else {
+              "启动自动审计"
+            },
+          ),
+        ],
       ),
       p(
         class="batch-policy-note",
@@ -992,6 +1200,8 @@ fn batch_config_view(batch : BatchModel, emit : Emit[Msg]) -> Html {
 
 ///|
 fn batch_item_row(item : BatchItem, selected : Bool, emit : Emit[Msg]) -> Html {
+  let prepared = item.status == "verified_pending_publish" &&
+    item.prepared_commit != ""
   button(
     class=if selected { "batch-item-row active" } else { "batch-item-row" },
     type_="button",
@@ -1013,7 +1223,11 @@ fn batch_item_row(item : BatchItem, selected : Bool, emit : Emit[Msg]) -> Html {
       ]),
       span(
         class=batch_status_class(item.status),
-        batch_status_label(item.status),
+        if prepared {
+          "已拟稿待确认"
+        } else {
+          batch_status_label(item.status)
+        },
       ),
       span(class="batch-item-attempts", "尝试 \{item.attempts}"),
       if item.pr_url != "" {
@@ -1031,7 +1245,9 @@ fn batch_item_detail(
   batch_id : String,
   emit : Emit[Msg],
 ) -> Html {
-  let can_approve = item.status == "verified_pending_publish"
+  let prepared = item.status == "verified_pending_publish" &&
+    item.prepared_commit != ""
+  let can_prepare = item.status == "verified_pending_publish" && !prepared
   let can_retry = item.status == "failed" ||
     item.status == "cancelled" ||
     item.status == "skipped"
@@ -1043,9 +1259,14 @@ fn batch_item_detail(
       ]),
       span(
         class=batch_status_class(item.status),
-        batch_status_label(item.status),
+        if prepared {
+          "已拟稿待确认"
+        } else {
+          batch_status_label(item.status)
+        },
       ),
     ]),
+    batch_stage_steps(item.status),
     div(class="batch-detail-actions", [
       if can_retry {
         button(
@@ -1057,17 +1278,32 @@ fn batch_item_detail(
       } else {
         div(class="batch-action-placeholder", "")
       },
-      if can_approve {
+      if can_prepare {
+        button(
+          class="batch-primary-button compact",
+          type_="button",
+          on_click=emit(BatchAction("prepare", batch_id, item.key)),
+          "拟稿 PR",
+        )
+      } else if prepared {
         button(
           class="batch-primary-button compact",
           type_="button",
           on_click=emit(BatchAction("approve", batch_id, item.key)),
-          "批准创建 Ready PR",
+          "确认提交 PR",
         )
       } else {
         div(class="batch-action-placeholder", "")
       },
     ]),
+    if prepared {
+      div(class="batch-detail-grid", [
+        div([small("拟稿分支"), p(item.prepared_branch)]),
+        div([small("本地提交"), p(item.prepared_commit)]),
+      ])
+    } else {
+      div("")
+    },
     if item.pr_url != "" {
       div(class="batch-detail-link", [
         span("Pull Request"),
@@ -1108,6 +1344,99 @@ fn batch_item_detail(
 }
 
 ///|
+fn batch_stage_progress(status : String) -> Int {
+  match status {
+    "fetching" => 0
+    "auditing" => 1
+    "fixing" => 2
+    "verifying" => 3
+    "verified_pending_publish" | "publishing" | "created" => 4
+    _ => -1
+  }
+}
+
+///|
+fn batch_stage_steps(status : String) -> Html {
+  let progress = batch_stage_progress(status)
+  div(
+    class="batch-stage-steps",
+    attrs=@html.Attrs::build().aria_label("阶段进度"),
+    [
+      for index, stage in ["抓取", "审计", "修复", "验证", "发布"] => {
+        let class_name = if progress >= index {
+          if progress == index {
+            "batch-stage-step active"
+          } else {
+            "batch-stage-step done"
+          }
+        } else {
+          "batch-stage-step"
+        }
+        span(class=class_name, stage)
+      }
+    ],
+  )
+}
+
+///|
+fn batch_activity_row(
+  entry : BatchActivityEntry,
+  module_lookup : Map[String, String],
+) -> Html {
+  let module_name = match module_lookup.get(entry.item_key) {
+    Some(name) if name != "" => name
+    _ => entry.item_key
+  }
+  div(class="batch-activity-row", [
+    span(class="batch-activity-time", format_batch_time(entry.timestamp)),
+    if entry.item_key != "" {
+      span(class="batch-activity-item", module_name)
+    } else {
+      span(class="batch-activity-item empty", "")
+    },
+    span(
+      class="batch-activity-kind " + batch_activity_class(entry.kind),
+      batch_activity_label(entry),
+    ),
+    if entry.tool != "" {
+      span(class="batch-activity-tool", entry.tool)
+    } else if entry.detail != "" {
+      span(class="batch-activity-tool", entry.detail)
+    } else {
+      span(class="batch-activity-tool empty", "")
+    },
+  ])
+}
+
+///|
+fn batch_activity_view(batch : BatchModel) -> Html {
+  let module_lookup : Map[String, String] = Map([])
+  for item in batch.detail.items {
+    module_lookup[item.key] = item.module_name
+  }
+  div(class="batch-item-workspace batch-activity-workspace", [
+    div(class="batch-item-list batch-activity-list", [
+      div(class="batch-panel-heading", [
+        h3("实时活动"),
+        span("\{batch.activity.length()} 条"),
+      ]),
+      if batch.activity.is_empty() {
+        p(class="batch-list-note", "正在等待 agent 活动…")
+      } else {
+        div(
+          class="batch-activity-feed",
+          [
+            for entry in batch.activity => {
+              batch_activity_row(entry, module_lookup)
+            }
+          ],
+        )
+      },
+    ]),
+  ])
+}
+
+///|
 fn find_batch_item(items : Array[BatchItem], key : String) -> BatchItem? {
   for item in items {
     if item.key == key {
@@ -1128,7 +1457,7 @@ fn batch_view(batch : BatchModel, theme : String, emit : Emit[Msg]) -> Html {
       header(class="batch-topbar", [
         div(class="batch-brand", [
           span(class="brand-wordmark", "MoonSage"),
-          span(class="brand-caption", "MODE 1"),
+          span(class="brand-caption", "AUTO AUDIT"),
         ]),
         div(class="batch-title", [
           h1("自动审计"),
@@ -1182,7 +1511,7 @@ fn batch_view(batch : BatchModel, theme : String, emit : Emit[Msg]) -> Html {
             if batch.batches.is_empty() {
               div(class="batch-empty", [
                 span("暂无批次"),
-                p("启动模式 1 后，任务会出现在这里。"),
+                p("启动自动审计后，任务会出现在这里。"),
               ])
             } else {
               div(
@@ -1235,7 +1564,9 @@ fn batch_view(batch : BatchModel, theme : String, emit : Emit[Msg]) -> Html {
                   ]),
                 ]),
                 div(class="batch-control-bar", [
-                  if summary.status == "running" || summary.status == "watching" {
+                  if summary.status == "running" ||
+                    summary.status == "watching" ||
+                    summary.status == "queued" {
                     button(
                       class="batch-secondary-button",
                       type_="button",
@@ -1273,37 +1604,77 @@ fn batch_view(batch : BatchModel, theme : String, emit : Emit[Msg]) -> Html {
                     span(class="batch-revision", "")
                   },
                 ]),
-                div(class="batch-item-workspace", [
-                  div(class="batch-item-list", [
-                    div(class="batch-panel-heading", [
-                      h3("包任务"),
-                      span("\{batch.detail.items.length()} 个"),
+                div(class="batch-detail-tabs", [
+                  button(
+                    class=if batch.activity_tab {
+                      "batch-detail-tab"
+                    } else {
+                      "batch-detail-tab active"
+                    },
+                    type_="button",
+                    attrs=@html.Attrs::build().aria_pressed(
+                      if batch.activity_tab {
+                        "false"
+                      } else {
+                        "true"
+                      },
+                    ),
+                    on_click=emit(BatchActivityTab(false)),
+                    "包任务",
+                  ),
+                  button(
+                    class=if batch.activity_tab {
+                      "batch-detail-tab active"
+                    } else {
+                      "batch-detail-tab"
+                    },
+                    type_="button",
+                    attrs=@html.Attrs::build().aria_pressed(
+                      if batch.activity_tab {
+                        "true"
+                      } else {
+                        "false"
+                      },
+                    ),
+                    on_click=emit(BatchActivityTab(true)),
+                    "实时活动",
+                  ),
+                ]),
+                if batch.activity_tab {
+                  batch_activity_view(batch)
+                } else {
+                  div(class="batch-item-workspace", [
+                    div(class="batch-item-list", [
+                      div(class="batch-panel-heading", [
+                        h3("包任务"),
+                        span("\{batch.detail.items.length()} 个"),
+                      ]),
+                      if batch.detail.items.is_empty() {
+                        p(class="batch-list-note", "队列正在准备中…")
+                      } else {
+                        div(
+                          [
+                            for item in batch.detail.items => {
+                              batch_item_row(
+                                item,
+                                item.key == batch.selected_item,
+                                emit,
+                              )
+                            }
+                          ],
+                        )
+                      },
                     ]),
-                    if batch.detail.items.is_empty() {
-                      p(class="batch-list-note", "队列正在准备中…")
+                    if selected_item is Some(item) {
+                      batch_item_detail(item, summary.id, emit)
                     } else {
                       div(
-                        [
-                          for item in batch.detail.items => {
-                            batch_item_row(
-                              item,
-                              item.key == batch.selected_item,
-                              emit,
-                            )
-                          }
-                        ],
+                        class="batch-empty batch-item-empty",
+                        "从左侧选择一个包查看详情。",
                       )
                     },
-                  ]),
-                  if selected_item is Some(item) {
-                    batch_item_detail(item, summary.id, emit)
-                  } else {
-                    div(
-                      class="batch-empty batch-item-empty",
-                      "从左侧选择一个包查看详情。",
-                    )
-                  },
-                ]),
+                  ])
+                },
               ])
             },
           ]),

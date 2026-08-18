@@ -248,21 +248,182 @@ test "publish result records ready PR and idempotency fingerprint" {
   item.status = Verifying
   apply_audit_result(record, item, verified_result(), 2L)
   ignore(prepare_publish(record, item.key, 3L))
-  apply_publish_result(
+  apply_prepare_result(
     record,
     item.key,
     {
-      created: true,
-      pr_url: "https://github.com/acme/a/pull/1",
+      prepared: true,
+      prepared_branch: "moonsage/mode1/acme-a-batch-5-1",
+      prepared_commit: "local-commit-abc",
+      created: false,
+      pr_url: "",
       error: "",
       retryable: false,
     },
     4L,
   )
+  assert_true(item.status is VerifiedPendingPublish)
+  assert_eq(item.prepared_branch, "moonsage/mode1/acme-a-batch-5-1")
+  assert_eq(item.prepared_commit, "local-commit-abc")
+  ignore(prepare_publish(record, item.key, 5L))
+  apply_publish_result(
+    record,
+    item.key,
+    {
+      prepared: false,
+      prepared_branch: "",
+      prepared_commit: "",
+      created: true,
+      pr_url: "https://github.com/acme/a/pull/1",
+      error: "",
+      retryable: false,
+    },
+    6L,
+  )
   assert_true(item.status is Created)
   assert_eq(record.pr_count, 1)
   let seen = completed_fingerprints([record])
   assert_eq(seen.get(item.fingerprint), Some(item.pr_url))
+}
+
+///|
+async test "prepare must finish before an item can be submitted" {
+  let data_root = @fs.tmpdir(prefix="moonsage-prepare-submit-")
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
+  let record = BatchRecord::new(
+    "batch-prepare-submit",
+    default_batch_config(),
+    selected,
+    1L,
+  )
+  let item = record.items[0]
+  item.status = Verifying
+  apply_audit_result(record, item, verified_result(), 2L)
+  save_batch(data_root, record)
+  // 未拟稿时 submit 必须被拒绝，且不能触碰工作区状态。
+  let refused = publish_batch_item_by_id(
+    data_root,
+    record.id,
+    item.key,
+    async fn(_request) { fail("submit must not run before prepare") },
+    approved=true,
+  )
+  assert_true(refused.unwrap().items[0].status is VerifiedPendingPublish)
+  assert_eq(refused.unwrap().items[0].prepared_commit, "")
+  // prepare 在本地完成分支 + commit，状态回到 verified_pending_publish。
+  let prepared = prepare_batch_item_by_id(
+    data_root,
+    record.id,
+    item.key,
+    async fn(request) {
+      {
+        prepared: true,
+        prepared_branch: request.branch,
+        prepared_commit: "local-draft-abc",
+        created: false,
+        pr_url: "",
+        error: "",
+        retryable: false,
+      }
+    },
+    approved=true,
+  )
+  let prepared_item = prepared.unwrap().items[0]
+  assert_true(prepared_item.status is VerifiedPendingPublish)
+  assert_eq(
+    prepared_item.prepared_branch,
+    "moonsage/mode1/acme-a-batch-prepare-submit-1",
+  )
+  assert_eq(prepared_item.prepared_commit, "local-draft-abc")
+  assert_true(prepared_item.prepared_at_ms > 0L)
+  // 再次 prepare 幂等跳过。
+  let reprepared = prepare_batch_item_by_id(
+    data_root,
+    record.id,
+    item.key,
+    async fn(_request) {
+      fail("already prepared items must not be prepared again")
+    },
+    approved=true,
+  )
+  assert_eq(reprepared.unwrap().items[0].prepared_commit, "local-draft-abc")
+  // 拟稿完成后 submit 推送并创建 PR。
+  let published = publish_batch_item_by_id(
+    data_root,
+    record.id,
+    item.key,
+    async fn(request) {
+      assert_eq(request.prepare_only, false)
+      {
+        prepared: false,
+        prepared_branch: "",
+        prepared_commit: "",
+        created: true,
+        pr_url: "https://github.com/acme/a/pull/9",
+        error: "",
+        retryable: false,
+      }
+    },
+    approved=true,
+  )
+  let published_item = published.unwrap().items[0]
+  assert_true(published_item.status is Created)
+  assert_eq(published_item.pr_url, "https://github.com/acme/a/pull/9")
+  @fs.rmdir(data_root, recursive=true)
+}
+
+///|
+async test "paused batch never enters the publish phase" {
+  let data_root = @fs.tmpdir(prefix="moonsage-pause-publish-")
+  let selected = filter_modules(
+    [summary("acme/a", "https://github.com/acme/a")],
+    default_batch_config(),
+  )
+  let record = BatchRecord::new(
+    "batch-paused",
+    default_batch_config(),
+    selected,
+    1L,
+  )
+  let item = record.items[0]
+  item.status = Verifying
+  apply_audit_result(record, item, verified_result(), 2L)
+  record.status = Paused
+  record.updated_at_ms = 3L
+  save_batch(data_root, record)
+  save_batch_control(data_root, "batch-paused", {
+    pause: true,
+    cancel: false,
+    retry_items: [],
+    prepare_items: [],
+    approved_items: [],
+    updated_at_ms: 4L,
+  })
+  let mut calls = 0
+  let published = publish_batch_item_by_id(
+    data_root,
+    "batch-paused",
+    item.key,
+    async fn(_request) {
+      calls += 1
+      {
+        prepared: false,
+        prepared_branch: "",
+        prepared_commit: "",
+        created: true,
+        pr_url: "https://github.com/acme/a/pull/2",
+        error: "",
+        retryable: false,
+      }
+    },
+    approved=true,
+  )
+  assert_eq(calls, 0)
+  assert_true(published.unwrap().items[0].status is VerifiedPendingPublish)
+  @fs.rmdir(data_root, recursive=true)
 }
 
 ///|
@@ -294,6 +455,7 @@ async test "record event control and lock persistence is resumable" {
     pause: true,
     cancel: false,
     retry_items: ["retry-me"],
+    prepare_items: [],
     approved_items: ["acme--a"],
     updated_at_ms: 3L,
   })
@@ -376,6 +538,9 @@ async test "runner skips completed fingerprints unless retry is forced" {
     previous,
     previous_item.key,
     {
+      prepared: false,
+      prepared_branch: "",
+      prepared_commit: "",
       created: true,
       pr_url: "https://github.com/acme/a/pull/7",
       error: "",
@@ -577,6 +742,7 @@ async test "runner consumes persisted retry requests once" {
     pause: false,
     cancel: false,
     retry_items: [key],
+    prepare_items: [],
     approved_items: [],
     updated_at_ms: 2L,
   })
@@ -684,15 +850,34 @@ async test "publisher honors auto cap approvals and retry budget" {
     pause: false,
     cancel: false,
     retry_items: [],
+    prepare_items: ["acme--c"],
     approved_items: ["acme--c"],
     updated_at_ms: 3L,
   })
   let attempts : Map[String, Int] = Map([])
-  let published = publish_ready_batch_items(data_root, record, request => {
+  let prepared = prepare_ready_batch_items(data_root, record, request => {
+    prepared: true,
+    prepared_branch: "moonsage/mode1/" + request.item_key,
+    prepared_commit: "local-" + request.item_key,
+    created: false,
+    pr_url: "",
+    error: "",
+    retryable: false,
+  })
+  for key in ["acme--a", "acme--b", "acme--c"] {
+    assert_true(
+      prepared.find_item(key).unwrap().status is VerifiedPendingPublish,
+    )
+    assert_true(prepared.find_item(key).unwrap().prepared_commit != "")
+  }
+  let published = publish_ready_batch_items(data_root, prepared, request => {
     let count = attempts.get(request.item_key).unwrap_or(0) + 1
     attempts[request.item_key] = count
     if request.item_key == "acme--c" && count == 1 {
       {
+        prepared: false,
+        prepared_branch: "",
+        prepared_commit: "",
         created: false,
         pr_url: "",
         error: "temporary GitHub error",
@@ -700,6 +885,9 @@ async test "publisher honors auto cap approvals and retry budget" {
       }
     } else {
       {
+        prepared: false,
+        prepared_branch: "",
+        prepared_commit: "",
         created: true,
         pr_url: "https://github.com/" +
         request.owner +
@@ -711,13 +899,15 @@ async test "publisher honors auto cap approvals and retry budget" {
       }
     }
   })
-  assert_true(published.find_item("acme--a").unwrap().status is Created)
+  assert_true(
+    published.find_item("acme--a").unwrap().status is VerifiedPendingPublish,
+  )
   assert_true(
     published.find_item("acme--b").unwrap().status is VerifiedPendingPublish,
   )
   assert_true(published.find_item("acme--c").unwrap().status is Created)
-  assert_eq(published.pr_count, 2)
-  assert_eq(attempts.get("acme--a"), Some(1))
+  assert_eq(published.pr_count, 1)
+  assert_eq(attempts.get("acme--a"), None)
   assert_eq(attempts.get("acme--b"), None)
   assert_eq(attempts.get("acme--c"), Some(2))
   assert_true(

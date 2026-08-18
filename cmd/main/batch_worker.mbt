@@ -46,6 +46,56 @@ async fn persist_worker_event(
 }
 
 ///|
+fn agent_event_summary(event : @runtime.EngineEvent) -> String {
+  match event {
+    ToolStarted(tool) => "调用工具 \{tool.name}"
+    ToolFinished(tool) =>
+      if tool.status == "ok" {
+        "\{tool.name} 完成"
+      } else {
+        "\{tool.name} 返回 \{tool.status}"
+      }
+    ThinkingDelta(_) => "Agent 思考中…"
+    FinalStarted => "开始生成报告"
+    FinalDelta(_) => "生成报告中…"
+    Retrying(retry) => "第 \{retry.attempt} 次重试"
+    Warning(message) => "警告：\{message}"
+    Error(message) => "错误：\{message}"
+  }
+}
+
+///|
+async fn emit_agent_event(
+  data_root : String,
+  batch_id : String,
+  item_key : String,
+  cycle : Int,
+  event : @runtime.EngineEvent,
+  stream_json : Bool,
+  secrets : Array[String],
+) -> Unit {
+  // Keep the live activity feed readable: tool boundaries and notable
+  // transitions are useful, per-token deltas and thinking streams are not.
+  match event {
+    ThinkingDelta(_) | FinalDelta(_) => return
+    _ => ()
+  }
+  let batch_event = @batch.BatchEvent::new(
+    "agent_event",
+    batch_id,
+    @async.now(),
+    item_key~,
+    cycle~,
+    message=agent_event_summary(event),
+    data=@agent.event_to_json(event),
+  )
+  @batch.append_batch_event(data_root, batch_event, secrets~) catch {
+    _ => ()
+  }
+  output_batch_event(batch_event, stream_json)
+}
+
+///|
 fn batch_state_event(record : @batch.BatchRecord) -> @batch.BatchEvent {
   @batch.BatchEvent::new(
     "batch_state",
@@ -281,10 +331,14 @@ async fn publish_mode1_request(
       ":" +
       request.fingerprint,
     quiet=true,
+    prepare_only=request.prepare_only,
   ) catch {
     error => {
       let message = error.to_string()
       return {
+        prepared: false,
+        prepared_branch: "",
+        prepared_commit: "",
         created: false,
         pr_url: "",
         error: message,
@@ -292,16 +346,72 @@ async fn publish_mode1_request(
       }
     }
   }
-  match published {
-    Some(url) if url != "" =>
-      { created: true, pr_url: url, error: "", retryable: false }
-    _ =>
-      {
-        created: false,
-        pr_url: "",
-        error: "publisher did not return a pull request URL",
-        retryable: false,
+  if request.prepare_only {
+    match published {
+      Some(_) => {
+        let (exit, out, _) = @process.collect_output(
+          "git",
+          ["rev-parse", "HEAD"],
+          cwd=request.project_dir,
+          no_console_window=true,
+        )
+        let commit = (out.text() catch { _ => "" }).trim().to_owned()
+        if exit == 0 && commit != "" {
+          {
+            prepared: true,
+            prepared_branch: request.branch,
+            prepared_commit: commit,
+            created: false,
+            pr_url: "",
+            error: "",
+            retryable: false,
+          }
+        } else {
+          {
+            prepared: false,
+            prepared_branch: "",
+            prepared_commit: "",
+            created: false,
+            pr_url: "",
+            error: "publisher prepared a draft but the local commit is missing",
+            retryable: false,
+          }
+        }
       }
+      _ =>
+        {
+          prepared: false,
+          prepared_branch: "",
+          prepared_commit: "",
+          created: false,
+          pr_url: "",
+          error: "publisher did not prepare a local draft",
+          retryable: false,
+        }
+    }
+  } else {
+    match published {
+      Some(url) if url != "" =>
+        {
+          prepared: false,
+          prepared_branch: "",
+          prepared_commit: "",
+          created: true,
+          pr_url: url,
+          error: "",
+          retryable: false,
+        }
+      _ =>
+        {
+          prepared: false,
+          prepared_branch: "",
+          prepared_commit: "",
+          created: false,
+          pr_url: "",
+          error: "publisher did not return a pull request URL",
+          retryable: false,
+        }
+    }
   }
 }
 
@@ -312,24 +422,33 @@ async fn publish_batch_items(
   stream_json : Bool,
   secrets : Array[String],
 ) -> @batch.BatchRecord {
+  // A paused batch must never keep publishing. The worker's cycle runner has
+  // already persisted Paused; the generic publisher also refuses to start
+  // when the control file requests a pause.
+  if initial.status is @batch.Paused {
+    return initial
+  }
   let on_event = async fn(event) { output_batch_event(event, stream_json) }
   let control = @batch.load_batch_control(data_root, initial.id)
   let approved = control.approved_items.copy()
-  let automatic : Array[String] = []
-  for item in initial.items {
-    if @batch.can_auto_publish(initial, item) {
-      automatic.push(item.key)
-    }
-  }
   let mut current = initial
-  for key in approved {
+  // 阶段 1：本地拟稿。满足自动条件的 item 自动完成分支 + commit（不推送）；
+  // 敏感/超限或人工点击“拟稿”的 item 通过 prepare_items 触发。
+  for item in current.items {
+    if current.status is @batch.Cancelled {
+      break
+    }
+    let manual = control.prepare_items.contains(item.key)
+    if !manual && !@batch.can_auto_publish(current, item) {
+      continue
+    }
     match
-      @batch.publish_batch_item_by_id(
+      @batch.prepare_batch_item_by_id(
         data_root,
         current.id,
-        key,
+        item.key,
         publish_mode1_request,
-        approved=true,
+        approved=manual,
         on_event~,
         secrets~,
       ) {
@@ -337,8 +456,9 @@ async fn publish_batch_items(
       None => ()
     }
   }
-  for key in automatic {
-    if current.pr_count >= current.config.max_prs {
+  // 阶段 2：仅提交人工确认的拟稿（approved_items 且本地 commit 已就绪）。
+  for key in approved {
+    if current.status is @batch.Cancelled {
       break
     }
     match
@@ -347,6 +467,7 @@ async fn publish_batch_items(
         current.id,
         key,
         publish_mode1_request,
+        approved=true,
         on_event~,
         secrets~,
       ) {
@@ -525,6 +646,17 @@ async fn run_mode1_worker(
             api_key,
             base_url,
             model,
+            on_event=async fn(event) {
+              emit_agent_event(
+                data_root,
+                current.id,
+                item.key,
+                current.cycle,
+                event,
+                stream_json,
+                secrets,
+              )
+            },
             on_stage=async fn(stage) {
               ignore(
                 @batch.update_batch_item_stage_by_id(

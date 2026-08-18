@@ -164,6 +164,8 @@ enum Msg {
   BatchFailed(String)
   BatchPoll
   BatchStreamChanged
+  BatchActivity(String)
+  BatchActivityTab(Bool)
 } derive(Eq)
 
 ///|
@@ -1075,7 +1077,7 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
       [
         icon("sparkles"),
         span("自动审计"),
-        span(class="batch-entry-kicker", "模式 1"),
+        span(class="batch-entry-kicker", "批量审计"),
       ],
     ),
     div(class="sidebar-label", "对话"),
@@ -1313,7 +1315,7 @@ fn app() -> Val[Html] {
                   "进入自动审计模式",
                 ),
                 on_click=emit(ToggleBatch),
-                [icon("sparkles"), span("模式 1")],
+                [icon("sparkles"), span("自动审计")],
               ),
               button(
                 class="icon-button topbar-theme-toggle",

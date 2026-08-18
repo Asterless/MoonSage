@@ -462,6 +462,31 @@ function batchCounters(items) {
   return counters;
 }
 
+function markBatchCancelled(batch) {
+  const settled = new Set(["created", "no_changes", "skipped", "failed", "cancelled"]);
+  batch.status = "cancelled";
+  batch.updated_at_ms = Date.now();
+  for (const item of batch.items || []) {
+    if (!settled.has(String(item?.status || ""))) {
+      item.status = "cancelled";
+      item.updated_at_ms = Date.now();
+    }
+  }
+  return batch;
+}
+
+function cancelledBatchEvent(batch) {
+  return {
+    kind: "batch_state",
+    batch_id: batch.id,
+    item_key: "",
+    cycle: Number.isInteger(batch.cycle) ? batch.cycle : 0,
+    timestamp_ms: Date.now(),
+    message: "",
+    data: { status: "cancelled" },
+  };
+}
+
 function publicBatch(batch) {
   const counts = {};
   for (const item of batch.items) {
@@ -2080,6 +2105,10 @@ export function applyBatchEvent(batch, rawEvent) {
       if (typeof url === "string") item.pr_url = url;
       if (event.status === "created" || event.created === true || item.pr_url) item.status = "created";
     }
+    if (event.type === "prepared") {
+      if (typeof event.prepared_branch === "string") item.prepared_branch = event.prepared_branch;
+      if (typeof event.prepared_commit === "string") item.prepared_commit = event.prepared_commit;
+    }
     if (typeof event.error === "string") item.error = event.error;
     if (typeof event.message === "string" && event.type === "item_state" && item.status === "failed") {
       item.error = event.message;
@@ -2118,6 +2147,9 @@ export function eventForBatchOutput(line) {
     "item_state",
     "validation",
     "publish",
+    "agent_event",
+    "prepare",
+    "prepared",
     "batch_state",
     "cycle",
     "warning",
@@ -2293,7 +2325,7 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     const next = previous.catch(() => {}).then(async () => {
       const paths = batchPaths(requireBatchId(id), storeRoot);
       await mkdir(paths.directory, { recursive: true });
-      let existing = { pause: false, cancel: false, approved_items: [], retry_items: [], updated_at_ms: 0 };
+      let existing = { pause: false, cancel: false, approved_items: [], retry_items: [], prepare_items: [], updated_at_ms: 0 };
       try {
         const document = JSON.parse(await readFile(paths.control, "utf8"));
         if (document && typeof document === "object") {
@@ -2306,14 +2338,17 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
             retry_items: Array.isArray(document.retry_items)
               ? document.retry_items.filter((entry) => typeof entry === "string")
               : [],
+            prepare_items: Array.isArray(document.prepare_items)
+              ? document.prepare_items.filter((entry) => typeof entry === "string")
+              : [],
             updated_at_ms: Number.isSafeInteger(document.updated_at_ms) ? document.updated_at_ms : 0,
           };
         }
       } catch (error) {
         if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
       }
-      const clearsPause = ["run", "resume", "retry", "approve"].includes(action);
-      const clearsCancel = ["run", "resume", "retry", "approve"].includes(action);
+      const clearsPause = ["run", "resume", "retry", "approve", "prepare"].includes(action);
+      const clearsCancel = ["run", "resume", "retry", "approve", "prepare"].includes(action);
       const control = {
         pause: action === "pause" ? true : clearsPause ? false : existing.pause,
         cancel: action === "cancel" ? true : clearsCancel ? false : existing.cancel,
@@ -2323,6 +2358,9 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
         retry_items: action === "retry" && itemId
           ? [...new Set([...existing.retry_items, itemId])]
           : existing.retry_items,
+        prepare_items: action === "prepare" && itemId
+          ? [...new Set([...existing.prepare_items, itemId])]
+          : existing.prepare_items,
         updated_at_ms: Date.now(),
       };
       await writeFile(paths.control, JSON.stringify(control, null, 2) + "\n", "utf8");
@@ -2362,7 +2400,10 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     const state = { controller, child: null, promise: null };
     running.set(id, state);
     try {
-      await writeControl(id, "run");
+      // A normal start clears stale pause/cancel flags, but recovery must
+      // preserve them: restarting a worker for a batch the user asked to
+      // pause or cancel should settle that request instead of resuming work.
+      if (!recovery) await writeControl(id, "run");
     } catch (error) {
       running.delete(id);
       throw error;
@@ -2379,6 +2420,22 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
       try {
         result = await runInjected(batch, emit, controller.signal, (child) => { state.child = child; });
         const latest = await readBatch(id, storeRoot);
+        if (result?.aborted && !stopping) {
+          // The child was terminated by a cancel request and may not have had
+          // a chance to persist its own terminal state. Settle the record
+          // here from the durable control file so the batch cannot remain
+          // "running" forever after the worker process is gone.
+          let cancelRequested = false;
+          try {
+            cancelRequested = JSON.parse(await readFile(batchPaths(id, storeRoot).control, "utf8"))?.cancel === true;
+          } catch { /* a missing control file means no pending cancel */ }
+          if (cancelRequested && !["cancelled", "completed"].includes(latest.status)) {
+            markBatchCancelled(latest);
+            await writeBatch(latest, storeRoot);
+            broadcast(id, cancelledBatchEvent(latest));
+          }
+          return;
+        }
         if (stopping || result?.aborted || ["paused", "cancelled"].includes(latest.status)) return;
         if (result?.error || (result?.code !== undefined && result.code !== 0)) {
           console.error(`MoonSage batch worker ${id} failed; inspect the persisted batch report.`);
@@ -2394,8 +2451,19 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
 
   const pause = async (id) => {
     const batch = await readBatch(id, storeRoot);
-    if (!["running", "watching"].includes(batch.status)) throw batchError("Only running batches can be paused.", 409);
+    // A batch that is still queued can also be paused: the durable control
+    // file tells the worker to settle into Paused before it starts a cycle.
+    if (!["queued", "running", "watching"].includes(batch.status)) {
+      throw batchError("Only queued or running batches can be paused.", 409);
+    }
     await writeControl(id, "pause");
+    // The worker owns its record while it is alive. When nothing is running,
+    // persist the paused state immediately so the UI reflects the request
+    // instead of waiting for a worker that may never settle it.
+    if (!running.has(id) && batch.status !== "paused") {
+      batch.status = "paused";
+      await writeBatch(batch, storeRoot);
+    }
     return batch;
   };
 
@@ -2429,6 +2497,14 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     if (state) {
       state.controller.abort();
       if (state.child) killProcessTree(state.child);
+      // The worker settles its own record when it observes the control file;
+      // if it is killed first, the start() promise above persists cancelled.
+    } else {
+      // No worker is alive to settle the request. Persist the terminal state
+      // directly so the batch cannot stay queued/running indefinitely.
+      markBatchCancelled(batch);
+      await writeBatch(batch, storeRoot);
+      broadcast(id, cancelledBatchEvent(batch));
     }
     return batch;
   };
@@ -2449,10 +2525,25 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     const batch = await readBatch(id, storeRoot);
     const item = findBatchItem(batch, itemId);
     if (!item) throw batchError("Batch item is not found.", 404);
-    if (item.status !== "verified_pending_publish") {
-      throw batchError("Only verified pending items can be approved.", 409);
+    if (item.status !== "verified_pending_publish" || !item.prepared_commit) {
+      throw batchError("Only prepared items can be submitted. Run prepare first.", 409);
     }
     await writeControl(id, "approve", item.id || itemId);
+    if (!running.has(id)) await start(id, { allowTerminal: true });
+    return batch;
+  };
+
+  const prepare = async (id, itemId) => {
+    const batch = await readBatch(id, storeRoot);
+    const item = findBatchItem(batch, itemId);
+    if (!item) throw batchError("Batch item is not found.", 404);
+    if (item.status !== "verified_pending_publish") {
+      throw batchError("Only verified pending items can be prepared.", 409);
+    }
+    if (item.prepared_commit) {
+      throw batchError("This item already has a local draft.", 409);
+    }
+    await writeControl(id, "prepare", item.id || itemId);
     if (!running.has(id)) await start(id, { allowTerminal: true });
     return batch;
   };
@@ -2498,7 +2589,7 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     }
   };
 
-  return { approve, cancel, pause, recover, resume, retry, start, stopAll, subscribe, storeRoot };
+  return { approve, cancel, pause, prepare, recover, resume, retry, start, stopAll, subscribe, storeRoot };
 }
 
 function beginSse(response) {
@@ -2615,7 +2706,7 @@ async function serveBatches(request, response, pathname, controller) {
       sendJson(response, action[2] === "run" ? 202 : 200, { batch: publicBatch(batch) });
       return true;
     }
-    const itemAction = pathname.match(/^\/api\/batches\/([^/]+)\/items\/([^/]+)\/(retry|approve)$/);
+    const itemAction = pathname.match(/^\/api\/batches\/([^/]+)\/items\/([^/]+)\/(retry|approve|prepare)$/);
     if (itemAction) {
       if (request.method !== "POST") {
         sendJson(response, 405, { error: "Only POST is supported." });
@@ -2625,7 +2716,9 @@ async function serveBatches(request, response, pathname, controller) {
       const itemId = decodeURIComponent(itemAction[2]);
       const batch = itemAction[3] === "retry"
         ? await controller.retry(id, itemId)
-        : await controller.approve(id, itemId);
+        : itemAction[3] === "prepare"
+          ? await controller.prepare(id, itemId)
+          : await controller.approve(id, itemId);
       sendJson(response, 202, { batch: publicBatch(batch) });
       return true;
     }
