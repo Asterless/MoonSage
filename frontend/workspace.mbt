@@ -1017,6 +1017,7 @@ fn workspace_dirty_guard(workspace : WorkspaceModel, emit : Emit[Msg]) -> Html {
 fn workspace_view(
   workspace : WorkspaceModel,
   modal : Bool,
+  pending_new_session : Bool,
   emit : Emit[Msg],
 ) -> Html {
   let handoff_target = workspace_handoff_target(workspace)
@@ -1037,6 +1038,17 @@ fn workspace_view(
     panel_attrs
   }
   aside(class="workspace-panel", attrs=panel_attrs, [
+    if pending_new_session {
+      div(class="workspace-pending-banner", [
+        div([
+          strong_text("先选择工作区"),
+          span("选择或创建后，将自动开始新对话。"),
+        ]),
+        button(type_="button", on_click=emit(ToggleWorkspace), "取消"),
+      ])
+    } else {
+      div(class="workspace-pending-banner hidden", "")
+    },
     header(class="workspace-header", [
       div(class="workspace-heading", [
         h1("工作区"),

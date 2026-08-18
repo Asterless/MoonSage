@@ -93,6 +93,7 @@ struct Model {
   workspace : WorkspaceModel
   batch : BatchModel
   next_id : Int
+  pending_new_session : Bool
 } derive(Eq)
 
 ///|
@@ -256,6 +257,7 @@ fn initial_model() -> Model {
     },
     batch: initial_batch(),
     next_id,
+    pending_new_session: false,
   }
 }
 
@@ -805,45 +807,76 @@ fn update_conversation(
       }
       (next, command)
     }
-    NewSession => {
-      let sessions = Array::copy(model.sessions)
-      let session_id = "session-\{model.next_id}"
-      sessions.push({
-        id: session_id,
-        title: "新会话",
-        detail: "刚刚",
-        messages: [
-          {
-            role: "assistant",
-            text: "新的会话已准备好。你想从哪里开始？",
-          },
-        ],
-      })
-      let next = {
-        ..model,
-        draft: "",
-        sessions,
-        active_session: sessions.length() - 1,
-        command_open: false,
-        sidebar_open: !model.compact,
-        next_id: model.next_id + 1,
-        workspace: { ..model.workspace, session_id, },
+    NewSession =>
+      if model.pending_new_session {
+        (model, @rabbita.none)
+      } else {
+        // Workspace-first flow: a new conversation starts by choosing or
+        // creating a workspace, then the session is created once the user
+        // picks one (WorkspacePicked / WorkspaceSelect).
+        let next = {
+          ..model,
+          pending_new_session: true,
+          draft: "",
+          command_open: false,
+        }
+        if model.workspace.open {
+          (next, @rabbita.none)
+        } else {
+          update(next, ToggleWorkspace, emit)
+        }
       }
-      (
-        next,
-        @cmd.batch([
-          persist_model(next),
-          persist_workspace_binding(next.workspace.id, session_id),
-          after_render_scroll(),
-          if model.compact {
-            after_render_focus(".composer-input")
-          } else {
-            @rabbita.none
-          },
-        ]),
-      )
-    }
     _ => (model, @rabbita.none)
+  }
+}
+
+///|
+fn create_new_session(model : Model) -> (Model, Cmd) {
+  let sessions = Array::copy(model.sessions)
+  let session_id = "session-\{model.next_id}"
+  sessions.push({
+    id: session_id,
+    title: "新会话",
+    detail: "刚刚",
+    messages: [
+      {
+        role: "assistant",
+        text: "新的会话已准备好。你想从哪里开始？",
+      },
+    ],
+  })
+  let next = {
+    ..model,
+    draft: "",
+    sessions,
+    active_session: sessions.length() - 1,
+    command_open: false,
+    sidebar_open: !model.compact,
+    next_id: model.next_id + 1,
+    workspace: { ..model.workspace, session_id, },
+    pending_new_session: false,
+  }
+  (
+    next,
+    @cmd.batch([
+      persist_model(next),
+      persist_workspace_binding(next.workspace.id, session_id),
+      after_render_scroll(),
+      if model.compact {
+        after_render_focus(".composer-input")
+      } else {
+        @rabbita.none
+      },
+    ]),
+  )
+}
+
+///|
+fn workspace_choose_completed(msg : Msg) -> Bool {
+  match msg {
+    WorkspacePicked(_) => true
+    WorkspaceSelect(_) => true
+    _ => false
   }
 }
 
@@ -853,7 +886,25 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
     Some((batch, command)) => ({ ..model, batch, }, command)
     None =>
       match workspace_update(model.workspace, msg, emit) {
-        Some((workspace, command)) => ({ ..model, workspace, }, command)
+        Some((workspace, command)) => {
+          let next = { ..model, workspace, }
+          if model.pending_new_session {
+            if workspace_choose_completed(msg) && workspace.id != "" {
+              // The user just picked a workspace; create the conversation
+              // bound to it and keep the workspace loading command.
+              let (created, session_command) = create_new_session(next)
+              (created, @cmd.batch([session_command, command]))
+            } else if msg is ToggleWorkspace && !workspace.open {
+              // The panel was closed without choosing a workspace; cancel the
+              // pending new conversation.
+              ({ ..next, pending_new_session: false }, command)
+            } else {
+              (next, command)
+            }
+          } else {
+            (next, command)
+          }
+        }
         None => update_conversation(model, msg, emit)
       }
   }
@@ -1456,7 +1507,12 @@ fn app() -> Val[Html] {
           ],
         ),
         if model.workspace.open {
-          workspace_view(model.workspace, workspace_modal, emit)
+          workspace_view(
+            model.workspace,
+            workspace_modal,
+            model.pending_new_session,
+            emit,
+          )
         } else {
           div(class="workspace-placeholder", "")
         },
