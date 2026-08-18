@@ -18,3 +18,4 @@ pub fn normalize_finish_reason(String?) -> @model.FinishReason
 // Type aliases
 
 // Traits
+
