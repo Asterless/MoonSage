@@ -1,12 +1,17 @@
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, existsSync, stat } from "node:fs";
-import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  WorktreeError,
+  WorktreeManager,
+  migrateRegistry,
+} from "./worktree_manager.mjs";
 
 const root = normalize(join(import.meta.dirname, ".."));
 const releaseAgentBin = join(
@@ -55,6 +60,7 @@ const dataRoot = normalize(
         : join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "moonsage")),
 );
 let activeDataRoot = dataRoot;
+let activeWorktreeManager = null;
 function workspaceRegistryPath() { return join(activeDataRoot, "workspaces.json"); }
 function taskStorePath() { return join(activeDataRoot, "tasks"); }
 function batchStorePath(dataDirectory = activeDataRoot) { return join(dataDirectory, "batches"); }
@@ -62,6 +68,7 @@ const workspaceIdPattern = /^[a-z0-9-]{8,80}$/;
 const taskIdPattern = /^[a-z0-9-]{8,80}$/;
 const batchIdPattern = /^[a-z0-9-]{8,100}$/;
 const runningWriteTasks = new Map();
+const runningTaskControllers = new Map();
 
 function isIgnoredWorkspaceDirectory(name) {
   const normalized = name.toLowerCase();
@@ -74,48 +81,24 @@ function isIgnoredWorkspacePath(requestedPath) {
   return segments.some(isIgnoredWorkspaceDirectory) || ignoredWorkspaceFiles.has(filename);
 }
 
+function getWorktreeManager() {
+  if (!activeWorktreeManager || activeWorktreeManager.dataDirectory !== normalize(resolve(activeDataRoot))) {
+    activeWorktreeManager = new WorktreeManager({ dataDirectory: activeDataRoot });
+  }
+  return activeWorktreeManager;
+}
+
 function emptyWorkspaceRegistry() {
-  return { version: 1, workspaces: [] };
+  return { version: 2, workspaces: [] };
 }
 
 async function readWorkspaceRegistry() {
-  try {
-    const source = await readFile(workspaceRegistryPath(), "utf8");
-    const document = JSON.parse(source);
-    if (!document || document.version !== 1 || !Array.isArray(document.workspaces)) {
-      return emptyWorkspaceRegistry();
-    }
-    const workspaces = document.workspaces.filter((workspace) => (
-      workspace && workspace.id && workspace.root && workspace.name
-    ));
-    workspaces.sort((a, b) => String(b.last_used_at || "").localeCompare(String(a.last_used_at || "")));
-    return {
-      version: 1,
-      workspaces,
-    };
-  } catch (error) {
-    if (error.code === "ENOENT") return emptyWorkspaceRegistry();
-    throw error;
-  }
+  return getWorktreeManager().readRegistry();
 }
 
 let workspaceRegistryWrite = Promise.resolve();
 async function writeWorkspaceRegistry(document) {
-  const next = workspaceRegistryWrite.catch(() => {}).then(async () => {
-    await mkdir(activeDataRoot, { recursive: true });
-    const target = workspaceRegistryPath();
-    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(document, null, 2) + "\n", "utf8");
-    try {
-      await rename(temporary, target);
-    } finally {
-      try {
-        await rm(temporary, { force: true });
-      } catch { /* the rename already removed it */ }
-    }
-  });
-  workspaceRegistryWrite = next.catch(() => {});
-  return next;
+  return getWorktreeManager().writeRegistry(document);
 }
 
 function publicWorkspace(workspace) {
@@ -123,6 +106,24 @@ function publicWorkspace(workspace) {
     id: workspace.id,
     name: workspace.name,
     path: workspace.root,
+    root: workspace.root,
+    kind: workspace.kind === "worktree" ? "worktree" : "local",
+    managed: workspace.kind === "worktree",
+    lifecycle: workspace.lifecycle || (workspace.kind === "worktree" ? "temporary" : "local"),
+    cleanup: workspace.cleanup || (workspace.kind === "worktree" ? "prune" : "never"),
+    repo_root: workspace.repo_root || workspace.repository_root || "",
+    base_ref: workspace.base_ref || "",
+    head: workspace.head || "",
+    branch: workspace.branch || "",
+    detached: workspace.detached === true,
+    pinned: workspace.pinned === true,
+    status: workspace.status || "ready",
+    owner_task_id: workspace.owner_task_id || "",
+    owner_session_id: workspace.owner_session_id || "",
+    eligible_for_cleanup: workspace.eligible_for_cleanup === true,
+    last_snapshot_id: workspace.last_snapshot_id || "",
+    source_id: workspace.source_id || "",
+    last_error: workspace.last_error || "",
     created_at: workspace.created_at,
     last_used_at: workspace.last_used_at,
   };
@@ -132,11 +133,12 @@ async function resolveRegisteredWorkspace(id, registry) {
   if (typeof id !== "string" || !workspaceIdPattern.test(id)) {
     throw new Error("Invalid workspace id.");
   }
-  let record = registry ? await registry.get(id) : null;
-  if (!registry) {
+  let record;
+  if (registry) {
+    record = await registry.get(id);
+  } else {
     const stored = await readWorkspaceRegistry();
-    const workspace = stored.workspaces.find((entry) => entry.id === id);
-    if (workspace) record = { ...publicWorkspace(workspace) };
+    record = stored.workspaces.find((entry) => entry.id === id);
   }
   if (!record) {
     const error = new Error("Workspace is not registered.");
@@ -144,50 +146,23 @@ async function resolveRegisteredWorkspace(id, registry) {
     throw error;
   }
   const canonical = await verifiedWorkspaceRoot(record.path || record.root);
-  return { ...record, root: canonical };
+  if (record.root !== canonical) {
+    record.root = canonical;
+    record.path = canonical;
+  }
+  record.last_used_at = new Date().toISOString();
+  return { ...record, root: canonical, path: canonical };
 }
 
 async function registerWorkspace(requestedPath) {
-  if (typeof requestedPath !== "string" || !requestedPath.trim()) {
-    throw new Error("Workspace path is required.");
-  }
-  const canonical = await realpath(resolve(requestedPath));
-  const entry = await lstat(canonical);
-  if (!entry.isDirectory()) throw new Error("Workspace path must be a directory.");
-  if (isIgnoredWorkspacePath(basename(canonical))) {
-    throw new Error("Generated and hidden directories cannot be workspaces.");
-  }
-  const registry = await readWorkspaceRegistry();
-  const existing = registry.workspaces.find((workspace) => workspace.root === canonical);
-  if (existing) {
-    existing.last_used_at = new Date().toISOString();
-    await writeWorkspaceRegistry(registry);
-    return existing;
-  }
-  const now = new Date().toISOString();
-  const workspace = {
-    id: randomUUID(),
-    name: basename(canonical) || canonical,
-    root: canonical,
-    created_at: now,
-    last_used_at: now,
-  };
-  registry.workspaces.push(workspace);
-  await writeWorkspaceRegistry(registry);
-  return workspace;
+  return getWorktreeManager().registerWorkspace({ path: requestedPath });
 }
 
 async function removeRegisteredWorkspace(id) {
-  const registry = await readWorkspaceRegistry();
-  const index = registry.workspaces.findIndex((workspace) => workspace.id === id);
-  if (index < 0) {
-    const error = new Error("Workspace is not registered.");
-    error.status = 404;
-    throw error;
-  }
-  const [removed] = registry.workspaces.splice(index, 1);
-  await writeWorkspaceRegistry(registry);
-  return removed;
+  const manager = getWorktreeManager();
+  const { record } = await manager.resolveRecord(id);
+  if (record.kind === "worktree") return manager.removeWorktree(record);
+  return manager.unregister(record);
 }
 
 async function pickWorkspaceDirectory() {
@@ -215,6 +190,96 @@ async function pickWorkspaceDirectory() {
     encoding: "utf8",
   });
   return result.stdout.trim();
+}
+
+async function workspaceUntrackedFiles(workspaceRoot) {
+  const output = await runGit(workspaceRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  return output.split("\0").filter(Boolean).filter((path) => !isIgnoredWorkspacePath(path));
+}
+
+async function saveWorkspaceSnapshot(workspaceRoot, workspaceId) {
+  const snapshotRoot = join(activeDataRoot, "snapshots", `${workspaceId}-${Date.now()}-${randomUUID()}`);
+  await mkdir(snapshotRoot, { recursive: true });
+  const patch = await runGit(workspaceRoot, ["diff", "--binary", "HEAD"], [0, 128]);
+  await writeFile(join(snapshotRoot, "changes.patch"), patch, "utf8");
+  const files = await workspaceUntrackedFiles(workspaceRoot);
+  await writeFile(join(snapshotRoot, "untracked.json"), JSON.stringify(files, null, 2) + "\n", "utf8");
+  for (const relativePath of files) {
+    const source = await verifiedWorkspacePath(workspaceRoot, relativePath, {
+      kind: "file",
+      maxBytes: maxWorkspaceFileBytes,
+    });
+    const target = join(snapshotRoot, "files", relativePath);
+    await mkdir(join(target, ".."), { recursive: true });
+    await copyFile(source.path, target);
+  }
+  return snapshotRoot;
+}
+
+async function transferWorkspaceChanges(sourceRoot, targetRoot, sourceId) {
+  const targetStatus = await workspaceStatus(targetRoot);
+  if (targetStatus.changes.length > 0) {
+    const error = new Error("目标工作区存在未提交改动，无法安全移交。");
+    error.status = 409;
+    throw error;
+  }
+  const sourceStatus = await workspaceStatus(sourceRoot);
+  if (sourceStatus.changes.length === 0) return { snapshot: "", applied: false };
+  const snapshot = await saveWorkspaceSnapshot(sourceRoot, sourceId);
+  const patch = await readFile(join(snapshot, "changes.patch"), "utf8");
+  const patchPath = join(snapshot, "changes.patch");
+  if (patch.trim()) {
+    try {
+      await execFileAsync("git", ["apply", "--3way", patchPath], {
+        cwd: targetRoot,
+        encoding: "utf8",
+        timeout: 120_000,
+        windowsHide: true,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+    } catch (error) {
+      const conflict = new Error(String(error.stderr || error.message || "无法应用工作区改动。").trim());
+      conflict.status = 409;
+      conflict.snapshot = snapshot;
+      throw conflict;
+    }
+  }
+  const files = JSON.parse(await readFile(join(snapshot, "untracked.json"), "utf8"));
+  for (const relativePath of files) {
+    const source = join(snapshot, "files", relativePath);
+    const target = resolve(targetRoot, relativePath);
+    const safe = await verifiedWorkspacePath(targetRoot, relativePath, {
+      kind: "file",
+      maxBytes: maxWorkspaceFileBytes,
+    }).catch(async (error) => {
+      if (error?.code !== "ENOENT") throw error;
+      const normalized = workspaceRelativePath(relativePath);
+      if (!normalized) throw error;
+      await verifyWorkspaceParents(targetRoot, normalized);
+      return { path: target };
+    });
+    await mkdir(resolve(targetRoot, relativePath, ".."), { recursive: true });
+    await copyFile(source, safe.path);
+  }
+  return { snapshot, applied: true };
+}
+
+async function enrichWorkspace(record) {
+  const result = { ...record };
+  try {
+    const status = await workspaceStatus(record.root || record.path);
+    result.head = status.head;
+    result.branch = status.detached ? "" : status.branch;
+    result.detached = status.detached;
+    if (status.conflicts.length) {
+      result.status = "conflicted";
+    } else if (!["busy", "retained", "orphaned"].includes(result.status)) {
+      result.status = "ready";
+    }
+  } catch {
+    result.status = "orphaned";
+  }
+  return result;
 }
 
 function taskPaths(id) {
@@ -712,17 +777,26 @@ async function runAgent(messages, emitEvent, signal, context = {}) {
       let pending = "";
       let outputBytes = 0;
       let settled = false;
+      let forcedResult = null;
+      let timeout = null;
+      let terminationTimeout = null;
       const finish = (result) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        if (timeout) clearTimeout(timeout);
+        if (terminationTimeout) clearTimeout(terminationTimeout);
         signal?.removeEventListener("abort", onAbort);
         resolveResult(result);
       };
-      const onAbort = () => {
+      const stopChild = (result) => {
+        if (settled || forcedResult) return;
+        forcedResult = result;
         killProcessTree(child);
-        finish({ error: "请求已停止。" });
+        // Wait for the process tree to exit before the caller snapshots and
+        // releases its worktree. Keep a bounded fallback for broken children.
+        terminationTimeout = setTimeout(() => finish(result), 5_000);
       };
+      const onAbort = () => stopChild({ cancelled: true });
       signal?.addEventListener("abort", onAbort, { once: true });
       const acceptLine = (line) => {
         if (!line.trim()) return;
@@ -737,16 +811,14 @@ async function runAgent(messages, emitEvent, signal, context = {}) {
         const outgoing = eventForAgentOutput(line);
         if (outgoing) emitEvent(outgoing);
       };
-      const timeout = setTimeout(() => {
-        killProcessTree(child);
-        finish({ error: `Agent 请求超过 ${Math.ceil(agentTimeoutMs / 1000)} 秒。` });
+      timeout = setTimeout(() => {
+        stopChild({ error: `Agent 请求超过 ${Math.ceil(agentTimeoutMs / 1000)} 秒。` });
       }, agentTimeoutMs);
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => {
         outputBytes += Buffer.byteLength(chunk);
         if (outputBytes > 8 * 1024 * 1024) {
-          killProcessTree(child);
-          finish({ error: "Agent 输出超过 8 MB。" });
+          stopChild({ error: "Agent 输出超过 8 MB。" });
           return;
         }
         pending += chunk;
@@ -758,12 +830,14 @@ async function runAgent(messages, emitEvent, signal, context = {}) {
       child.stderr.on("data", (chunk) => {
         stderr = (stderr + chunk).slice(-16_384);
       });
-      child.on("error", (error) => finish({ error: error.message }));
+      child.on("error", (error) => finish(forcedResult || { error: error.message }));
       child.on("close", () => {
         if (pending.trim()) acceptLine(pending);
-        if (answer.trim()) finish({ answer });
+        if (forcedResult) finish(forcedResult);
+        else if (answer.trim()) finish({ answer });
         else finish({ error: errorMessage || stderr.trim() || "Agent 没有返回最终内容。" });
       });
+      if (signal?.aborted) onAbort();
     });
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
@@ -998,7 +1072,10 @@ async function runGit(workspaceRoot, args, acceptedExitCodes = [0]) {
     });
     return result.stdout;
   } catch (error) {
-    if (acceptedExitCodes.includes(error.code)) return String(error.stdout || "");
+    const exitCode = Number(error.code);
+    if (acceptedExitCodes.includes(exitCode) || acceptedExitCodes.includes(error.code)) {
+      return String(error.stdout || "");
+    }
     const detail = String(error.stderr || error.message || "").trim();
     throw new Error(detail || "Git command failed.");
   }
@@ -1031,29 +1108,92 @@ export function parseGitStatus(output) {
     const record = fields[index];
     if (!record || record.length < 4) continue;
     const status = record.slice(0, 2);
-    const path = record.slice(3);
+    let path = record.slice(3);
     const indexStatus = status[0];
     const worktreeStatus = status[1];
+    const conflicted = indexStatus === "U" || worktreeStatus === "U" || status === "AA" || status === "DD";
+    const rename = indexStatus === "R" || worktreeStatus === "R";
+    const copy = indexStatus === "C" || worktreeStatus === "C";
+    let oldPath = "";
+    if (rename || copy) {
+      const separator = path.indexOf("\t");
+      if (separator >= 0) {
+        oldPath = path.slice(0, separator);
+        path = path.slice(separator + 1);
+      } else if (fields[index + 1]) {
+        // `git status --porcelain=v1 -z` emits the old path as the next
+        // NUL-delimited field for renames and copies.
+        oldPath = fields[index + 1];
+        index += 1;
+      }
+    }
     changes.push({
       path,
+      old_path: oldPath,
       index: indexStatus,
       worktree: worktreeStatus,
       staged: indexStatus !== " " && indexStatus !== "?",
       unstaged: worktreeStatus !== " " || status === "??",
       untracked: status === "??",
+      conflicted,
+      rename,
+      copy,
     });
-    if (indexStatus === "R" || indexStatus === "C") index += 1;
   }
   return changes;
 }
 
-async function workspaceStatus(workspaceRoot) {
-  const [branch, porcelain] = await Promise.all([
+export async function workspaceStatus(workspaceRoot) {
+  const [branch, porcelain, head, upstream] = await Promise.all([
     runGit(workspaceRoot, ["branch", "--show-current"]),
     runGit(workspaceRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    runGit(workspaceRoot, ["rev-parse", "--verify", "HEAD"], [0, 128]),
+    runGit(workspaceRoot, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], [0, 128]),
   ]);
   const changes = parseGitStatus(porcelain).filter((change) => !isIgnoredWorkspacePath(change.path));
-  return { branch: branch.trim() || "detached HEAD", changes };
+  let ahead = 0;
+  let behind = 0;
+  if (upstream.trim() && head.trim()) {
+    const counts = await runGit(
+      workspaceRoot,
+      ["rev-list", "--left-right", "--count", `HEAD...${upstream.trim()}`],
+      [0, 128],
+    );
+    const parts = counts.trim().split(/\s+/).map(Number);
+    if (parts.length >= 2 && parts.every(Number.isFinite)) {
+      ahead = parts[0];
+      behind = parts[1];
+    }
+  }
+  const renames = changes
+    .filter((change) => change.rename || change.copy)
+    .map((change) => ({ path: change.path, old_path: change.old_path || "", kind: change.rename ? "rename" : "copy" }));
+  const conflicts = changes.filter((change) => change.conflicted).map((change) => change.path);
+  const revision = createHash("sha256")
+    .update(`${head.trim()}\0${porcelain}`)
+    .digest("hex");
+  return {
+    branch: branch.trim() || "detached HEAD",
+    head: head.trim(),
+    detached: branch.trim() === "",
+    upstream: upstream.trim(),
+    ahead,
+    behind,
+    revision,
+    conflicts,
+    renames,
+    changes,
+  };
+}
+
+async function fileRevision(file) {
+  const data = await readFile(file.path);
+  const entry = await lstat(file.path);
+  return {
+    revision: createHash("sha256").update(data).digest("hex"),
+    size: data.byteLength,
+    mtime_ms: Number(entry.mtimeMs || 0),
+  };
 }
 
 function queryPath(requestUrl, name) {
@@ -1094,7 +1234,8 @@ async function serveWorkspace(request, response, pathname, workspaceRoot) {
         throw new Error("非 UTF-8 编码的文件不能在这里编辑。");
       }
       const line_endings = content.includes("\r\n") ? "crlf" : "lf";
-      sendJson(response, 200, { path: requestedPath, content, line_endings });
+      const revision = await fileRevision(file);
+      sendJson(response, 200, { path: requestedPath, content, line_endings, ...revision });
       return;
     }
     if (pathname === "/api/workspace/file" && request.method === "PUT") {
@@ -1107,8 +1248,22 @@ async function serveWorkspace(request, response, pathname, workspaceRoot) {
       }
       const style = document.line_endings === "crlf" ? "crlf" : "lf";
       const file = await verifiedWorkspaceFile(workspaceRoot, document.path);
+      if (document.expected_revision !== undefined) {
+        if (typeof document.expected_revision !== "string" || document.expected_revision.length > 128) {
+          const error = new Error("expected_revision 无效。");
+          error.status = 400;
+          throw error;
+        }
+        const current = await fileRevision(file);
+        if (current.revision !== document.expected_revision) {
+          const error = new Error("文件已被外部修改，请刷新后重试。");
+          error.status = 409;
+          error.current_revision = current.revision;
+          throw error;
+        }
+      }
       await writeFile(file.path, normalizeLineEndings(document.content, style), "utf8");
-      sendJson(response, 200, { path: document.path, saved: true });
+      sendJson(response, 200, { path: document.path, saved: true, ...(await fileRevision(file)) });
       return;
     }
     if (pathname === "/api/workspace/git/status" && request.method === "GET") {
@@ -1160,8 +1315,8 @@ async function serveWorkspace(request, response, pathname, workspaceRoot) {
     }
     sendJson(response, 405, { error: "Unsupported workspace operation." });
   } catch (error) {
-    const status = error?.status === 413 ? 413 : error?.code === "ENOENT" ? 404 : 400;
-    sendJson(response, status, { error: error.message });
+    const status = error?.status === 413 ? 413 : error?.status === 409 ? 409 : error?.code === "ENOENT" ? 404 : 400;
+    sendJson(response, status, { error: error.message, ...(error?.current_revision ? { current_revision: error.current_revision } : {}) });
   }
 }
 
@@ -1253,7 +1408,11 @@ async function serveWorkspaceRegistry(request, response, pathname) {
   try {
     if (pathname === "/api/workspaces" && request.method === "GET") {
       const registry = await readWorkspaceRegistry();
-      sendJson(response, 200, { workspaces: registry.workspaces.map(publicWorkspace) });
+      const workspaces = await Promise.all(registry.workspaces.map(async (workspace) => {
+        const enriched = workspace.kind === "worktree" ? await enrichWorkspace(workspace) : workspace;
+        return publicWorkspace(enriched);
+      }));
+      sendJson(response, 200, { workspaces });
       return true;
     }
     if (pathname === "/api/workspaces" && request.method === "POST") {
@@ -1262,7 +1421,10 @@ async function serveWorkspaceRegistry(request, response, pathname) {
         return true;
       }
       const document = await readJsonBody(request);
-      const workspace = await registerWorkspace(document?.path);
+      const workspace = await getWorktreeManager().registerWorkspace({
+        path: document?.path,
+        name: document?.name,
+      });
       sendJson(response, 201, { workspace: publicWorkspace(workspace) });
       return true;
     }
@@ -1276,11 +1438,144 @@ async function serveWorkspaceRegistry(request, response, pathname) {
       sendJson(response, 201, { workspace: publicWorkspace(workspace) });
       return true;
     }
+    const worktreeCreate = pathname.match(/^\/api\/workspaces\/([^/]+)\/worktree$/);
+    if (worktreeCreate && request.method === "POST") {
+      if (!requireJsonContentType(request)) {
+        sendJson(response, 415, { error: "写操作需要 application/json 请求。" });
+        return true;
+      }
+      const sourceId = decodeURIComponent(worktreeCreate[1]);
+      const document = await readJsonBody(request);
+      const manager = getWorktreeManager();
+      const source = await resolveRegisteredWorkspace(sourceId);
+      const branch = typeof document?.branch === "string" ? document.branch.trim() : "";
+      const record = await manager.createWorktree({
+        workspaceId: sourceId,
+        baseRef: typeof document?.base_ref === "string" && document.base_ref.trim()
+          ? document.base_ref.trim()
+          : "HEAD",
+        branch,
+        detached: !branch,
+        name: typeof document?.name === "string" ? document.name : undefined,
+        lifecycle: document?.lifecycle === "permanent" ? "permanent" : "temporary",
+        ownerTaskId: typeof document?.task_id === "string" ? document.task_id : "",
+        ownerSessionId: typeof document?.session_id === "string" ? document.session_id : "",
+        copyIgnored: document?.copy_ignored !== false,
+        includeMaxBytes: Number.isSafeInteger(document?.include_max_bytes)
+          ? document.include_max_bytes
+          : undefined,
+        includeMaxTotalBytes: Number.isSafeInteger(document?.include_max_total_bytes)
+          ? document.include_max_total_bytes
+          : undefined,
+        includeMaxFiles: Number.isSafeInteger(document?.include_max_files)
+          ? document.include_max_files
+          : undefined,
+      });
+      try {
+        if (document?.include_dirty === true) {
+          const snapshot = await manager.createSnapshot(source, { reason: "worktree_create" });
+          const moved = await manager.restoreSnapshot(snapshot, record);
+          record.last_snapshot_id = snapshot.id;
+          record.snapshot = snapshot.path;
+          record.applied = moved.applied;
+          await manager.updateRecord(record.id, {
+            last_snapshot_id: snapshot.id,
+            status: "ready",
+          });
+        }
+      } catch (error) {
+        await manager.removeWorktree(record, { force: true }).catch(() => {});
+        throw error;
+      }
+      sendJson(response, 201, { workspace: publicWorkspace(await enrichWorkspace(record)) });
+      return true;
+    }
+    const prune = pathname === "/api/workspaces/prune";
+    if (prune && request.method === "POST") {
+      if (!requireJsonContentType(request)) {
+        sendJson(response, 415, { error: "写操作需要 application/json 请求。" });
+        return true;
+      }
+      const document = await readJsonBody(request);
+      const result = await getWorktreeManager().prune({
+        limit: Number.isInteger(document?.limit) ? document.limit : 15,
+        maxAgeMs: Number.isInteger(document?.max_age_ms) ? document.max_age_ms : 0,
+        force: document?.force === true,
+      });
+      sendJson(response, 200, result);
+      return true;
+    }
     const match = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+    if (match && request.method === "GET") {
+      const workspace = await resolveRegisteredWorkspace(decodeURIComponent(match[1]));
+      sendJson(response, 200, { workspace: publicWorkspace(await enrichWorkspace(workspace)) });
+      return true;
+    }
     if (match && request.method === "DELETE") {
       const id = decodeURIComponent(match[1]);
       const workspace = await removeRegisteredWorkspace(id);
       sendJson(response, 200, { removed: publicWorkspace(workspace) });
+      return true;
+    }
+    const action = pathname.match(/^\/api\/workspaces\/([^/]+)\/(handoff|branch|pin|restore)$/);
+    if (action && request.method === "POST") {
+      if (!requireJsonContentType(request)) {
+        sendJson(response, 415, { error: "写操作需要 application/json 请求。" });
+        return true;
+      }
+      const id = decodeURIComponent(action[1]);
+      const manager = getWorktreeManager();
+      const { record } = await manager.resolveRecord(id);
+      const document = await readJsonBody(request);
+      if (action[2] === "pin") {
+        const updated = await manager.pin(record, document?.pinned !== false);
+        sendJson(response, 200, { workspace: publicWorkspace(updated) });
+        return true;
+      }
+      if (action[2] === "branch") {
+        const updated = await manager.createBranch(record, document?.name || document?.branch || "");
+        sendJson(response, 200, { workspace: publicWorkspace(await enrichWorkspace(updated)) });
+        return true;
+      }
+      if (action[2] === "restore") {
+        const snapshotId = typeof document?.snapshot_id === "string" ? document.snapshot_id.trim() : "";
+        if (!snapshotId) throw Object.assign(new Error("snapshot_id is required."), { status: 400 });
+        const restored = await manager.restoreSnapshot(
+          join(activeDataRoot, "snapshots", snapshotId),
+          record,
+          {
+            expected_revision: typeof document?.expected_revision === "string" ? document.expected_revision : "",
+            expected_head: typeof document?.expected_head === "string" ? document.expected_head : "",
+          },
+        );
+        const updated = await manager.updateRecord(record, {
+          status: "ready",
+          last_snapshot_id: snapshotId,
+          eligible_for_cleanup: false,
+        });
+        sendJson(response, 200, { workspace: publicWorkspace(await enrichWorkspace(updated)), snapshot: restored });
+        return true;
+      }
+      const targetId = typeof document?.target_workspace_id === "string"
+        ? document.target_workspace_id
+        : typeof document?.target_id === "string" ? document.target_id : "";
+      if (!targetId) throw Object.assign(new Error("target_workspace_id is required."), { status: 400 });
+      const transfer = await manager.handoff(record, targetId, {
+        expected_revision: typeof document?.expected_revision === "string" ? document.expected_revision : "",
+        target_expected_revision: typeof document?.target_expected_revision === "string"
+          ? document.target_expected_revision
+          : "",
+        target_expected_head: typeof document?.target_expected_head === "string"
+          ? document.target_expected_head
+          : "",
+      });
+      const updatedTarget = transfer.target;
+      sendJson(response, 200, {
+        workspace: publicWorkspace(await enrichWorkspace(updatedTarget)),
+        snapshot: transfer.snapshot?.path || transfer.snapshot?.id || "",
+        snapshot_id: transfer.snapshot?.id || "",
+        applied: transfer.applied === true,
+      });
       return true;
     }
     const workspaceRoute = pathname.match(/^\/api\/workspaces\/([^/]+)(\/.*)$/);
@@ -1292,8 +1587,17 @@ async function serveWorkspaceRegistry(request, response, pathname) {
     }
     return false;
   } catch (error) {
-    const status = error?.status === 404 ? 404 : error?.code === "ENOENT" ? 404 : 400;
-    sendJson(response, status, { error: error.message });
+    const status = error?.status ||
+      (error?.code === "NOT_FOUND" || error?.code === "ENOENT" ? 404 :
+        [
+          "CONFLICT", "LEASED", "DIRTY", "PROTECTED", "GIT_ERROR", "BRANCH_IN_USE",
+          "HANDOFF_CONFLICT", "SNAPSHOT_LIMIT", "SNAPSHOT_UNSAFE", "INVALID_SNAPSHOT",
+        ].includes(error?.code) ? 409 : 400);
+    sendJson(response, status, {
+      error: error.message,
+      code: error.code || "WORKSPACE_ERROR",
+      ...(error.details && typeof error.details === "object" ? error.details : {}),
+    });
     return true;
   }
 }
@@ -1302,23 +1606,161 @@ function taskMessages(task) {
   return [{ role: "user", text: task.goal }];
 }
 
+async function acquireTaskWorkspace(task) {
+  const base = await resolveRegisteredWorkspace(task.workspace_id);
+  const manager = getWorktreeManager();
+  const wantsManaged = task.workspace_mode === "managed" && task.permission !== "read-only";
+  if (!wantsManaged) {
+    task.execution_workspace_id = base.id;
+    task.execution_workspace_path = base.root;
+    return { workspace: base, lease: null };
+  }
+  let execution = null;
+  let lease = null;
+  let created = false;
+  if (task.execution_workspace_id) {
+    try {
+      execution = await resolveRegisteredWorkspace(task.execution_workspace_id);
+      if (execution.kind !== "worktree") execution = null;
+    } catch {
+      execution = null;
+    }
+  }
+  if (!execution) {
+    try {
+      execution = await manager.createWorktree({
+        workspaceId: base.id,
+        baseRef: "HEAD",
+        detached: true,
+        lifecycle: "temporary",
+        ownerTaskId: task.id,
+        ownerSessionId: task.session_id || "",
+      });
+      created = true;
+    } catch (error) {
+      // Non-Git directories remain supported as Local checkouts, matching
+      // Codex's direct-directory behavior for projects without Git metadata.
+      if (error?.code !== "GIT_ERROR" || !/not a git repository|not a git work tree/i.test(error.message)) {
+        throw error;
+      }
+      task.workspace_mode = "local";
+      task.execution_workspace_id = base.id;
+      task.execution_workspace_path = base.root;
+      return { workspace: base, lease: null };
+    }
+    task.execution_workspace_id = execution.id;
+  }
+  try {
+    lease = await manager.acquireLease(execution, { owner: `task:${task.id}` });
+    await manager.updateRecord(execution, {
+      owner_task_id: task.id,
+      owner_session_id: task.session_id || "",
+      status: "busy",
+      eligible_for_cleanup: false,
+    });
+  } catch (error) {
+    if (lease) await manager.releaseLease(execution, lease.token).catch(() => {});
+    if (created) {
+      // A newly allocated checkout is an implementation detail until its
+      // lease and busy state are durable. Roll it back if setup cannot finish.
+      await manager.removeWorktree(execution, { allowDirty: false }).catch(() => {});
+      task.execution_workspace_id = "";
+    }
+    throw error;
+  }
+  task.execution_workspace_path = execution.root;
+  return { workspace: { ...execution, root: execution.root }, lease };
+}
+
+async function releaseTaskWorkspace(task, lease, outcome = "success") {
+  if (!lease || !task.execution_workspace_id) return;
+  const manager = getWorktreeManager();
+  const failed = outcome !== "success";
+  let ownsLease = false;
+  try {
+    // Renewing first proves that this task still owns the lease. Never use a
+    // force release here: an expired lease may already belong to another
+    // process, and the old task must not delete or rewrite that owner's state.
+    await manager.renewLease(task.execution_workspace_id, lease.token);
+    ownsLease = true;
+    let snapshotId = "";
+    if (failed) {
+      try {
+        const snapshot = await manager.createSnapshot(task.execution_workspace_id, {
+          reason: outcome === "cancelled" ? "task_cancelled" : "task_failed",
+        });
+        snapshotId = snapshot.id;
+        task.snapshot_id = snapshot.id;
+        task.snapshot_path = snapshot.path;
+      } catch {
+        // Preserve the worktree even if snapshot creation itself fails.
+      }
+    }
+    await manager.updateRecord(task.execution_workspace_id, {
+      status: failed ? "retained" : "ready",
+      // Failed/cancelled worktrees and their snapshots must be explicitly
+      // archived before they can ever be removed.
+      eligible_for_cleanup: !failed,
+      owner_task_id: task.id,
+      owner_session_id: task.session_id || "",
+      last_snapshot_id: snapshotId,
+    });
+    await writeTask(task);
+  } catch {
+    // The task result is already persisted; recovery will reconcile a stale
+    // lease and orphaned worktree on the next server start.
+  } finally {
+    if (ownsLease) {
+      await manager.releaseLease(task.execution_workspace_id, lease.token).catch(() => {});
+    }
+  }
+}
+
 async function runTask(task, emitEvent, signal, agentRunner) {
-  const workspace = await resolveRegisteredWorkspace(task.workspace_id);
+  let acquired;
+  try {
+    acquired = await acquireTaskWorkspace(task);
+  } catch (error) {
+    task.status = "failed";
+    task.error = error.message;
+    await writeTask(task).catch(() => {});
+    throw error;
+  }
+  const workspace = acquired.workspace;
+  const lease = acquired.lease;
+  try {
+    await writeTask(task);
+  } catch (error) {
+    await releaseTaskWorkspace(task, lease, "failed");
+    throw error;
+  }
   const isWriter = task.permission !== "read-only";
-  if (isWriter && runningWriteTasks.has(workspace.id)) {
+  if (isWriter && !lease && runningWriteTasks.has(workspace.id)) {
     const error = new Error("该工作区已有写任务正在运行。请等待它完成后再试。");
     error.status = 409;
     throw error;
   }
-  if (isWriter) runningWriteTasks.set(workspace.id, task.id);
+  if (isWriter && !lease) runningWriteTasks.set(workspace.id, task.id);
   let log = Promise.resolve();
   let streamedAnswer = false;
+  let heartbeat = null;
+  if (lease) {
+    heartbeat = setInterval(() => {
+      void getWorktreeManager().renewLease(task.execution_workspace_id, lease.token).catch(() => {});
+    }, 5 * 60 * 1000);
+  }
   const record = (event) => {
     if (event.type === "final_delta") streamedAnswer = true;
     log = log.then(() => appendTaskEvent(task, event));
     emitEvent(event);
   };
   try {
+    record({
+      type: "workspace_bound",
+      workspace_id: workspace.id,
+      workspace_mode: task.workspace_mode || "local",
+      execution_workspace_id: task.execution_workspace_id || workspace.id,
+    });
     record({ type: "started", permission: task.permission });
     const result = await agentRunner(
       taskMessages(task),
@@ -1328,6 +1770,8 @@ async function runTask(task, emitEvent, signal, agentRunner) {
         taskId: task.id,
         workspaceId: workspace.id,
         workspaceRoot: workspace.root,
+        workspaceMode: task.workspace_mode || "local",
+        sessionId: task.session_id || "",
         permission: task.permission,
       },
     );
@@ -1335,18 +1779,36 @@ async function runTask(task, emitEvent, signal, agentRunner) {
       record({ type: "final_started" });
       record({ type: "final_delta", text: result.answer });
     }
+    if (result?.cancelled || signal.aborted) {
+      task.cancel_requested = true;
+      task.cancel_requested_at = task.cancel_requested_at || new Date().toISOString();
+      record({ type: "cancelled", reason: "任务已取消" });
+      await releaseTaskWorkspace(task, lease, "cancelled");
+      return { cancelled: true };
+    }
     if (result?.error) {
       record({ type: "failed", message: result.error });
+      await releaseTaskWorkspace(task, lease, "failed");
       return result;
     }
     record({ type: "completed" });
+    await releaseTaskWorkspace(task, lease, "success");
     return result || {};
   } catch (error) {
-    record({ type: "failed", message: error.message });
+    if (signal.aborted) {
+      task.cancel_requested = true;
+      task.cancel_requested_at = task.cancel_requested_at || new Date().toISOString();
+      record({ type: "cancelled", reason: "任务已取消" });
+    } else {
+      record({ type: "failed", message: error.message });
+    }
+    await releaseTaskWorkspace(task, lease, signal.aborted ? "cancelled" : "failed");
+    if (signal.aborted) return { cancelled: true };
     throw error;
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     await log;
-    if (isWriter && runningWriteTasks.get(workspace.id) === task.id) {
+    if (isWriter && !lease && runningWriteTasks.get(workspace.id) === task.id) {
       runningWriteTasks.delete(workspace.id);
     }
   }
@@ -1365,6 +1827,7 @@ async function serveTaskRun(request, response, taskId, agentRunner) {
     }
     beginEventStream(response);
     const controller = new AbortController();
+    runningTaskControllers.set(task.id, controller);
     response.on("close", () => {
       if (!response.writableEnded) controller.abort();
     });
@@ -1373,10 +1836,12 @@ async function serveTaskRun(request, response, taskId, agentRunner) {
       if (event.type === "final_delta") streamedAnswer = true;
       sendEvent(response, event);
     }, controller.signal, agentRunner);
+    runningTaskControllers.delete(task.id);
     if (result?.answer && !streamedAnswer) sendEvent(response, { type: "final_delta", text: result.answer });
-    if (!result?.error) sendEvent(response, { type: "done" });
+    if (!result?.error && !result?.cancelled) sendEvent(response, { type: "done" });
     try { response.end(); } catch { /* client already gone */ }
   } catch (error) {
+    runningTaskControllers.delete(taskId);
     if (response.headersSent) {
       sendEvent(response, { type: "error", message: error.message });
       try { response.end(); } catch { /* client already gone */ }
@@ -1422,10 +1887,17 @@ async function serveTasks(request, response, pathname, agentRunner) {
       const permission = ["read-only", "controlled-write", "full-auto"].includes(document.permission)
         ? document.permission
         : "full-auto";
+      const workspaceMode = ["local", "managed"].includes(document.workspace_mode)
+        ? document.workspace_mode
+        : permission === "read-only" ? "local" : "managed";
       const now = new Date().toISOString();
       const task = {
         id: randomUUID(),
         workspace_id: workspace.id,
+        session_id: typeof document.session_id === "string" ? document.session_id.slice(0, 200) : "",
+        workspace_mode: workspaceMode,
+        execution_workspace_id: "",
+        execution_workspace_path: "",
         goal,
         permission,
         status: "queued",
@@ -1446,6 +1918,26 @@ async function serveTasks(request, response, pathname, agentRunner) {
     const run = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
     if (run) {
       await serveTaskRun(request, response, decodeURIComponent(run[1]), agentRunner);
+      return true;
+    }
+    const cancel = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
+    if (cancel && request.method === "POST") {
+      const id = decodeURIComponent(cancel[1]);
+      const task = await readTask(id);
+      const controller = runningTaskControllers.get(id);
+      if (!controller) {
+        if (["completed", "failed", "cancelled"].includes(task.status)) {
+          sendJson(response, 200, { task });
+        } else {
+          sendJson(response, 409, { error: "任务当前没有可取消的运行实例。" });
+        }
+        return true;
+      }
+      task.cancel_requested = true;
+      task.cancel_requested_at = new Date().toISOString();
+      await writeTask(task);
+      controller.abort();
+      sendJson(response, 202, { task });
       return true;
     }
     return false;
@@ -1666,6 +2158,42 @@ function canonicalBatchEvent(id, rawEvent) {
   };
 }
 
+// The batch worker orchestrates untrusted repository clones, so it receives a
+// small explicit environment instead of the entire server process. GitHub
+// credentials are deliberately omitted: publishing relies on the local `gh`
+// CLI configuration, and repository subprocesses never inherit this block.
+function workerEnvironment(dataDirectory) {
+  const names = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "XDG_CONFIG_HOME",
+    "GH_CONFIG_DIR",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "MOON_HOME",
+    "MOONBIT_HOME",
+    "MOONSAGE_API_KEY",
+    "MOONSAGE_BASE_URL",
+    "MOONSAGE_MODEL",
+    "MOONSAGE_PROVIDER",
+    "MOONSAGE_AGENT_BIN",
+    "MOONSAGE_AGENT_TIMEOUT_MS",
+  ];
+  const env = {};
+  for (const name of names) {
+    if (process.env[name] !== undefined) env[name] = process.env[name];
+  }
+  env.MOONSAGE_DATA_DIR = dataDirectory;
+  return env;
+}
+
 function defaultBatchWorkerCommand(batch, dataDirectory) {
   const configuredBin = process.env.MOONSAGE_AGENT_BIN;
   const builtBin = !configuredBin && existsSync(releaseAgentBin) ? releaseAgentBin : null;
@@ -1682,7 +2210,7 @@ function defaultBatchWorkerCommand(batch, dataDirectory) {
       windowsHide: true,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, MOONSAGE_DATA_DIR: dataDirectory },
+      env: workerEnvironment(dataDirectory),
     },
   };
 }
@@ -1893,6 +2421,15 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     if (batch.status === "cancelled") return batch;
     if (batch.status === "completed") throw batchError("Completed batches cannot be cancelled.", 409);
     await writeControl(id, "cancel");
+    // The control file is the durable source of truth, while the in-memory
+    // controller must also stop the active child promptly. Without aborting
+    // here a package could continue spending its full 20-minute budget before
+    // the worker observes the request at its next queue boundary.
+    const state = running.get(id);
+    if (state) {
+      state.controller.abort();
+      if (state.child) killProcessTree(state.child);
+    }
     return batch;
   };
 
@@ -2123,6 +2660,7 @@ export function serve({
   workspaceDataDirectory,
 } = {}) {
   if (workspaceDataDirectory) activeDataRoot = normalize(resolve(workspaceDataDirectory));
+  activeWorktreeManager = new WorktreeManager({ dataDirectory: activeDataRoot });
   const batchController = createBatchController({
     dataDirectory: activeDataRoot,
     workerRunner: batchWorker || batchRunner || workerRunner,
@@ -2184,6 +2722,9 @@ export function serve({
     if (normalize(resolve(workspaceRoot)) === root) {
       void registerWorkspace(workspaceRoot).catch(() => {});
     }
+    void activeWorktreeManager.recover().catch((error) => {
+      console.error(`MoonSage worktree recovery failed: ${error.message}`);
+    });
     void batchController.recover().catch((error) => {
       console.error(`MoonSage batch recovery failed: ${error.message}`);
     });

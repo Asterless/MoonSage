@@ -123,8 +123,17 @@ enum Msg {
   ToggleWorkspace
   WorkspacePick
   WorkspacePicked(String)
+  WorkspaceSelect(String)
+  WorkspaceCreateWorktree
+  WorkspacePin
+  WorkspaceDelete
+  WorkspaceHandoff(String)
+  WorkspaceDirtySave
+  WorkspaceDirtyDiscard
+  WorkspaceDirtyCancel
   WorkspaceTabSelected(String)
   WorkspaceRegistryReceived(String)
+  WorkspaceRegistryReload
   WorkspaceTreeReceived(String, String)
   WorkspaceFilterChanged(String)
   WorkspaceToggleGroup(String)
@@ -194,16 +203,35 @@ fn default_sessions() -> Array[Session] {
 }
 
 ///|
+fn resolved_active_session_index(
+  sessions : Array[Session],
+  stored_index : Int,
+  bound_session_id : String,
+) -> Int {
+  if bound_session_id != "" {
+    for index, session in sessions {
+      if session.id == bound_session_id {
+        return index
+      }
+    }
+  }
+  if stored_index >= 0 && stored_index < sessions.length() {
+    stored_index
+  } else {
+    0
+  }
+}
+
+///|
 fn initial_model() -> Model {
   let (sessions, active_session, next_id) = match load_persisted_state() {
     Some((sessions, active, next)) => (sessions, active, next)
     None => (default_sessions(), 0, 2)
   }
-  let active = if active_session >= 0 && active_session < sessions.length() {
-    active_session
-  } else {
-    0
-  }
+  let (stored_workspace_id, stored_session_id) = load_workspace_binding()
+  let active = resolved_active_session_index(
+    sessions, active_session, stored_session_id,
+  )
   let width = @dom.window().inner_width()
   let compact = is_compact_width(width)
   let workspace_overlay = is_workspace_overlay_width(width)
@@ -219,7 +247,11 @@ fn initial_model() -> Model {
     theme,
     compact,
     workspace_overlay,
-    workspace: initial_workspace(),
+    workspace: {
+      ..initial_workspace(),
+      id: stored_workspace_id,
+      session_id: sessions[active].id,
+    },
     batch: initial_batch(),
     next_id,
   }
@@ -475,6 +507,7 @@ fn update_conversation(
                   request.id,
                   payload,
                   next.workspace.id,
+                  next.workspace.mode,
                 ),
                 persist_model(ready),
               ]),
@@ -696,6 +729,7 @@ fn update_conversation(
                 fresh.id,
                 session_messages(next, session_id),
                 next.workspace.id,
+                next.workspace.mode,
               ),
               persist_model(next),
             ]),
@@ -705,27 +739,33 @@ fn update_conversation(
       }
     RunCommand(command) => update({ ..model, draft: command }, Submit, emit)
     SelectSession(index) => {
+      let selected_session_id = model.sessions[index].id
+      let next = {
+        ..model,
+        active_session: index,
+        workspace: { ..model.workspace, session_id: selected_session_id },
+        command_open: false,
+        sidebar_open: if model.compact {
+          false
+        } else {
+          model.sidebar_open
+        },
+      }
       let command = if model.compact {
         @cmd.batch([
+          persist_model(next),
           after_render_scroll(),
           after_render_focus(".composer-input"),
+          persist_workspace_binding(next.workspace.id, selected_session_id),
         ])
       } else {
-        after_render_scroll()
+        @cmd.batch([
+          persist_model(next),
+          after_render_scroll(),
+          persist_workspace_binding(next.workspace.id, selected_session_id),
+        ])
       }
-      (
-        {
-          ..model,
-          active_session: index,
-          command_open: false,
-          sidebar_open: if model.compact {
-            false
-          } else {
-            model.sidebar_open
-          },
-        },
-        command,
-      )
+      (next, command)
     }
     ToggleSidebar => {
       let sidebar_open = !model.sidebar_open
@@ -785,11 +825,13 @@ fn update_conversation(
         command_open: false,
         sidebar_open: !model.compact,
         next_id: model.next_id + 1,
+        workspace: { ..model.workspace, session_id, },
       }
       (
         next,
         @cmd.batch([
           persist_model(next),
+          persist_workspace_binding(next.workspace.id, session_id),
           after_render_scroll(),
           if model.compact {
             after_render_focus(".composer-input")

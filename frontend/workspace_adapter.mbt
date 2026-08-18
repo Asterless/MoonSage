@@ -73,6 +73,76 @@ fn load_workspace_registry(emit : Emit[Msg]) -> Cmd {
 }
 
 ///|
+fn select_workspace(emit : Emit[Msg], workspace_id : String) -> Cmd {
+  @cmd.batch([
+    load_workspace_tree(emit, workspace_id),
+    load_workspace_status(emit, workspace_id),
+  ])
+}
+
+///|
+fn create_workspace_worktree(
+  emit : Emit[Msg],
+  workspace_id : String,
+  session_id : String,
+) -> Cmd {
+  let body = Json::object({
+    "lifecycle": Json::string("temporary"),
+    "session_id": Json::string(session_id),
+  }).stringify()
+  workspace_request(
+    emit,
+    "POST",
+    "/api/workspaces/" + encode_workspace_path(workspace_id) + "/worktree",
+    body,
+    _ => WorkspaceRegistryReload,
+  )
+}
+
+///|
+fn pin_workspace(emit : Emit[Msg], workspace_id : String, pinned : Bool) -> Cmd {
+  let body = Json::object({ "pinned": Json::boolean(pinned) }).stringify()
+  workspace_request(
+    emit,
+    "POST",
+    "/api/workspaces/" + encode_workspace_path(workspace_id) + "/pin",
+    body,
+    _ => WorkspaceRegistryReload,
+  )
+}
+
+///|
+fn delete_workspace(emit : Emit[Msg], workspace_id : String) -> Cmd {
+  workspace_request(
+    emit,
+    "DELETE",
+    "/api/workspaces/" + encode_workspace_path(workspace_id),
+    "",
+    _ => WorkspaceRegistryReload,
+  )
+}
+
+///|
+fn handoff_workspace(
+  emit : Emit[Msg],
+  source_id : String,
+  target_id : String,
+  expected_revision : String,
+) -> Cmd {
+  let body = Json::object({
+    "target_workspace_id": Json::string(target_id),
+    "expected_revision": Json::string(expected_revision),
+  }).stringify()
+  workspace_request(
+    emit,
+    "POST",
+    "/api/workspaces/" + encode_workspace_path(source_id) + "/handoff",
+    body,
+    _ => WorkspaceRegistryReload,
+  )
+}
+
+///|
 fn pick_workspace(emit : Emit[Msg]) -> Cmd {
   workspace_request(emit, "POST", "/api/workspaces/pick", "", body => {
     WorkspacePicked(body)
@@ -112,12 +182,17 @@ fn save_workspace_file(
   path : String,
   content : String,
   line_endings : String,
+  expected_revision : String,
 ) -> Cmd {
-  let body = Json::object({
+  let fields : Map[String, Json] = {
     "path": Json::string(path),
     "content": Json::string(content),
     "line_endings": Json::string(line_endings),
-  }).stringify()
+  }
+  if expected_revision != "" {
+    fields["expected_revision"] = Json::string(expected_revision)
+  }
+  let body = Json::object(fields).stringify()
   workspace_request(
     emit,
     "PUT",

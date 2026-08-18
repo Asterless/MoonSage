@@ -3,6 +3,7 @@ fn agent_request_body(
   session_id : String,
   messages : Array[Message],
   workspace_id : String,
+  workspace_mode : String,
 ) -> Json {
   let fields : Map[String, Json] = {
     "session_id": Json::string(session_id),
@@ -17,9 +18,23 @@ fn agent_request_body(
   }
   if workspace_id != "" {
     fields["workspace_id"] = Json::string(workspace_id)
-    // Browser tasks cannot answer stdin prompts, so use the explicit
-    // non-interactive policy rather than silently declining every edit.
-    fields["permission"] = Json::string("full-auto")
+    fields["workspace_mode"] = Json::string(
+      if workspace_mode == "managed" {
+        "managed"
+      } else {
+        "local"
+      },
+    )
+    // The browser cannot answer stdin prompts. Controlled-write keeps the
+    // explicit non-interactive policy while avoiding a hard-coded full-auto
+    // permission for every workspace.
+    fields["permission"] = Json::string(
+      if workspace_mode == "managed" {
+        "full-auto"
+      } else {
+        "controlled-write"
+      },
+    )
   }
   Json::object(fields)
 }
@@ -179,6 +194,8 @@ extern "js" fn stream_agent_request(
   #|             workspace_id: parsed.workspace_id,
   #|             goal,
   #|             permission: parsed.permission || "full-auto",
+  #|             workspace_mode: parsed.workspace_mode || "managed",
+  #|             session_id: parsed.session_id || "",
   #|           }),
   #|           signal: controller.signal,
   #|         });
@@ -263,8 +280,11 @@ fn request_agent(
   request_id : Int,
   messages : Array[Message],
   workspace_id : String,
+  workspace_mode : String,
 ) -> Cmd {
-  let body = agent_request_body(session_id, messages, workspace_id).stringify()
+  let body = agent_request_body(
+    session_id, messages, workspace_id, workspace_mode,
+  ).stringify()
   @cmd.custom_cmd(scheduler => {
     stream_agent_request(
       body,
@@ -277,7 +297,7 @@ fn request_agent(
                 if permission == "" {
                   "工作区任务已开始"
                 } else {
-                  "工作区任务已开始 · {permission}"
+                  "工作区任务已开始 · \{permission}"
                 },
               ),
             )
@@ -299,7 +319,7 @@ fn request_agent(
                 if reason == "" {
                   "任务已暂停"
                 } else {
-                  "任务已暂停：{reason}"
+                  "任务已暂停：\{reason}"
                 },
               ),
             )

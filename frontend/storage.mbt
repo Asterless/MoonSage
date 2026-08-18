@@ -2,6 +2,12 @@
 let sessions_storage_key : String = "moonsage.web.sessions.v1"
 
 ///|
+// Workspace and chat bindings are kept separately so existing v1 session
+// storage remains readable and old browsers can migrate without rewriting
+// the transcript payload.
+let workspace_binding_storage_key : String = "moonsage.web.workspace-binding.v1"
+
+///|
 let theme_storage_key : String = "moonsage.web.theme.v1"
 
 ///|
@@ -180,4 +186,49 @@ fn persist_model(model : Model) -> Cmd {
 ///|
 fn load_persisted_state() -> (Array[Session], Int, Int)? {
   decode_storage(storage_load(sessions_storage_key))
+}
+
+///|
+fn encode_workspace_binding(
+  workspace_id : String,
+  session_id : String,
+) -> String {
+  Json::object({
+    "workspace_id": Json::string(workspace_id),
+    "session_id": Json::string(session_id),
+  }).stringify()
+}
+
+///|
+fn decode_workspace_binding(source : String) -> (String, String) {
+  match json_fields(source) {
+    Some(fields) => {
+      let workspace_id = json_string_field(fields, "workspace_id")
+      let session_id = json_string_field(fields, "session_id")
+      (
+        if workspace_id == "" {
+          json_string_field(fields, "active_workspace_id")
+        } else {
+          workspace_id
+        },
+        if session_id == "" {
+          json_string_field(fields, "active_session_id")
+        } else {
+          session_id
+        },
+      )
+    }
+    None => ("", "")
+  }
+}
+
+///|
+fn load_workspace_binding() -> (String, String) {
+  decode_workspace_binding(storage_load(workspace_binding_storage_key))
+}
+
+///|
+fn persist_workspace_binding(workspace_id : String, session_id : String) -> Cmd {
+  let value = encode_workspace_binding(workspace_id, session_id)
+  @cmd.custom_cmd(_ => storage_save(workspace_binding_storage_key, value))
 }

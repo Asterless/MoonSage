@@ -48,6 +48,23 @@ test "theme values normalize and toggle" {
 }
 
 ///|
+test "workspace binding restores a valid session id before stored index" {
+  let sessions : Array[Session] = [
+    { id: "first", title: "First", detail: "", messages: [] },
+    { id: "bound", title: "Bound", detail: "", messages: [] },
+  ]
+  assert_eq(resolved_active_session_index(sessions, 0, "bound"), 1)
+  assert_eq(resolved_active_session_index(sessions, 1, "missing"), 1)
+  assert_eq(resolved_active_session_index(sessions, 99, "missing"), 0)
+  assert_eq(
+    decode_workspace_binding(
+      "{\"active_workspace_id\":\"legacy-workspace\",\"active_session_id\":\"legacy-session\"}",
+    ),
+    ("legacy-workspace", "legacy-session"),
+  )
+}
+
+///|
 test "viewport changes only flip layout at the compact boundary" {
   let desktop = test_model(
     [{ id: "s", title: "S", detail: "", messages: [] }],
@@ -123,6 +140,8 @@ test "semantic views expose navigation and workspace states" {
   assert_true(workspace_html.contains("aria-current=\"location\""))
   assert_true(workspace_html.contains("根目录"))
   assert_true(workspace_html.contains("src"))
+  assert_true(workspace_html.contains("Local · ready"))
+  assert_false(workspace_html.contains("{workspace.status}"))
   let modal_html = @rabbita.render_to_string(fn() {
     Val::constant(workspace_view(workspace, true, emit))
   })
@@ -284,6 +303,23 @@ test "Agent responses prefer canonical protocol events" {
     StreamError("写入被拒绝"),
   )
   assert_true(decode_agent_event("not json") is Ignored)
+}
+
+///|
+test "agent workspace requests carry session and execution mode" {
+  guard agent_request_body(
+      "session-7",
+      [{ role: "user", text: "inspect" }],
+      "workspace-12345678",
+      "local",
+    )
+    is Object(fields) else {
+    fail("expected request object")
+  }
+  assert_true(fields.get("session_id") is Some(String("session-7")))
+  assert_true(fields.get("workspace_id") is Some(String("workspace-12345678")))
+  assert_true(fields.get("workspace_mode") is Some(String("local")))
+  assert_true(fields.get("permission") is Some(String("controlled-write")))
 }
 
 ///|
@@ -474,6 +510,16 @@ test "workspace decodes files and git status" {
     ),
     Some(("workspace-1", "demo")),
   )
+  let entries = decode_workspace_entries(
+    "{\"workspaces\":[{\"id\":\"workspace-1\",\"name\":\"demo\",\"kind\":\"worktree\",\"managed\":true,\"lifecycle\":\"temporary\",\"status\":\"busy\",\"revision\":\"registry-rev\",\"source_id\":\"local-12345678\"}]}",
+  )
+  assert_eq(entries.length(), 1)
+  assert_eq(entries[0].kind, "worktree")
+  assert_eq(entries[0].mode, "managed")
+  assert_eq(entries[0].lifecycle, "temporary")
+  assert_eq(entries[0].status, "busy")
+  assert_eq(entries[0].revision, "registry-rev")
+  assert_eq(entries[0].source_id, "local-12345678")
   assert_eq(
     decode_workspace_pick(
       "{\"workspace\":{\"id\":\"workspace-2\",\"name\":\"local\"}}",
@@ -491,16 +537,63 @@ test "workspace decodes files and git status" {
     decode_workspace_file("{\"content\":\"a\",\"line_endings\":\"crlf\"}"),
     Some(("a", "crlf")),
   )
-  let workspace = initial_workspace()
+  let workspace = {
+    ..initial_workspace(),
+    revision: "old-workspace-revision",
+    file_revision: "file-revision",
+  }
   guard apply_workspace_status(
-      workspace, "{\"branch\":\"codex/workspace\",\"changes\":[{\"path\":\"main.mbt\",\"index\":\"M\",\"worktree\":\" \",\"staged\":true,\"unstaged\":false,\"untracked\":false}]}",
+      workspace, "{\"branch\":\"codex/workspace\",\"revision\":\"workspace-revision\",\"changes\":[{\"path\":\"main.mbt\",\"index\":\"M\",\"worktree\":\" \",\"staged\":true,\"unstaged\":false,\"untracked\":false}]}",
     )
     is Some(updated) else {
     fail("expected workspace status")
   }
   assert_eq(updated.branch, "codex/workspace")
+  assert_eq(updated.revision, "workspace-revision")
+  assert_eq(updated.file_revision, "file-revision")
   assert_eq(updated.changes.length(), 1)
   assert_true(updated.changes[0].staged)
+}
+
+///|
+test "workspace accepts an empty registry and keeps file revisions separate" {
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let existing = {
+    ..initial_workspace(),
+    id: "workspace-old",
+    name: "Old",
+    revision: "workspace-revision",
+    selected_path: "main.mbt",
+  }
+  guard workspace_update(
+      existing,
+      WorkspaceRegistryReceived("{\"workspaces\":[]}"),
+      emit,
+    )
+    is Some((cleared, _)) else {
+    fail("expected registry update")
+  }
+  assert_eq(cleared.id, "")
+  assert_true(cleared.entries.is_empty())
+  assert_eq(cleared.error, "")
+  let selected = {
+    ..existing,
+    id: "workspace-current",
+    content: "old",
+    saved_content: "old",
+  }
+  guard workspace_update(
+      selected,
+      WorkspaceFileReceived(
+        "workspace-current", "main.mbt", "{\"content\":\"new\",\"line_endings\":\"lf\",\"revision\":\"file-revision\"}",
+      ),
+      emit,
+    )
+    is Some((loaded, _)) else {
+    fail("expected file update")
+  }
+  assert_eq(loaded.revision, "workspace-revision")
+  assert_eq(loaded.file_revision, "file-revision")
 }
 
 ///|

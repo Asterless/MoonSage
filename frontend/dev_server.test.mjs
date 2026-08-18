@@ -10,6 +10,7 @@ import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 
 import { applyBatchEvent, buildAgentPrompt, eventForAgentOutput, eventForBatchOutput, isTrustedRequest, killProcessTree, metaForConversation, normalizeBatchConfig, normalizeLineEndings, parseAgentEvents, parseGitStatus, requireJsonContentType, resolveRequestPath, resolveWorkspacePath, runBatchWorker, serve, verifiedWorkspacePath, workspaceRelativePath } from "./dev_server.mjs";
+import { WorktreeManager, migrateRegistry } from "./worktree_manager.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -55,6 +56,37 @@ async function persistFakeBatchEvent(batch, context, emit, event) {
   await writeFile(context.paths.meta, JSON.stringify(batch, null, 2) + "\n", "utf8");
   await appendFile(context.paths.events, JSON.stringify(canonical) + "\n", "utf8");
   emit(canonical);
+}
+
+async function runGitCommand(cwd, args, { allowFailure = false } = {}) {
+  try {
+    const result = await execFileAsync("git", args, {
+      cwd,
+      encoding: "utf8",
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return { code: 0, stdout: String(result.stdout || ""), stderr: String(result.stderr || "") };
+  } catch (error) {
+    if (!allowFailure) throw error;
+    return {
+      code: Number(error.code),
+      stdout: String(error.stdout || ""),
+      stderr: String(error.stderr || ""),
+    };
+  }
+}
+
+async function createGitFixture(prefix = "moonsage-worktree-repo-") {
+  const repository = await mkdtemp(join(tmpdir(), prefix));
+  await runGitCommand(repository, ["init", "-q"]);
+  await runGitCommand(repository, ["config", "user.email", "test@moonsage.local"]);
+  await runGitCommand(repository, ["config", "user.name", "MoonSage Tests"]);
+  await writeFile(join(repository, ".gitignore"), ".env.local\n.worktreeinclude\n", "utf8");
+  await writeFile(join(repository, "README.md"), "fixture\n", "utf8");
+  await runGitCommand(repository, ["add", ".gitignore", "README.md"]);
+  await runGitCommand(repository, ["commit", "-qm", "fixture"]);
+  return repository;
 }
 
 test("resolves files inside the workspace", () => {
@@ -169,10 +201,289 @@ test("workspace tree and file access consistently ignore generated directories",
 
 test("parses staged, unstaged, and untracked git status", () => {
   assert.deepEqual(parseGitStatus("M  staged.mbt\0 M working.mbt\0?? new.mbt\0"), [
-    { path: "staged.mbt", index: "M", worktree: " ", staged: true, unstaged: false, untracked: false },
-    { path: "working.mbt", index: " ", worktree: "M", staged: false, unstaged: true, untracked: false },
-    { path: "new.mbt", index: "?", worktree: "?", staged: false, unstaged: true, untracked: true },
+    { path: "staged.mbt", old_path: "", index: "M", worktree: " ", staged: true, unstaged: false, untracked: false, conflicted: false, rename: false, copy: false },
+    { path: "working.mbt", old_path: "", index: " ", worktree: "M", staged: false, unstaged: true, untracked: false, conflicted: false, rename: false, copy: false },
+    { path: "new.mbt", old_path: "", index: "?", worktree: "?", staged: false, unstaged: true, untracked: true, conflicted: false, rename: false, copy: false },
   ]);
+});
+
+test("migrates v1 workspace records to local v2 records", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "moonsage-v1-workspace-"));
+  try {
+    const result = migrateRegistry({
+      version: 1,
+      workspaces: [{
+        id: "legacy-123456",
+        name: "legacy",
+        path: workspaceRoot,
+        created_at: "2025-01-01T00:00:00.000Z",
+        last_used_at: "2025-01-02T00:00:00.000Z",
+      }],
+    }, { now: "2026-01-01T00:00:00.000Z" });
+    assert.equal(result.migrated, true);
+    assert.equal(result.from_version, 1);
+    assert.equal(result.registry.version, 2);
+    const record = result.registry.workspaces[0];
+    const expected = {
+      id: "legacy-123456",
+      name: "legacy",
+      root: workspaceRoot,
+      path: workspaceRoot,
+      kind: "local",
+      managed: false,
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_used_at: "2025-01-02T00:00:00.000Z",
+      pinned: true,
+      cleanup: "never",
+      repo_root: "",
+      repository_root: "",
+      common_dir: "",
+      source_id: "",
+      base_ref: "",
+      head: "",
+      branch: "",
+      detached: false,
+      lifecycle: "local",
+      status: "ready",
+      owner_task_id: "",
+      owner_session_id: "",
+      eligible_for_cleanup: false,
+      last_error: "",
+    };
+    for (const [key, value] of Object.entries(expected)) assert.deepEqual(record[key], value, key);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("creates detached managed worktrees and copies only .worktreeinclude files", async () => {
+  const repository = await createGitFixture();
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-worktree-data-"));
+  const manager = new WorktreeManager({ dataDirectory: dataRoot });
+  try {
+    await writeFile(join(repository, ".env.local"), "LOCAL_ONLY=1\n", "utf8");
+    await writeFile(join(repository, ".worktreeinclude"), "# explicit ignored files\n.env.local\n", "utf8");
+    const record = await manager.createWorktree({ sourceRoot: repository });
+    assert.equal(record.kind, "worktree");
+    assert.equal(record.detached, true);
+    assert.equal(record.branch, "");
+    assert.equal(record.lifecycle, "temporary");
+    assert.equal(record.repository_root, repository);
+    assert.match(record.root, /worktrees/);
+    assert.equal(await readFile(join(record.root, ".env.local"), "utf8"), "LOCAL_ONLY=1\n");
+    const symbolicHead = await runGitCommand(record.root, ["symbolic-ref", "--short", "-q", "HEAD"], { allowFailure: true });
+    assert.equal(symbolicHead.code, 1);
+    assert.equal(symbolicHead.stdout.trim(), "");
+    const worktreeList = await runGitCommand(repository, ["worktree", "list", "--porcelain"]);
+    const listedRoot = record.root.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(worktreeList.stdout, new RegExp(`worktree ${listedRoot}`));
+    await manager.removeWorktree(record, { force: true });
+    assert.equal(await manager.readRegistry().then((registry) => registry.workspaces.some((entry) => entry.id === record.id)), false);
+  } finally {
+    await rm(repository, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("rolls back a worktree when .worktreeinclude validation fails", async () => {
+  const repository = await createGitFixture("moonsage-worktree-rollback-repo-");
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-worktree-rollback-data-"));
+  const manager = new WorktreeManager({ dataDirectory: dataRoot });
+  try {
+    await writeFile(join(repository, ".too-large"), Buffer.alloc(32, 0x41));
+    await writeFile(join(repository, ".worktreeinclude"), ".too-large\n", "utf8");
+    await assert.rejects(
+      manager.createWorktree({ sourceRoot: repository, includeMaxBytes: 8 }),
+      (error) => error?.code === "UNSAFE_INCLUDE",
+    );
+    const registry = await manager.readRegistry();
+    assert.equal(registry.workspaces.length, 0);
+    const worktrees = await runGitCommand(repository, ["worktree", "list", "--porcelain"]);
+    assert.equal((worktrees.stdout.match(/^worktree /gm) || []).length, 1);
+    await assert.rejects(
+      manager.createWorktree({ sourceRoot: repository, name: "../invalid" }),
+      (error) => error?.code === "INVALID_NAME",
+    );
+    const afterInvalidName = await runGitCommand(repository, ["worktree", "list", "--porcelain"]);
+    assert.equal((afterInvalidName.stdout.match(/^worktree /gm) || []).length, 1);
+  } finally {
+    await rm(repository, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("uses an atomic lease and recovers expired leases after restart", async () => {
+  const repository = await createGitFixture("moonsage-lease-repo-");
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-lease-data-"));
+  const managerA = new WorktreeManager({ dataDirectory: dataRoot });
+  const managerB = new WorktreeManager({ dataDirectory: dataRoot });
+  let record;
+  try {
+    record = await managerA.createWorktree({ sourceRoot: repository });
+    const attempts = await Promise.allSettled([
+      managerA.acquireLease(record, { owner: "task-a", ttlMs: 5_000 }),
+      managerB.acquireLease(record, { owner: "task-b", ttlMs: 5_000 }),
+    ]);
+    assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
+    assert.equal(attempts.filter((attempt) => attempt.status === "rejected").length, 1);
+    const rejected = attempts.find((attempt) => attempt.status === "rejected");
+    assert.equal(rejected.reason.code, "LEASED");
+    const lease = attempts.find((attempt) => attempt.status === "fulfilled").value;
+    await managerA.releaseLease(record, lease.token);
+    const reacquired = await managerB.acquireLease(record, { owner: "task-c", ttlMs: 5_000 });
+    const leasePath = managerB.leasePath(record);
+    const expired = { ...reacquired, expires_at_ms: Date.now() - 1, expires_at: new Date(Date.now() - 1).toISOString() };
+    await writeFile(leasePath, JSON.stringify(expired) + "\n", "utf8");
+    assert.equal(await managerA.activeLease(record), null);
+    await managerA.updateRecord(record.id, { status: "busy", eligible_for_cleanup: false });
+    const recovered = await managerB.recover();
+    const restored = recovered.workspaces.find((entry) => entry.id === record.id);
+    assert.equal(restored.status, "ready");
+    assert.equal(restored.eligible_for_cleanup, false);
+  } finally {
+    if (record) await managerA.removeWorktree(record, { force: true }).catch(() => {});
+    await rm(repository, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("handoff rejects a dirty target without leaving a partial patch", async () => {
+  const repository = await createGitFixture("moonsage-handoff-repo-");
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-handoff-data-"));
+  const manager = new WorktreeManager({ dataDirectory: dataRoot });
+  let source;
+  let target;
+  try {
+    source = await manager.createWorktree({ sourceRoot: repository });
+    target = await manager.createWorktree({ sourceRoot: repository });
+    await manager.createBranch(source.id, "handoff-source");
+    await writeFile(join(source.root, "README.md"), "fixture\nsource change\n", "utf8");
+    await writeFile(join(target.root, "README.md"), "fixture\ntarget change\n", "utf8");
+    await assert.rejects(
+      manager.handoff(source.id, target.id),
+      (error) => error?.code === "HANDOFF_CONFLICT",
+    );
+    assert.equal((await readFile(join(target.root, "README.md"), "utf8")).replaceAll("\r\n", "\n"), "fixture\ntarget change\n");
+    await runGitCommand(target.root, ["restore", "README.md"]);
+    const transferred = await manager.handoff(source.id, target.id);
+    assert.equal(transferred.applied, true);
+    assert.equal((await readFile(join(target.root, "README.md"), "utf8")).replaceAll("\r\n", "\n"), "fixture\nsource change\n");
+    assert.ok(transferred.snapshot?.id);
+  } finally {
+    if (source) await manager.removeWorktree(source, { force: true }).catch(() => {});
+    if (target) await manager.removeWorktree(target, { force: true }).catch(() => {});
+    await rm(repository, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("prune keeps pinned, permanent, leased, and ineligible worktrees", async () => {
+  const repository = await createGitFixture("moonsage-prune-repo-");
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-prune-data-"));
+  const manager = new WorktreeManager({ dataDirectory: dataRoot });
+  const records = [];
+  try {
+    const removable = await manager.createWorktree({ sourceRoot: repository });
+    const pinned = await manager.createWorktree({ sourceRoot: repository });
+    const permanent = await manager.createWorktree({ sourceRoot: repository, lifecycle: "permanent" });
+    const ineligible = await manager.createWorktree({ sourceRoot: repository });
+    const leased = await manager.createWorktree({ sourceRoot: repository });
+    records.push(removable, pinned, permanent, ineligible, leased);
+    await manager.updateRecord(removable.id, { eligible_for_cleanup: true });
+    await manager.pin(pinned.id, true);
+    await manager.updateRecord(ineligible.id, { eligible_for_cleanup: false });
+    await manager.updateRecord(leased.id, { eligible_for_cleanup: true });
+    await manager.acquireLease(leased, { owner: "prune-test", ttlMs: 5_000 });
+    const result = await manager.prune({ limit: 0 });
+    assert.ok(result.removed.includes(removable.id));
+    assert.ok(result.skipped.some((entry) => entry.id === leased.id && entry.reason === "leased"));
+    const remaining = await manager.readRegistry();
+    assert.equal(remaining.workspaces.some((entry) => entry.id === removable.id), false);
+    for (const [label, protectedRecord] of [["pinned", pinned], ["permanent", permanent], ["ineligible", ineligible], ["leased", leased]]) {
+      assert.equal(remaining.workspaces.some((entry) => entry.id === protectedRecord.id), true, `${label}:${protectedRecord.id}`);
+    }
+  } finally {
+    for (const record of records) await manager.removeWorktree(record, { force: true }).catch(() => {});
+    await rm(repository, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("workspace file saves reject stale revisions with a 409", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "moonsage-revision-workspace-"));
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-revision-data-"));
+  await writeFile(join(workspaceRoot, "note.txt"), "before\n", "utf8");
+  const server = serve({ listenPort: 0, workspaceRoot, workspaceDataDirectory: dataRoot });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const loaded = await fetch(`${base}/api/workspace/file?path=note.txt`);
+    assert.equal(loaded.status, 200);
+    const document = await loaded.json();
+    assert.equal(document.content, "before\n");
+    assert.match(document.revision, /^[0-9a-f]{64}$/);
+    await writeFile(join(workspaceRoot, "note.txt"), "external\n", "utf8");
+    const stale = await fetch(`${base}/api/workspace/file`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "note.txt", content: "overwrite\n", expected_revision: document.revision }),
+    });
+    assert.equal(stale.status, 409);
+    const conflict = await stale.json();
+    assert.match(conflict.current_revision, /^[0-9a-f]{64}$/);
+    assert.equal(await readFile(join(workspaceRoot, "note.txt"), "utf8"), "external\n");
+  } finally {
+    await closeServer(server);
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("workspace API creates, lists, and removes a detached managed worktree", async () => {
+  const repository = await createGitFixture("moonsage-worktree-api-repo-");
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-worktree-api-data-"));
+  await writeFile(join(repository, ".env.local"), "API_ONLY=1\n", "utf8");
+  await writeFile(join(repository, ".worktreeinclude"), ".env.local\n", "utf8");
+  const server = serve({ listenPort: 0, workspaceRoot: repository, workspaceDataDirectory: dataRoot });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  let createdId = "";
+  try {
+    const registered = await fetch(`${base}/api/workspaces`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: repository }),
+    });
+    assert.equal(registered.status, 201);
+    const source = (await registered.json()).workspace;
+    const created = await fetch(`${base}/api/workspaces/${source.id}/worktree`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ copy_ignored: true }),
+    });
+    assert.equal(created.status, 201);
+    const workspace = (await created.json()).workspace;
+    createdId = workspace.id;
+    assert.equal(workspace.kind, "worktree");
+    assert.equal(workspace.managed, true);
+    assert.equal(workspace.detached, true);
+    assert.equal(workspace.branch, "");
+    assert.equal(await readFile(join(workspace.path, ".env.local"), "utf8"), "API_ONLY=1\n");
+    const listed = await (await fetch(`${base}/api/workspaces`)).json();
+    assert.ok(listed.workspaces.some((entry) => entry.id === createdId && entry.kind === "worktree"));
+    const removed = await fetch(`${base}/api/workspaces/${createdId}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    assert.equal((await (await fetch(`${base}/api/workspaces`)).json()).workspaces.some((entry) => entry.id === createdId), false);
+  } finally {
+    if (createdId) {
+      await fetch(`${base}/api/workspaces/${createdId}`, { method: "DELETE" }).catch(() => {});
+    }
+    await closeServer(server);
+    await rm(repository, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
 });
 
 test("builds a bounded conversation transcript", () => {
@@ -693,6 +1004,123 @@ test("registers workspaces and persists task lifecycle events", async () => {
   }
 });
 
+test("managed tasks release leases and retain failure and cancellation snapshots", async () => {
+  const repository = await createGitFixture("moonsage-managed-task-repo-");
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-managed-task-data-"));
+  let cancelStartedResolve;
+  const cancelStarted = new Promise((resolve) => { cancelStartedResolve = resolve; });
+  let cancelObserved = false;
+  const server = serve({
+    listenPort: 0,
+    workspaceRoot: repository,
+    workspaceDataDirectory: dataRoot,
+    agentRunner: async (messages, _emit, signal, context) => {
+      const goal = messages.at(-1)?.text || "";
+      if (goal === "success") {
+        await writeFile(join(context.workspaceRoot, "success.txt"), "done\n", "utf8");
+        return { answer: "done" };
+      }
+      if (goal === "failure") {
+        await writeFile(join(context.workspaceRoot, "failure.txt"), "keep me\n", "utf8");
+        return { error: "expected failure" };
+      }
+      await writeFile(join(context.workspaceRoot, "cancelled.txt"), "keep me too\n", "utf8");
+      cancelStartedResolve();
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+      cancelObserved = true;
+      // The runtime adapter historically reported aborts as errors. The task
+      // lifecycle must still prioritize the AbortSignal and persist cancelled.
+      return { error: "request stopped" };
+    },
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  const manager = new WorktreeManager({ dataDirectory: dataRoot });
+  try {
+    const registered = await fetch(`${base}/api/workspaces`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: repository }),
+    });
+    assert.equal(registered.status, 201);
+    const source = (await registered.json()).workspace;
+    const createTask = async (goal) => {
+      const response = await fetch(`${base}/api/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace_id: source.id,
+          goal,
+          permission: "controlled-write",
+          workspace_mode: "managed",
+          session_id: `session-${goal}`,
+        }),
+      });
+      assert.equal(response.status, 201);
+      return (await response.json()).task;
+    };
+    const loadTask = async (id) => (await (await fetch(`${base}/api/tasks/${id}`)).json()).task;
+    const loadWorkspace = async (id) => (await manager.readRegistry()).workspaces.find((entry) => entry.id === id);
+
+    const succeeded = await createTask("success");
+    const successRun = await fetch(`${base}/api/tasks/${succeeded.id}/run`, { method: "POST" });
+    assert.equal(successRun.status, 200);
+    await successRun.text();
+    const successTask = await loadTask(succeeded.id);
+    const successWorkspace = await loadWorkspace(successTask.execution_workspace_id);
+    assert.equal(successTask.status, "completed");
+    assert.equal(successWorkspace.status, "ready");
+    assert.equal(successWorkspace.eligible_for_cleanup, true);
+    assert.equal(successWorkspace.owner_task_id, succeeded.id);
+    assert.equal(await manager.activeLease(successWorkspace), null);
+
+    const failed = await createTask("failure");
+    const failureRun = await fetch(`${base}/api/tasks/${failed.id}/run`, { method: "POST" });
+    assert.equal(failureRun.status, 200);
+    await failureRun.text();
+    const failedTask = await loadTask(failed.id);
+    const failedWorkspace = await loadWorkspace(failedTask.execution_workspace_id);
+    assert.equal(failedTask.status, "failed");
+    assert.equal(failedWorkspace.status, "retained");
+    assert.equal(failedWorkspace.eligible_for_cleanup, false);
+    assert.equal(failedWorkspace.last_snapshot_id, failedTask.snapshot_id);
+    assert.equal(await manager.activeLease(failedWorkspace), null);
+    const failedMetadata = JSON.parse(await readFile(join(failedTask.snapshot_path, "metadata.json"), "utf8"));
+    assert.equal(failedMetadata.reason, "task_failed");
+    assert.equal(await readFile(join(failedTask.snapshot_path, "files", "failure.txt"), "utf8"), "keep me\n");
+
+    const cancelled = await createTask("cancel");
+    const cancelRunPromise = fetch(`${base}/api/tasks/${cancelled.id}/run`, { method: "POST" });
+    await cancelStarted;
+    const cancelResponse = await fetch(`${base}/api/tasks/${cancelled.id}/cancel`, { method: "POST" });
+    assert.equal(cancelResponse.status, 202);
+    const cancelRun = await cancelRunPromise;
+    assert.equal(cancelRun.status, 200);
+    await cancelRun.text();
+    const cancelledTask = await loadTask(cancelled.id);
+    const cancelledWorkspace = await loadWorkspace(cancelledTask.execution_workspace_id);
+    assert.equal(cancelObserved, true);
+    assert.equal(cancelledTask.status, "cancelled");
+    assert.equal(cancelledTask.cancel_requested, true);
+    assert.equal(cancelledWorkspace.status, "retained");
+    assert.equal(cancelledWorkspace.eligible_for_cleanup, false);
+    assert.equal(cancelledWorkspace.last_snapshot_id, cancelledTask.snapshot_id);
+    assert.equal(await manager.activeLease(cancelledWorkspace), null);
+    const cancelledMetadata = JSON.parse(await readFile(join(cancelledTask.snapshot_path, "metadata.json"), "utf8"));
+    assert.equal(cancelledMetadata.reason, "task_cancelled");
+    assert.equal(await readFile(join(cancelledTask.snapshot_path, "files", "cancelled.txt"), "utf8"), "keep me too\n");
+  } finally {
+    await closeServer(server);
+    const registry = await manager.readRegistry().catch(() => ({ workspaces: [] }));
+    for (const record of registry.workspaces) {
+      if (record.kind === "worktree") await manager.removeWorktree(record, { force: true }).catch(() => {});
+    }
+    await rm(repository, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("aborts the agent run when the client disconnects", async () => {
   let aborted = false;
   const server = serve({
@@ -777,39 +1205,58 @@ test("normalizes batch settings and applies canonical item events", () => {
 test("batch worker uses the internal batch-audit command and forwards JSONL", async () => {
   let invocation = null;
   const events = [];
-  const result = await runBatchWorker(
-    { id: "batch-command-1234" },
-    (event) => events.push(event),
-    new AbortController().signal,
-    {
-      dataDirectory: join(tmpdir(), "moonsage-command-data"),
-      workerSpawner: (executable, args, options) => {
-        invocation = { executable, args, options };
-        const child = new EventEmitter();
-        child.pid = undefined;
-        child.stdout = new PassThrough();
-        child.stderr = new PassThrough();
-        queueMicrotask(() => {
-          child.stdout.write(JSON.stringify({
-            kind: "batch_state",
-            batch_id: "batch-command-1234",
-            item_key: "",
-            cycle: 1,
-            timestamp_ms: 1,
-            message: "",
-            data: { status: "running" },
-          }) + "\n");
-          child.stdout.end();
-          child.emit("close", 0, null);
-        });
-        return child;
+  const savedEnv = {
+    GH_TOKEN: process.env.GH_TOKEN,
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    MOONSAGE_API_KEY: process.env.MOONSAGE_API_KEY,
+  };
+  process.env.GH_TOKEN = "must-not-reach-worker";
+  process.env.GITHUB_TOKEN = "must-not-reach-worker";
+  process.env.MOONSAGE_API_KEY = "model-key-for-worker";
+  let result;
+  try {
+    result = await runBatchWorker(
+      { id: "batch-command-1234" },
+      (event) => events.push(event),
+      new AbortController().signal,
+      {
+        dataDirectory: join(tmpdir(), "moonsage-command-data"),
+        workerSpawner: (executable, args, options) => {
+          invocation = { executable, args, options };
+          const child = new EventEmitter();
+          child.pid = undefined;
+          child.stdout = new PassThrough();
+          child.stderr = new PassThrough();
+          queueMicrotask(() => {
+            child.stdout.write(JSON.stringify({
+              kind: "batch_state",
+              batch_id: "batch-command-1234",
+              item_key: "",
+              cycle: 1,
+              timestamp_ms: 1,
+              message: "",
+              data: { status: "running" },
+            }) + "\n");
+            child.stdout.end();
+            child.emit("close", 0, null);
+          });
+          return child;
+        },
       },
-    },
-  );
+    );
+  } finally {
+    for (const [name, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
   assert.deepEqual(invocation.args.slice(-5), [
     "batch-audit", "--worker", "--batch-id", "batch-command-1234", "--stream-json",
   ]);
   assert.equal(invocation.options.env.MOONSAGE_DATA_DIR, join(tmpdir(), "moonsage-command-data"));
+  assert.equal(invocation.options.env.MOONSAGE_API_KEY, "model-key-for-worker");
+  assert.equal(invocation.options.env.GH_TOKEN, undefined);
+  assert.equal(invocation.options.env.GITHUB_TOKEN, undefined);
   assert.equal(result.code, 0);
   assert.equal(events[0].kind, "batch_state");
 });

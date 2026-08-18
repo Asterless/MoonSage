@@ -300,6 +300,27 @@ button:disabled { cursor: default; }
 
 .workspace-panel { min-width: 0; min-height: 0; height: 100%; overflow: hidden; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface-subtle); }
 .workspace-header { height: 64px; flex: 0 0 64px; display: flex; align-items: center; gap: 10px; padding: 0 14px 0 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.workspace-heading { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 3px; }
+.workspace-heading h1 { margin: 0; color: var(--text); font-size: 14px; }
+.workspace-heading > span { min-width: 0; overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-mode-badge { display: inline-flex; align-items: center; max-width: 220px; overflow: hidden; color: var(--text-faint) !important; font: 9px/1.2 Menlo, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-registry { max-height: 170px; flex: 0 0 auto; overflow-y: auto; padding: 7px 9px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.workspace-registry-item { width: 100%; min-height: 38px; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; gap: 2px 8px; padding: 6px 8px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; text-align: left; }
+.workspace-registry-item:hover { background: var(--surface-active); }
+.workspace-registry-item.active { color: var(--text); background: var(--brand-soft); box-shadow: inset 2px 0 var(--brand); }
+.workspace-registry-item:disabled { opacity: .5; }
+.workspace-registry-name { min-width: 0; overflow: hidden; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-registry-meta { min-width: 0; overflow: hidden; color: var(--text-faint); font: 9px/1.25 Menlo, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-registry-pin { grid-row: span 2; align-self: center; color: var(--brand-strong); font-size: 9px; }
+.workspace-registry-empty { padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--text-faint); font-size: 10px; text-align: center; background: var(--surface); }
+.workspace-toolbar-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 6px; padding: 7px 10px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
+.workspace-small-button { min-height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); background: var(--surface); font-size: 9px; }
+.workspace-small-button:hover { color: var(--text); border-color: var(--brand); }
+.workspace-small-button:disabled { opacity: .45; }
+.workspace-small-button.danger { color: var(--danger); }
+.workspace-dirty-guard { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 7px; padding: 8px 10px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border)); color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); font-size: 10px; }
+.workspace-dirty-guard button { min-height: 26px; padding: 0 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-soft); background: var(--surface); font-size: 9px; }
+.workspace-dirty-guard.hidden { display: none; }
 .workspace-heading { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
 .workspace-heading h1 { margin: 0; color: var(--text); font-size: 14px; font-weight: 750; }
 .workspace-heading span { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
