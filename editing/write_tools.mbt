@@ -8,6 +8,76 @@ pub(all) enum WriteConfirm {
 }
 
 ///|
+// Paths that must never be changed by an agent. Keep this aligned with the
+// workspace readers so a hidden/generated file cannot be reached through a
+// write-only path.
+fn is_protected_write_path(rel : String) -> Bool {
+  let normalized = rel.replace_all(old="\\", new="/")
+  let segments = normalized
+    .split("/")
+    .filter(fn(segment) { segment != "" })
+    .map(fn(segment) { segment.to_owned().to_lower() })
+    .to_array()
+  guard segments.length() > 0 else { return true }
+  let ignored = [
+    ".git",
+    ".mooncakes",
+    ".moonsage",
+    ".cache",
+    "_build",
+    "_build.bak",
+    "node_modules",
+    "target",
+  ]
+  for segment in segments {
+    if ignored.contains(segment) || segment.has_prefix("_audit_ws_") {
+      return true
+    }
+  }
+  let filename = segments[segments.length() - 1]
+  filename == ".env" || filename.has_prefix(".env.")
+}
+
+///|
+// Reject symlinks in every existing component. A lexical safe-path check is
+// insufficient when an in-workspace directory points outside the workspace.
+async fn checked_write_path(
+  root : String,
+  rel : String,
+  require_file? : Bool = false,
+) -> String {
+  guard !is_protected_write_path(rel) else {
+    fail("path is protected: \{rel}")
+  }
+  let target = @util.safe_path(root, rel)
+  let normalized = rel.replace_all(old="\\", new="/")
+  let segments = normalized.split("/").filter(fn(segment) {
+    segment != "" && segment != "."
+  }).map(fn(segment) { segment.to_owned() }).to_array()
+  let mut current = root.trim_end(chars="\\/").to_owned()
+  for index, segment in segments {
+    current = current + "/" + segment
+    let kind = @fs.kind(current, follow_symlink=false) catch {
+      _ => Unknown
+    }
+    guard !(kind is SymLink) else {
+      fail("symbolic links are not writable: \{rel}")
+    }
+    if index + 1 < segments.length() && !(kind is Unknown) {
+      guard kind is Directory else {
+        fail("write path contains a non-directory component: \{rel}")
+      }
+    }
+  }
+  if require_file {
+    guard @fs.kind(target, follow_symlink=false) is Regular else {
+      fail("operation only supports regular files: \{rel}")
+    }
+  }
+  target
+}
+
+///|
 // 修改后需要跑语法门校验的源码文件。
 fn is_syncheck_source(rel : String) -> Bool {
   let base = @util.basename(rel)
@@ -79,7 +149,7 @@ async fn write_file_tool(
   let content = @util.json_string_arg(document, "content")
   guard rel != "" else { fail("path is required") }
   let root = ws.get_root()
-  let path = @util.safe_path(root, rel)
+  let path = checked_write_path(root, rel)
   // 与 multi_edit 一致:源码文件先过语法门再询问确认,避免确认一个注定失败的写入。
   if is_syncheck_source(rel) {
     ignore(syncheck_content(content, rel))
@@ -143,7 +213,7 @@ async fn multi_edit_tool(
   let original : Map[String, String] = Map([])
   for edit in edits {
     if original.get(edit.file) is None {
-      let path = @util.safe_path(root, edit.file)
+      let path = checked_write_path(root, edit.file, require_file=true)
       original[edit.file] = @fs.read_file(path).text()
     }
   }
@@ -178,7 +248,7 @@ async fn multi_edit_tool(
     if original[file] != new_content {
       ws.push_undo(file, Some(original[file]))
       @fs.write_file(
-        @util.safe_path(root, file),
+        checked_write_path(root, file, require_file=true),
         new_content,
         create_mode=@fs.CreateMode::CreateOrTruncate,
       )
@@ -197,10 +267,7 @@ async fn remove_tool(
   let document = @json.parse(arguments)
   let rel = @util.json_string_arg(document, "path")
   guard rel != "" else { fail("path is required") }
-  let path = @util.safe_path(ws.get_root(), rel)
-  guard @fs.kind(path) is @fs.FileKind::Regular else {
-    fail("remove only supports regular files: \{rel}")
-  }
+  let path = checked_write_path(ws.get_root(), rel, require_file=true)
   let content = Some(@fs.read_file(path).text()) catch { _ => None }
   if confirm is Prompt {
     match content {

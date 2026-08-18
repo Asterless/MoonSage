@@ -3,20 +3,26 @@ using @rabbita {type Cmd, type Emit, type Html, type Val}
 
 ///|
 using @html {
+  a,
+  article,
   aside,
   button,
   details,
   div,
   form,
   h1,
+  h2,
+  h3,
   header,
   input,
+  label,
   li,
   main_,
   nav,
   p,
   pre,
   section,
+  small,
   span,
   summary,
   textarea,
@@ -85,6 +91,7 @@ struct Model {
   compact : Bool
   workspace_overlay : Bool
   workspace : WorkspaceModel
+  batch : BatchModel
   next_id : Int
 } derive(Eq)
 
@@ -137,6 +144,17 @@ enum Msg {
   WorkspaceCommit
   WorkspaceCommitReceived(String, String)
   WorkspaceFailed(String)
+  ToggleBatch
+  BatchConfigChanged(String, String)
+  BatchStart
+  BatchRefresh
+  BatchSelect(String)
+  BatchSelectItem(String)
+  BatchAction(String, String, String)
+  BatchResponse(String, String)
+  BatchFailed(String)
+  BatchPoll
+  BatchStreamChanged
 } derive(Eq)
 
 ///|
@@ -202,6 +220,7 @@ fn initial_model() -> Model {
     compact,
     workspace_overlay,
     workspace: initial_workspace(),
+    batch: initial_batch(),
     next_id,
   }
 }
@@ -786,9 +805,13 @@ fn update_conversation(
 
 ///|
 fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
-  match workspace_update(model.workspace, msg, emit) {
-    Some((workspace, command)) => ({ ..model, workspace, }, command)
-    None => update_conversation(model, msg, emit)
+  match batch_update(model.batch, msg, emit) {
+    Some((batch, command)) => ({ ..model, batch, }, command)
+    None =>
+      match workspace_update(model.workspace, msg, emit) {
+        Some((workspace, command)) => ({ ..model, workspace, }, command)
+        None => update_conversation(model, msg, emit)
+      }
   }
 }
 
@@ -1002,6 +1025,17 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
       icon("square-plus"),
       span("新对话"),
     ]),
+    button(
+      class="batch-entry",
+      type_="button",
+      attrs=@html.Attrs::build().aria_label("进入自动审计模式"),
+      on_click=emit(ToggleBatch),
+      [
+        icon("sparkles"),
+        span("自动审计"),
+        span(class="batch-entry-kicker", "模式 1"),
+      ],
+    ),
     div(class="sidebar-label", "对话"),
     nav(
       class="session-list",
@@ -1149,6 +1183,9 @@ fn app() -> Val[Html] {
     },
   )
   model.view(model => {
+    if model.batch.open {
+      return batch_view(model.batch, model.theme, emit)
+    }
     let active = model.sessions[model.active_session]
     let content : Array[Html] = active.messages.map(message_view)
     let shell_class = if model.sidebar_open {
@@ -1225,6 +1262,16 @@ fn app() -> Val[Html] {
                   span(class=request_dot_class(model.request), ""),
                   span(request_label(model.request)),
                 ],
+              ),
+              button(
+                class="batch-mode-toggle",
+                type_="button",
+                title="自动审计",
+                attrs=@html.Attrs::build().aria_label(
+                  "进入自动审计模式",
+                ),
+                on_click=emit(ToggleBatch),
+                [icon("sparkles"), span("模式 1")],
               ),
               button(
                 class="icon-button topbar-theme-toggle",

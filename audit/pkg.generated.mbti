@@ -2,13 +2,23 @@
 package "moonsage/audit"
 
 import {
+  "moonbitlang/core/debug",
   "moonsage/agent/runtime",
+  "moonsage/llm",
 }
 
 // Values
+pub fn audit_publish_block_reason(AuditVerificationSummary, Bool) -> String?
+
 pub fn build_audit_evidence(@runtime.AgentAnswer?, @runtime.AgentAnswer, Bool) -> AuditEvidence
 
 pub async fn run_audit(ArrayView[String]) -> Unit
+
+pub async fn run_final_audit_verification(String, timeout_ms? : Int) -> AuditVerificationSummary
+
+pub async fn run_structured_audit_package(String, String, String, String, workspace? : String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, provider? : @llm.ProviderKind) -> AuditPackageResult
+
+pub async fn run_structured_audit_project(String, String, String, String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, provider? : @llm.ProviderKind) -> StructuredAuditResult
 
 // Errors
 
@@ -20,6 +30,21 @@ pub(all) struct AuditEvidence {
   conflicts : Array[String]
 }
 
+pub(all) struct AuditPackageResult {
+  module_name : String
+  owner : String
+  repo : String
+  workspace : String
+  project_dir : String
+  audit : StructuredAuditResult
+}
+
+pub(all) enum AuditRunStatus {
+  Completed
+  Failed
+} derive(Eq, @debug.Debug)
+pub fn AuditRunStatus::to_string(Self) -> String
+
 pub(all) struct AuditToolRecord {
   phase : String
   round : Int
@@ -29,6 +54,28 @@ pub(all) struct AuditToolRecord {
   status : String
   result : String
 }
+
+pub(all) struct AuditVerificationSummary {
+  check_passed : Bool
+  build_passed : Bool
+  test_passed : Bool
+  check_output : String
+  build_output : String
+  test_output : String
+} derive(Eq, @debug.Debug)
+pub fn AuditVerificationSummary::passed(Self) -> Bool
+
+pub(all) struct StructuredAuditResult {
+  status : AuditRunStatus
+  project_dir : String
+  report : String
+  analysis : String
+  diff : String
+  evidence : AuditEvidence
+  validation : AuditVerificationSummary
+  error : String
+}
+pub fn StructuredAuditResult::publishable(Self) -> Bool
 
 // Type aliases
 

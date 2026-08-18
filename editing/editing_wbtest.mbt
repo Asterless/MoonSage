@@ -287,6 +287,74 @@ async test "write_file_tool skips syntax gate for non-source files" {
 }
 
 ///|
+test "write paths reject generated and credential files" {
+  assert_true(is_protected_write_path(".git/config"))
+  assert_true(is_protected_write_path("src/_build/out.mbt"))
+  assert_true(is_protected_write_path("_audit_ws_demo/file.mbt"))
+  assert_true(is_protected_write_path("config/.env.production"))
+  assert_true(!is_protected_write_path("src/main.mbt"))
+  assert_true(!is_protected_write_path(".github/workflows/check.yml"))
+}
+
+///|
+async test "write tools reject protected paths" {
+  let tmp = @fs.tmpdir(prefix="moonsage-write-protected-")
+  let ws = Workspace::new(tmp)
+  for rel in [".env", ".git/config", "target/out.txt"] {
+    let rejected = try {
+      ignore(
+        write_file_tool(
+          ws,
+          Auto,
+          "{\"path\":\"\{rel}\",\"content\":\"secret\"}",
+        ),
+      )
+      false
+    } catch {
+      error => error.to_string().contains("protected")
+    }
+    assert_true(rejected)
+  }
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "write tools reject symbolic link components" {
+  let tmp = @fs.tmpdir(prefix="moonsage-write-symlink-")
+  let outside = @fs.tmpdir(prefix="moonsage-write-outside-")
+  let linked = tmp + "/linked"
+  let (exit, _, _) = @process.collect_output(
+    "ln",
+    ["-s", outside, linked],
+    no_console_window=true,
+  )
+  if exit == 0 {
+    let rejected = try {
+      ignore(
+        write_file_tool(
+          Workspace::new(tmp),
+          Auto,
+          "{\"path\":\"linked/out.txt\",\"content\":\"outside\"}",
+        ),
+      )
+      false
+    } catch {
+      error => error.to_string().contains("symbolic")
+    }
+    assert_true(rejected)
+  }
+  @fs.rmdir(tmp, recursive=true) catch {
+    _ => ()
+  }
+  @fs.rmdir(outside, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
 async test "workspace undo restores overwritten files" {
   let tmp = @fs.tmpdir(prefix="moonsage-undo-overwrite-test-")
   let ws = Workspace::new(tmp)
@@ -402,6 +470,59 @@ test "parse_github_url extracts owner and repo" {
   assert_eq(parse_github_url("https://gitlab.com/owner/repo"), None)
   assert_eq(parse_github_url("https://github.com/owner"), None)
   assert_eq(parse_github_url("not a url"), None)
+}
+
+///|
+test "publish branch names reject options and ref syntax" {
+  assert_true(valid_branch_name("moonsage/mode1/owner-repo-run"))
+  assert_true(valid_branch_name("moonsage/fix-repo-2"))
+  assert_true(!valid_branch_name("--upload-pack=evil"))
+  assert_true(!valid_branch_name("moonsage//bad"))
+  assert_true(!valid_branch_name("moonsage/../main"))
+  assert_true(!valid_branch_name("refs/x.lock"))
+  assert_true(!valid_branch_name("bad branch"))
+}
+
+///|
+test "publish branch detection supports audit and mode 1 retries" {
+  assert_true(is_moonsage_publish_branch("moonsage/fix-parser"))
+  assert_true(
+    is_moonsage_publish_branch("moonsage/mode1/moonbitlang-core-batch-1"),
+  )
+  assert_true(!is_moonsage_publish_branch("main"))
+  assert_true(!is_moonsage_publish_branch("feature/moonsage"))
+}
+
+///|
+async test "stage_changed_paths excludes ignored files" {
+  let repo = @fs.tmpdir(prefix="moonsage-stage-safe-")
+  let _ = @fs.write_file(
+    repo + "/a.txt",
+    "one\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
+  let add = @process.collect_output("git", ["add", "a.txt"], cwd=repo, no_console_window=true)
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 {
+    let _ = @fs.write_file(
+      repo + "/a.txt",
+      "two\n",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    let paths = stage_changed_paths(repo)
+    assert_eq(paths, ["a.txt"])
+    let staged = git_text(["diff", "--cached", "--name-only"], repo)
+    assert_eq(staged.trim(), "a.txt")
+  }
+  @fs.rmdir(repo, recursive=true) catch {
+    _ => ()
+  }
 }
 
 ///|
@@ -627,12 +748,258 @@ async test "unique_branch_name avoids remote branches" {
     assert_eq(name, "moonsage/fix-x-2")
     let current = git_text(["branch", "--show-current"], root)
     assert_true(current != "")
-    assert_eq(remote_default_branch(root, current), current)
+    assert_eq(remote_default_branch(root, current), current.trim().to_owned())
   }
   @fs.rmdir(src, recursive=true) catch {
     _ => ()
   }
   @fs.rmdir(ws_base, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+test "publish command environments isolate repository credentials" {
+  let repository = repository_command_environment()
+  assert_eq(repository["GIT_TERMINAL_PROMPT"], "0")
+  assert_eq(repository["GIT_LFS_SKIP_SMUDGE"], "1")
+  assert_true(repository.get("MOONSAGE_API_KEY") is None)
+  assert_true(repository.get("GH_TOKEN") is None)
+  assert_true(repository.get("GITHUB_TOKEN") is None)
+  assert_true(repository.get("SSH_AUTH_SOCK") is None)
+  let github = github_command_environment()
+  assert_true(github.get("MOONSAGE_API_KEY") is None)
+  assert_true(github.get("SSH_AUTH_SOCK") is None)
+  let read_args = secure_git_args(["status", "--short"])
+  assert_true(read_args.contains("credential.helper="))
+  assert_true(read_args.contains("submodule.recurse=false"))
+  assert_true(!read_args.any(fn(arg) {
+    arg.contains("gh auth git-credential")
+  }))
+  let push_args = secure_git_args(
+    ["push", "origin", "HEAD:refs/heads/x"],
+    github_auth=true,
+  )
+  assert_true(push_args.any(fn(arg) {
+    arg.contains("gh auth git-credential")
+  }))
+}
+
+///|
+test "publish URL path and PR metadata validation is strict" {
+  assert_true(canonical_github_url_matches(
+    "https://github.com/Owner/Repo.git",
+    "owner",
+    "repo",
+  ))
+  assert_true(!canonical_github_url_matches(
+    "git@github.com:owner/repo.git",
+    "owner",
+    "repo",
+  ))
+  assert_true(!canonical_github_url_matches(
+    "https://github.com/owner/repo/tree/main",
+    "owner",
+    "repo",
+  ))
+  assert_eq(
+    validated_pr_record(
+      "https://github.com/o/r/pull/12\tfalse\tmain\tmode1\to",
+      "o",
+      "r",
+      "o",
+      "mode1",
+      "main",
+    ),
+    Some("https://github.com/o/r/pull/12"),
+  )
+  let draft_rejected = try {
+    ignore(
+      validated_pr_record(
+        "https://github.com/o/r/pull/12\ttrue\tmain\tmode1\to",
+        "o",
+        "r",
+        "o",
+        "mode1",
+        "main",
+      ),
+    )
+    false
+  } catch {
+    _ => true
+  }
+  assert_true(draft_rejected)
+}
+
+///|
+test "publish path and diff classifiers reject unsafe values" {
+  assert_eq(
+    nul_separated_paths("src/a.mbt\u{0000}README.md\u{0000}"),
+    ["src/a.mbt", "README.md"],
+  )
+  assert_true(valid_repo_relative_path("src/a.mbt"))
+  assert_true(!valid_repo_relative_path("../outside"))
+  assert_true(!valid_repo_relative_path("src\\outside"))
+  assert_true(!valid_repo_relative_path("bad\nname"))
+  assert_true(raw_diff_has_symlink_mode(
+    ":100644 120000 abc def M\u{0000}link\u{0000}",
+  ))
+  assert_true(raw_diff_has_symlink_mode(
+    ":120000 000000 abc def D\u{0000}link\u{0000}",
+  ))
+  assert_true(numstat_has_binary("-\t-\timage.bin\u{0000}"))
+  assert_true(!numstat_has_binary("2\t1\tsrc/a.mbt\u{0000}"))
+  assert_true(valid_git_revision("0123456789abcdef0123456789abcdef01234567"))
+  assert_true(!valid_git_revision("not-a-revision"))
+}
+
+///|
+async test "verified changed-file allowlist must match before staging" {
+  let repo = @fs.tmpdir(prefix="moonsage-verified-paths-")
+  let _ = @fs.write_file(
+    repo + "/a.txt",
+    "one\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
+  let add = @process.collect_output("git", ["add", "a.txt"], cwd=repo, no_console_window=true)
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 {
+    let _ = @fs.write_file(
+      repo + "/a.txt",
+      "two\n",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    let _ = @fs.write_file(
+      repo + "/b.txt",
+      "new\n",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    let rejected = try {
+      ignore(stage_changed_paths(repo, verified_paths=["a.txt"]))
+      false
+    } catch {
+      error => error.to_string().contains("allowlist")
+    }
+    assert_true(rejected)
+    assert_eq(git_text(["diff", "--cached", "--name-only"], repo).trim(), "")
+    let staged = stage_changed_paths(
+      repo,
+      verified_paths=["b.txt", "a.txt"],
+    )
+    assert_eq(staged, ["a.txt", "b.txt"])
+  }
+  @fs.rmdir(repo, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "publisher rejects binary changes before staging" {
+  let repo = @fs.tmpdir(prefix="moonsage-binary-publish-")
+  let _ = @fs.write_file(
+    repo + "/blob.bin",
+    "text\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
+  let add = @process.collect_output("git", ["add", "blob.bin"], cwd=repo, no_console_window=true)
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 {
+    let _ = @fs.write_file(
+      repo + "/blob.bin",
+      b"\x00\x01binary",
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+    )
+    let rejected = try {
+      ignore(stage_changed_paths(repo, verified_paths=["blob.bin"]))
+      false
+    } catch {
+      error => error.to_string().contains("binary")
+    }
+    assert_true(rejected)
+    assert_eq(git_text(["diff", "--cached", "--name-only"], repo).trim(), "")
+  }
+  @fs.rmdir(repo, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "publisher rejects staged git symlink mode" {
+  let repo = @fs.tmpdir(prefix="moonsage-symlink-mode-")
+  let _ = @fs.write_file(
+    repo + "/target.txt",
+    "target\n",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let init = @process.collect_output("git", ["init"], cwd=repo, no_console_window=true)
+  let add = @process.collect_output("git", ["add", "target.txt"], cwd=repo, no_console_window=true)
+  let commit = @process.collect_output(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let hash = @process.collect_output(
+    "git",
+    ["hash-object", "target.txt"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  if init.0 == 0 && add.0 == 0 && commit.0 == 0 && hash.0 == 0 {
+    let revision = (hash.1.text() catch { _ => "" }).trim().to_owned()
+    let update = @process.collect_output(
+      "git",
+      ["update-index", "--add", "--cacheinfo", "120000", revision, "link"],
+      cwd=repo,
+      no_console_window=true,
+    )
+    if update.0 == 0 {
+      let rejected = try {
+        validate_changed_file_kinds(repo, ["link"])
+        false
+      } catch {
+        error => error.to_string().contains("symbolic-link")
+      }
+      assert_true(rejected)
+    }
+  }
+  @fs.rmdir(repo, recursive=true) catch {
+    _ => ()
+  }
+}
+
+///|
+async test "publisher detects symlink or junction path components when supported" {
+  let root = @fs.tmpdir(prefix="moonsage-link-tree-")
+  let real = root + "/real"
+  @fs.mkdir(real)
+  let _ = @fs.write_file(
+    real + "/a.txt",
+    "a",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+  )
+  let linked = try {
+    @fs.symlink(target=real, root + "/linked")
+    true
+  } catch {
+    _ => false
+  }
+  if linked {
+    assert_true(path_tree_has_link_or_special(root, "linked/a.txt"))
+  }
+  @fs.rmdir(root, recursive=true) catch {
     _ => ()
   }
 }

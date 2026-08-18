@@ -1,0 +1,323 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "moonsage/batch"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub async fn append_batch_event(String, BatchEvent, secrets? : Array[String]) -> Unit
+
+pub fn apply_audit_result(BatchRecord, BatchItem, BatchAuditResult, Int64) -> Unit
+
+pub fn apply_idempotency(BatchItem, Map[String, String], Int64) -> Bool
+
+pub fn apply_publish_result(BatchRecord, String, BatchPublishResult, Int64) -> Unit raise
+
+pub fn audit_result_has_changes(BatchAuditResult) -> Bool
+
+pub fn batch_branch_name(BatchRecord, BatchItem) -> String
+
+pub fn batch_can_transition(BatchStatus, BatchStatus) -> Bool
+
+pub fn batch_control_path(String, String) -> String raise
+
+pub fn batch_events_path(String, String) -> String raise
+
+pub fn batch_fingerprint(String, String, String, String) -> String
+
+pub fn batch_glob_match(String, String) -> Bool
+
+pub fn batch_item_can_transition(BatchItemStatus, BatchItemStatus) -> Bool
+
+pub fn batch_item_is_active(BatchItemStatus) -> Bool
+
+pub fn batch_item_is_settled(BatchItemStatus) -> Bool
+
+pub fn batch_item_workspace(String, String, String) -> String raise
+
+pub fn batch_lock_path(String, String) -> String raise
+
+pub fn batch_record_path(String, String) -> String raise
+
+pub fn batch_storage_dir(String) -> String
+
+pub fn binary_changed_path(String) -> Bool
+
+pub fn can_auto_publish(BatchRecord, BatchItem) -> Bool
+
+pub fn cancel_batch(BatchRecord, Int64) -> Unit
+
+pub async fn cancel_batch_by_id(String, String) -> BatchRecord?
+
+pub fn claim_batch_items(BatchRecord, Int64) -> Array[BatchItem]
+
+pub async fn clear_batch_control(String, String) -> Unit
+
+pub fn completed_fingerprints(Array[BatchRecord]) -> Map[String, String]
+
+pub async fn create_batch(String, String, BatchConfig, Array[@moonsage.ModuleSummary], on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+
+pub fn default_batch_config() -> BatchConfig
+
+pub fn empty_batch_control() -> BatchControl
+
+pub fn empty_validation_summary() -> ValidationSummary
+
+pub fn filter_modules(Array[@moonsage.ModuleSummary], BatchConfig) -> Array[BatchModule] raise
+
+pub fn finalize_batch_cycle(BatchRecord, Int64) -> Unit
+
+pub async fn get_batch_status(String, String) -> BatchRecord?
+
+pub async fn ignore_batch_event(BatchEvent) -> Unit
+
+pub async fn list_batches(String) -> Array[BatchRecord]
+
+pub async fn load_batch(String, String) -> BatchRecord?
+
+pub async fn load_batch_control(String, String) -> BatchControl
+
+pub async fn load_batch_events(String, String) -> Array[BatchEvent]
+
+pub fn merge_snapshot(BatchRecord, Array[BatchModule], Int64) -> Int
+
+pub fn normalize_github_repository(String) -> String?
+
+pub fn parse_github_repository(String) -> (String, String)?
+
+pub async fn pause_batch_by_id(String, String) -> BatchRecord?
+
+pub fn prepare_publish(BatchRecord, String, Int64, approved? : Bool) -> BatchPublishRequest?
+
+pub async fn publish_batch_item_by_id(String, String, String, async (BatchPublishRequest) -> BatchPublishResult, approved? : Bool, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
+
+pub fn recover_batch(BatchRecord, Int64) -> BatchRecord
+
+pub fn redact_batch_text(String, Array[String], max_chars? : Int) -> String
+
+pub async fn release_batch_lock(String, String) -> Unit
+
+pub async fn resume_batch_by_id(String, String) -> BatchRecord?
+
+pub fn retry_batch_item(BatchRecord, String, Int64, force? : Bool) -> Unit raise
+
+pub async fn retry_batch_item_by_id(String, String, String, force? : Bool) -> BatchRecord?
+
+pub async fn run_batch_by_id(String, String, async (BatchItem) -> BatchAuditResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
+
+pub async fn run_batch_once(String, BatchRecord, async (BatchItem) -> BatchAuditResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+
+pub async fn run_batch_watch(String, BatchRecord, async () -> Array[@moonsage.ModuleSummary], async (BatchItem) -> BatchAuditResult, async () -> Bool, max_cycles? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+
+pub async fn save_batch(String, BatchRecord, secrets? : Array[String]) -> Unit
+
+pub async fn save_batch_control(String, String, BatchControl) -> Unit
+
+pub fn sensitive_changed_path(String) -> Bool
+
+pub async fn start_batch(String, String, BatchConfig, Array[@moonsage.ModuleSummary], async (BatchItem) -> BatchAuditResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+
+pub fn transition_batch(BatchRecord, BatchStatus, Int64) -> Unit raise
+
+pub fn transition_batch_item(BatchItem, BatchItemStatus, Int64) -> Unit raise
+
+pub fn truncate_batch_text(String, Int) -> String
+
+pub async fn try_acquire_batch_lock(String, String, String) -> Bool
+
+pub fn validate_batch_config(BatchConfig) -> Unit raise
+
+pub fn validate_storage_id(String) -> Unit raise
+
+// Errors
+
+// Types and methods
+pub(all) struct BatchAuditResult {
+  status : BatchItemStatus
+  workspace : String
+  project_dir : String
+  source_revision : String
+  report : String
+  report_path : String
+  diff_summary : String
+  changed_files : Array[String]
+  additions : Int
+  deletions : Int
+  validation : ValidationSummary
+  evidence_conflicts : Array[String]
+  error : String
+  retryable : Bool
+} derive(Eq, @debug.Debug)
+
+pub(all) struct BatchConfig {
+  includes : Array[String]
+  owners : Array[String]
+  keywords : Array[String]
+  excludes : Array[String]
+  limit : Int
+  concurrency : Int
+  max_prs : Int
+  package_timeout_ms : Int
+  max_calls : Int
+  network_retries : Int
+  watch : Bool
+  interval_ms : Int
+  policy_hash : String
+} derive(Eq, @debug.Debug)
+pub fn BatchConfig::from_json(Json) -> Self raise
+pub fn BatchConfig::to_json(Self) -> Json
+
+pub(all) struct BatchControl {
+  pause : Bool
+  cancel : Bool
+  approved_items : Array[String]
+  updated_at_ms : Int64
+} derive(Eq, @debug.Debug)
+pub fn BatchControl::from_json(Json) -> Self raise
+pub fn BatchControl::to_json(Self) -> Json
+
+pub(all) struct BatchEvent {
+  kind : String
+  batch_id : String
+  item_key : String
+  cycle : Int
+  timestamp_ms : Int64
+  message : String
+  data : Json
+} derive(Eq, @debug.Debug)
+pub fn BatchEvent::from_json(Json) -> Self raise
+pub fn BatchEvent::new(String, String, Int64, item_key? : String, cycle? : Int, message? : String, data? : Json) -> Self
+pub fn BatchEvent::to_json(Self) -> Json
+
+pub(all) struct BatchItem {
+  key : String
+  mut module_names : Array[String]
+  mut module_version : String
+  owner : String
+  repo : String
+  repository : String
+  mut workspace : String
+  mut project_dir : String
+  mut source_revision : String
+  mut fingerprint : String
+  mut status : BatchItemStatus
+  mut attempts : Int
+  mut cycle : Int
+  mut validation : ValidationSummary
+  mut report : String
+  mut report_path : String
+  mut diff_summary : String
+  mut changed_files : Array[String]
+  mut additions : Int
+  mut deletions : Int
+  mut sensitive_changes : Bool
+  mut retryable : Bool
+  mut pr_url : String
+  mut error : String
+  created_at_ms : Int64
+  mut updated_at_ms : Int64
+} derive(Eq, @debug.Debug)
+pub fn BatchItem::from_json(Json) -> Self raise
+pub fn BatchItem::from_module(BatchModule, Int, Int64) -> Self
+pub fn BatchItem::to_json(Self) -> Json
+
+pub(all) enum BatchItemStatus {
+  Queued
+  Fetching
+  Auditing
+  Fixing
+  Verifying
+  VerifiedPendingPublish
+  Publishing
+  Created
+  NoChanges
+  Skipped
+  Failed
+  Cancelled
+} derive(Eq, @debug.Debug)
+pub fn BatchItemStatus::from_string(String) -> Self raise
+pub fn BatchItemStatus::to_string(Self) -> String
+
+pub(all) struct BatchModule {
+  key : String
+  owner : String
+  repo : String
+  repository : String
+  primary_name : String
+  module_names : Array[String]
+  version : String
+} derive(Eq, @debug.Debug)
+
+pub(all) struct BatchPublishRequest {
+  batch_id : String
+  item_key : String
+  owner : String
+  repo : String
+  source_revision : String
+  fingerprint : String
+  branch : String
+  workspace : String
+  project_dir : String
+  report : String
+  validation : ValidationSummary
+  changed_files : Array[String]
+} derive(Eq, @debug.Debug)
+pub fn BatchPublishRequest::to_json(Self) -> Json
+
+pub(all) struct BatchPublishResult {
+  created : Bool
+  pr_url : String
+  error : String
+  retryable : Bool
+} derive(Eq, @debug.Debug)
+
+pub(all) struct BatchRecord {
+  schema_version : Int
+  id : String
+  mut status : BatchStatus
+  config : BatchConfig
+  mut cycle : Int
+  items : Array[BatchItem]
+  mut pr_count : Int
+  created_at_ms : Int64
+  mut updated_at_ms : Int64
+  mut last_snapshot_at_ms : Int64
+  mut last_error : String
+} derive(Eq, @debug.Debug)
+pub fn BatchRecord::active_count(Self) -> Int
+pub fn BatchRecord::find_item(Self, String) -> BatchItem?
+pub fn BatchRecord::from_json(Json) -> Self raise
+pub fn BatchRecord::new(String, BatchConfig, Array[BatchModule], Int64) -> Self raise
+pub fn BatchRecord::queued_count(Self) -> Int
+pub fn BatchRecord::settled(Self) -> Bool
+pub fn BatchRecord::status_counts(Self) -> Map[String, Int]
+pub fn BatchRecord::to_json(Self) -> Json
+
+pub(all) enum BatchStatus {
+  Queued
+  Running
+  Paused
+  Watching
+  Completed
+  Failed
+  Cancelled
+} derive(Eq, @debug.Debug)
+pub fn BatchStatus::from_string(String) -> Self raise
+pub fn BatchStatus::to_string(Self) -> String
+
+pub(all) struct ValidationSummary {
+  check_passed : Bool
+  build_passed : Bool
+  test_passed : Bool
+  check_output : String
+  build_output : String
+  test_output : String
+} derive(Eq, @debug.Debug)
+pub fn ValidationSummary::from_json(Json) -> Self raise
+pub fn ValidationSummary::passed(Self) -> Bool
+pub fn ValidationSummary::to_json(Self) -> Json
+
+// Type aliases
+
+// Traits

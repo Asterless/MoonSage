@@ -60,6 +60,26 @@ test "local_tools exposes the five read-only tools" {
 }
 
 ///|
+test "verification commands are fixed and native-only" {
+  assert_eq(verification_args("check"), ["check", "--target", "native"])
+  assert_eq(verification_args("build"), ["build", "--target", "native"])
+  assert_eq(verification_args("test"), ["test", "--target", "native"])
+  let rejected = try {
+    ignore(verification_args("run"))
+    false
+  } catch {
+    _ => true
+  }
+  assert_true(rejected)
+}
+
+///|
+test "verification tools expose only the constrained runner" {
+  let tools = verification_tools(@editing.Workspace::new("."))
+  assert_eq(tools.map(fn(tool) { tool.schema.name }), ["run_moon"])
+}
+
+///|
 test "wildcard_match supports * and ?" {
   assert_true(wildcard_match("*.mbt", "src/main.mbt"))
   assert_true(wildcard_match("src/*.mbt", "src/main.mbt"))

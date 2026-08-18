@@ -31,9 +31,12 @@ fn parse_github_repo(url : String) -> (String, String)? {
   guard u.has_prefix(prefix) else { return None }
   let rest = u[prefix.length():].to_owned()
   let parts = rest.split("/").to_array()
-  guard parts.length() >= 2 else { return None }
+  // Mooncakes metadata is an input boundary. Accept only a canonical public
+  // GitHub repository URL, never a tree/blob URL, query, fragment, or redirect
+  // shaped path.
+  guard parts.length() == 2 else { return None }
   let owner = parts[0].to_owned()
-  let mut repo = parts[1].trim_end(chars="/").to_owned()
+  let mut repo = parts[1].to_owned()
   if repo.has_suffix(".git") {
     repo = repo[:repo.length() - 4].to_owned()
   }
@@ -41,6 +44,112 @@ fn parse_github_repo(url : String) -> (String, String)? {
     Some((owner, repo))
   } else {
     None
+  }
+}
+
+///|
+#cfg(platform="windows")
+fn audit_git_null_device() -> String {
+  "NUL"
+}
+
+///|
+#cfg(not(platform="windows"))
+fn audit_git_null_device() -> String {
+  "/dev/null"
+}
+
+///|
+fn audit_repo_environment() -> Map[String, String] {
+  let environment : Map[String, String] = {
+    "GIT_CONFIG_GLOBAL": audit_git_null_device(),
+    "GIT_LFS_SKIP_SMUDGE": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "Never",
+  }
+  // Keep only process-launch and temporary-directory state. In particular,
+  // never expose model keys, GitHub tokens, SSH agents, or credential sockets
+  // to an untrusted repository operation.
+  for name in [
+    "PATH",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+  ] {
+    match @sys.get_env_var(name) {
+      Some(value) if value != "" => environment[name] = value
+      _ => ()
+    }
+  }
+  environment
+}
+
+///|
+fn secured_clone_args(
+  url : String,
+  target : String,
+  branch? : String = "",
+) -> Array[String] {
+  let hooks = audit_git_null_device()
+  let args = [
+    "-c",
+    "core.hooksPath=\{hooks}",
+    "-c",
+    "credential.helper=",
+    "-c",
+    "submodule.recurse=false",
+    "clone",
+    "--no-recurse-submodules",
+    "--no-tags",
+    "--config",
+    "core.hooksPath=\{hooks}",
+    "--config",
+    "credential.helper=",
+    "--config",
+    "submodule.recurse=false",
+  ]
+  if branch != "" {
+    args.push("--depth")
+    args.push("1")
+    args.push("--single-branch")
+    args.push("--branch")
+    args.push(branch)
+  }
+  args.push(url)
+  args.push(target)
+  args
+}
+
+///|
+fn clip_audit_repo_output(text : String) -> String {
+  if text.length() <= 8192 {
+    text
+  } else {
+    text[:8192].to_owned() + "\n... (output truncated)"
+  }
+}
+
+///|
+async fn run_audit_git(args : Array[String], timeout_ms : Int) -> (Int, String) {
+  let result = @async.with_timeout_opt(timeout_ms, async fn() {
+    let (exit, _, err) = @process.collect_output(
+      "git",
+      args,
+      extra_env=audit_repo_environment(),
+      inherit_env=false,
+      no_console_window=true,
+    )
+    (exit, clip_audit_repo_output(err.text() catch { _ => "" }))
+  })
+  match result {
+    Some(value) => value
+    None => (
+      -1,
+      "git command timed out after \{timeout_ms} ms and was terminated",
+    )
   }
 }
 
@@ -128,13 +237,11 @@ async fn fetch_repo_source(
   for branch in ["main", "master"] {
     for retry = 0; retry < 3; retry = retry + 1 {
       let clone_args = if full {
-        ["clone", url, target]
+        secured_clone_args(url, target)
       } else {
-        [
-          "clone", "--depth", "1", "--single-branch", "--branch", branch, url, target,
-        ]
+        secured_clone_args(url, target, branch~)
       }
-      let (exit, err) = @editing.run_cmd_with_timeout(clone_args, 300_000)
+      let (exit, err) = run_audit_git(clone_args, 300_000)
       if exit == 0 {
         return locate_project_root(dest_dir)
       }

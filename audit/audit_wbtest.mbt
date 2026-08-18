@@ -10,16 +10,18 @@ test "parse_github_repo extracts owner and repo" {
   )
   assert_eq(
     parse_github_repo("https://github.com/owner/repo/"),
-    Some(("owner", "repo")),
+    None,
   )
   assert_eq(
     parse_github_repo("https://github.com/owner/repo/tree/main"),
-    Some(("owner", "repo")),
+    None,
   )
   assert_eq(
     parse_github_repo("https://github.com/owner/repo.git/"),
-    Some(("owner", "repo")),
+    None,
   )
+  assert_eq(parse_github_repo("https://github.com/owner/repo?x=1"), None)
+  assert_eq(parse_github_repo("https://github.com/owner/repo#readme"), None)
   // http is rejected: only https GitHub URLs are supported
   assert_eq(parse_github_repo("http://github.com/owner/repo"), None)
   assert_eq(parse_github_repo("https://gitlab.com/owner/repo"), None)
@@ -27,6 +29,29 @@ test "parse_github_repo extracts owner and repo" {
   assert_eq(parse_github_repo("https://github.com/"), None)
   assert_eq(parse_github_repo("not a url"), None)
   assert_eq(parse_github_repo(""), None)
+}
+
+///|
+test "audit clone command disables ambient credentials hooks and submodules" {
+  let args = secured_clone_args(
+    "https://github.com/owner/repo.git",
+    "C:/tmp/repo",
+    branch="main",
+  )
+  assert_eq(args[0], "-c")
+  assert_true(args.contains("credential.helper="))
+  assert_true(args.contains("submodule.recurse=false"))
+  assert_true(args.contains("--no-recurse-submodules"))
+  assert_true(args.contains("--no-tags"))
+  assert_true(args.contains("--single-branch"))
+  assert_true(args.contains("main"))
+  let environment = audit_repo_environment()
+  assert_eq(environment["GIT_TERMINAL_PROMPT"], "0")
+  assert_eq(environment["GIT_LFS_SKIP_SMUDGE"], "1")
+  assert_true(environment.get("MOONSAGE_API_KEY") is None)
+  assert_true(environment.get("GH_TOKEN") is None)
+  assert_true(environment.get("GITHUB_TOKEN") is None)
+  assert_true(environment.get("SSH_AUTH_SOCK") is None)
 }
 
 ///|
@@ -229,6 +254,45 @@ test "audit evidence invalidates verification after a later edit" {
 }
 
 ///|
+fn test_verification(
+  check_passed : Bool,
+  build_passed : Bool,
+  test_passed : Bool,
+) -> AuditVerificationSummary {
+  {
+    check_passed,
+    build_passed,
+    test_passed,
+    check_output: "check",
+    build_output: "build",
+    test_output: "test",
+  }
+}
+
+///|
+test "publish gate requires a real diff and all three final validations" {
+  let passed = test_verification(true, true, true)
+  assert_true(passed.passed())
+  assert_eq(audit_publish_block_reason(passed, true), None)
+  assert_eq(
+    audit_publish_block_reason(passed, false),
+    Some("no changes to publish (git diff is empty)"),
+  )
+  assert_eq(
+    audit_publish_block_reason(test_verification(false, true, true), true),
+    Some("moon check --target native failed"),
+  )
+  assert_eq(
+    audit_publish_block_reason(test_verification(true, false, true), true),
+    Some("moon build --target native failed"),
+  )
+  assert_eq(
+    audit_publish_block_reason(test_verification(true, true, false), true),
+    Some("moon test --target native failed"),
+  )
+}
+
+///|
 test "parse_audit_options defaults and flags" {
   let defaults = parse_audit_options(["owner/mod"]) catch {
     _ => audit_default_options()
@@ -366,4 +430,97 @@ test "fix phase prompt prefers local edits and analysis stays read-only" {
   assert_true(audit_analysis_question().contains("分析结果"))
   assert_true(audit_fix_question("某个根因").contains("某个根因"))
   assert_true(audit_fix_question("某个根因").contains("分析结果"))
+}
+
+///|
+test "structured audit publish gate requires evidence diff and all validations" {
+  let result : StructuredAuditResult = {
+    status: Completed,
+    project_dir: "C:/project",
+    report: "fixed",
+    analysis: "issue",
+    diff: "diff --git a/a.mbt b/a.mbt",
+    evidence: {
+      tools: [],
+      verification_ran: true,
+      verified: true,
+      conflicts: [],
+    },
+    validation: {
+      check_passed: true,
+      build_passed: true,
+      test_passed: true,
+      check_output: "ok",
+      build_output: "ok",
+      test_output: "ok",
+    },
+    error: "",
+  }
+  assert_true(result.publishable())
+  let failed = {
+    ..result,
+    validation: {
+      ..result.validation,
+      test_passed: false,
+    },
+  }
+  assert_true(!failed.publishable())
+}
+
+///|
+test "controller verification invalidates evidence when the final diff changes" {
+  let evidence : AuditEvidence = {
+    tools: [],
+    verification_ran: true,
+    verified: true,
+    conflicts: [],
+  }
+  let unchanged = finalize_controller_evidence(
+    evidence,
+    "diff --git a/a.mbt b/a.mbt\n+before\n",
+    "diff --git a/a.mbt b/a.mbt\n+before\n",
+  )
+  assert_true(unchanged.verified)
+  assert_true(unchanged.conflicts.is_empty())
+  let changed = finalize_controller_evidence(
+    evidence,
+    "diff --git a/a.mbt b/a.mbt\n+before\n",
+    "diff --git a/a.mbt b/a.mbt\n+after\n",
+  )
+  assert_true(!changed.verified)
+  assert_true(changed.conflicts.length() == 1)
+  assert_true(changed.conflicts[0].contains("changed during"))
+  let unreadable = finalize_controller_evidence(
+    evidence,
+    "diff --git a/a.mbt b/a.mbt\n+before\n",
+    "(git diff failed)",
+  )
+  assert_true(!unreadable.verified)
+  assert_true(unreadable.conflicts[0].contains("could not read"))
+}
+
+///|
+async test "structured audit rejects missing credentials before external work" {
+  let result = run_structured_audit_project(
+    "",
+    "https://example.invalid",
+    "model",
+    "C:/not-used",
+  )
+  assert_true(result.status is Failed)
+  assert_true(result.error.contains("MOONSAGE_API_KEY"))
+}
+
+///|
+async test "structured audit rejects a non MoonBit workspace before the model" {
+  let workspace = @fs.tmpdir(prefix="moonsage-structured-audit-test-")
+  let result = run_structured_audit_project(
+    "test-key",
+    "https://example.invalid",
+    "model",
+    workspace,
+  )
+  assert_true(result.status is Failed)
+  assert_true(result.error.contains("moon.mod"))
+  @fs.rmdir(workspace, recursive=true)
 }

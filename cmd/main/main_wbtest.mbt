@@ -126,6 +126,93 @@ test "audit args reconstruct raw arguments" {
 }
 
 ///|
+test "mode 1 is normalized to the batch-audit parser path" {
+  assert_eq(
+    normalize_mode_one_args([
+      "moonsage", "mode", "1", "start", "--watch", "--include", "acme/*",
+    ]),
+    [
+      "moonsage", "batch-audit", "start", "--watch", "--include", "acme/*",
+    ],
+  )
+  assert_eq(
+    normalize_mode_one_args(["moonsage", "mode", "2"]),
+    ["moonsage", "mode", "2"],
+  )
+}
+
+///|
+test "batch-audit parser accepts start and control operations" {
+  let start = root_command().parse(argv=[
+    "batch-audit", "start", "--watch", "--include", "acme/*", "--include",
+    "moonbitlang/*", "--concurrency", "4", "--max-prs", "10",
+  ])
+  guard start.subcommand is Some(("batch-audit", matches)) else {
+    fail("batch-audit subcommand was not selected")
+  }
+  assert_eq(values_of(matches, "operation"), ["start"])
+  assert_eq(values_of(matches, "include"), ["acme/*", "moonbitlang/*"])
+  assert_true(flag_of(matches, "watch"))
+  assert_eq(values_of(matches, "concurrency"), ["4"])
+
+  let retry = root_command().parse(argv=[
+    "batch-audit", "retry", "batch-1234", "--item", "acme--parser",
+  ])
+  guard retry.subcommand is Some(("batch-audit", control)) else {
+    fail("batch-audit control command was not selected")
+  }
+  assert_eq(values_of(control, "operation"), ["retry"])
+  assert_eq(values_of(control, "batch"), ["batch-1234"])
+  assert_eq(values_of(control, "item"), ["acme--parser"])
+}
+
+///|
+test "batch-audit parses bounded integers and durations" {
+  assert_eq(parse_batch_integer("4", "concurrency", 1, 4), 4)
+  assert_eq(parse_batch_duration("20m", "timeout", 1000, 86400000), 1200000)
+  assert_eq(
+    parse_batch_duration("6h", "interval", 1000, 2_000_000_000),
+    21600000,
+  )
+  try parse_batch_integer("5", "concurrency", 1, 4) catch {
+    error => assert_true(error.to_string().contains("between 1 and 4"))
+  } noraise {
+    _ => fail("out-of-range concurrency must be rejected")
+  }
+  try parse_batch_duration(
+    "forever",
+    "interval",
+    1000,
+    2_000_000_000,
+  ) catch {
+    error => assert_true(error.to_string().contains("must use"))
+  } noraise {
+    _ => fail("invalid duration must be rejected")
+  }
+}
+
+///|
+test "batch-audit config uses mode 1 defaults and repeated filters" {
+  let parsed = root_command().parse(argv=[
+    "batch-audit", "start", "--include", "acme/*", "--owner", "acme",
+    "--keyword", "parser", "--exclude", "*/old", "--concurrency", "3",
+    "--package-timeout", "15m",
+  ])
+  guard parsed.subcommand is Some(("batch-audit", matches)) else {
+    fail("batch-audit subcommand was not selected")
+  }
+  let config = batch_config_from_matches(matches)
+  assert_eq(config.includes, ["acme/*"])
+  assert_eq(config.owners, ["acme"])
+  assert_eq(config.keywords, ["parser"])
+  assert_eq(config.excludes, ["*/old"])
+  assert_eq(config.concurrency, 3)
+  assert_eq(config.package_timeout_ms, 900000)
+  assert_eq(config.max_prs, 10)
+  assert_eq(config.max_calls, 80)
+}
+
+///|
 test "cli accepts --version flag" {
   let root = root_command()
   let parsed = root.parse(argv=["--version"], env=Map([]))

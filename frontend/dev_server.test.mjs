@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 
-import { buildAgentPrompt, eventForAgentOutput, isTrustedRequest, killProcessTree, metaForConversation, normalizeLineEndings, parseAgentEvents, parseGitStatus, requireJsonContentType, resolveRequestPath, resolveWorkspacePath, serve, verifiedWorkspacePath, workspaceRelativePath } from "./dev_server.mjs";
+import { applyBatchEvent, buildAgentPrompt, eventForAgentOutput, eventForBatchOutput, isTrustedRequest, killProcessTree, metaForConversation, normalizeBatchConfig, normalizeLineEndings, parseAgentEvents, parseGitStatus, requireJsonContentType, resolveRequestPath, resolveWorkspacePath, runBatchWorker, serve, verifiedWorkspacePath, workspaceRelativePath } from "./dev_server.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +23,38 @@ try {
 async function closeServer(server) {
   server.closeAllConnections();
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+async function waitForBatch(base, id, predicate, timeout = 3000) {
+  const deadline = Date.now() + timeout;
+  let batch = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${base}/api/batches/${id}`);
+    if (response.ok) {
+      batch = (await response.json()).batch;
+      if (predicate(batch)) return batch;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`batch ${id} did not reach the expected state: ${JSON.stringify(batch)}`);
+}
+
+async function persistFakeBatchEvent(batch, context, emit, event) {
+  const canonical = event.kind ? event : {
+    kind: event.type,
+    batch_id: batch.id,
+    item_key: event.item_id || event.item_key || event.item?.id || event.item?.key || "",
+    cycle: Number.isInteger(event.cycle) ? event.cycle : batch.cycle,
+    timestamp_ms: Date.now(),
+    message: event.message || "",
+    data: Object.fromEntries(Object.entries(event).filter(([key]) => ![
+      "type", "item_id", "item_key", "cycle", "message",
+    ].includes(key))),
+  };
+  applyBatchEvent(batch, canonical);
+  await writeFile(context.paths.meta, JSON.stringify(batch, null, 2) + "\n", "utf8");
+  await appendFile(context.paths.events, JSON.stringify(canonical) + "\n", "utf8");
+  emit(canonical);
 }
 
 test("resolves files inside the workspace", () => {
@@ -688,6 +722,448 @@ test("aborts the agent run when the client disconnects", async () => {
   } finally {
     server.closeAllConnections();
     await closeServer(server);
+  }
+});
+
+test("normalizes batch settings and applies canonical item events", () => {
+  assert.deepEqual(normalizeBatchConfig({
+    watch: true,
+    interval: "2h",
+    limit: 25,
+    include: ["moonbitlang/*", "moonbitlang/*"],
+    owner: "moonbitlang",
+    keyword: ["parser"],
+    exclude: "*/deprecated",
+    concurrency: 4,
+    max_prs: 7,
+    package_timeout: "30m",
+    max_calls: 120,
+  }), {
+    watch: true,
+    interval_ms: 7_200_000,
+    limit: 25,
+    includes: ["moonbitlang/*"],
+    owners: ["moonbitlang"],
+    keywords: ["parser"],
+    excludes: ["*/deprecated"],
+    concurrency: 4,
+    max_prs: 7,
+    package_timeout_ms: 1_800_000,
+    max_calls: 120,
+    network_retries: 3,
+    policy_hash: "mode1-v1",
+  });
+  assert.throws(() => normalizeBatchConfig({ concurrency: 5 }), /between 1 and 4/);
+  assert.equal(eventForBatchOutput("not json"), null);
+  const batch = { config: { watch: false }, status: "running", items: [] };
+  applyBatchEvent(batch, {
+    type: "item_enqueued",
+    item: { id: "moonbitlang-parser", repository: "moonbitlang/parser", modules: ["moonbitlang/parser"] },
+  });
+  applyBatchEvent(batch, {
+    type: "item_state",
+    item_id: "moonbitlang-parser",
+    state: "verified_pending_publish",
+  });
+  applyBatchEvent(batch, {
+    type: "publish",
+    item_id: "moonbitlang-parser",
+    url: "https://github.com/moonbitlang/parser/pull/1",
+  });
+  assert.equal(batch.items[0].status, "created");
+  assert.equal(batch.counts.created, 1);
+});
+
+test("batch worker uses the internal batch-audit command and forwards JSONL", async () => {
+  let invocation = null;
+  const events = [];
+  const result = await runBatchWorker(
+    { id: "batch-command-1234" },
+    (event) => events.push(event),
+    new AbortController().signal,
+    {
+      dataDirectory: join(tmpdir(), "moonsage-command-data"),
+      workerSpawner: (executable, args, options) => {
+        invocation = { executable, args, options };
+        const child = new EventEmitter();
+        child.pid = undefined;
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        queueMicrotask(() => {
+          child.stdout.write(JSON.stringify({
+            kind: "batch_state",
+            batch_id: "batch-command-1234",
+            item_key: "",
+            cycle: 1,
+            timestamp_ms: 1,
+            message: "",
+            data: { status: "running" },
+          }) + "\n");
+          child.stdout.end();
+          child.emit("close", 0, null);
+        });
+        return child;
+      },
+    },
+  );
+  assert.deepEqual(invocation.args.slice(-5), [
+    "batch-audit", "--worker", "--batch-id", "batch-command-1234", "--stream-json",
+  ]);
+  assert.equal(invocation.options.env.MOONSAGE_DATA_DIR, join(tmpdir(), "moonsage-command-data"));
+  assert.equal(result.code, 0);
+  assert.equal(events[0].kind, "batch_state");
+});
+
+test("batch API persists worker events, serves SSE, and redacts secrets", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-store-"));
+  const seen = [];
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async (batch, emit, _signal, context) => {
+      seen.push({ id: batch.id, dataDirectory: context.dataDirectory });
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_created" });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "snapshot_fetched",
+        cycle: 1,
+        items: [{ id: "moonbitlang-json", repository: "moonbitlang/json", modules: ["moonbitlang/json"] }],
+      });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "item_state", item_id: "moonbitlang-json", state: "verifying", attempts: 1,
+      });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "validation", item_id: "moonbitlang-json", result: { check: true, build: true, test: true },
+      });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "log", message: "Authorization: Bearer [redacted]",
+      });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "publish",
+        item_id: "moonbitlang-json",
+        status: "created",
+        pr_url: "https://github.com/moonbitlang/json/pull/7",
+      });
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "completed" });
+      return { code: 0 };
+    },
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const rejected = await fetch(base + "/api/batches", { method: "POST", body: "{}" });
+    assert.equal(rejected.status, 415);
+    const createdResponse = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: 3, concurrency: 2, include: ["moonbitlang/*"] }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = (await createdResponse.json()).batch;
+    assert.equal(created.status, "queued");
+    assert.equal(created.config.limit, 3);
+
+    const run = await fetch(`${base}/api/batches/${created.id}/run`, { method: "POST" });
+    assert.equal(run.status, 202);
+    const completed = await waitForBatch(base, created.id, (batch) => batch.status === "completed");
+    assert.equal(completed.items[0].status, "created");
+    assert.equal(completed.items[0].validation.check, true);
+    assert.equal(completed.items[0].pr_url, "https://github.com/moonbitlang/json/pull/7");
+    assert.deepEqual(seen, [{ id: created.id, dataDirectory: dataRoot }]);
+
+    const listed = await (await fetch(base + "/api/batches")).json();
+    assert.equal(listed.batches[0].id, created.id);
+    const persisted = await readFile(join(dataRoot, "batches", `${created.id}.json`), "utf8");
+    const record = JSON.parse(persisted);
+    assert.equal(record.schema_version, 1);
+    assert.deepEqual(record.config.includes, ["moonbitlang/*"]);
+    assert.equal(record.config.policy_hash, "mode1-v1");
+    assert.doesNotMatch(persisted, /ghp-abcdefghijklmnop/);
+    const eventLog = await readFile(join(dataRoot, "batches", `${created.id}.jsonl`), "utf8");
+    assert.match(eventLog, /\[redacted\]/);
+    assert.match(eventLog, /"kind":"batch_created"/);
+    assert.match(eventLog, /"kind":"publish"/);
+    assert.equal(eventLog.match(/"kind":"publish"/g)?.length, 1);
+    assert.equal(eventLog.trim().split(/\r?\n/).length, 7, "server must not duplicate worker-owned events");
+
+    const stream = await fetch(`${base}/api/batches/${created.id}/events`);
+    assert.equal(stream.status, 200);
+    assert.match(stream.headers.get("content-type"), /^text\/event-stream/);
+    const reader = stream.body.getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    assert.match(first, /data: \{"kind":"batch_created"/);
+    await reader.cancel();
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("batch controls pause, resume, and cancel an injected worker", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-control-"));
+  let workerStarted = false;
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async (batch, emit, signal, context) => {
+      workerStarted = true;
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "running" });
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+      return { aborted: true };
+    },
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const response = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const batch = (await response.json()).batch;
+    await fetch(`${base}/api/batches/${batch.id}/run`, { method: "POST" });
+    assert.equal(workerStarted, true);
+    await waitForBatch(base, batch.id, (current) => current.status === "running");
+    const paused = await fetch(`${base}/api/batches/${batch.id}/pause`, { method: "POST" });
+    assert.equal(paused.status, 200);
+    assert.equal((await paused.json()).batch.status, "running");
+    assert.equal(JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.control.json`), "utf8")).pause, true);
+    assert.equal(JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.json`), "utf8")).status, "running");
+
+    const resumed = await fetch(`${base}/api/batches/${batch.id}/resume`, { method: "POST" });
+    assert.equal(resumed.status, 200);
+    assert.equal((await resumed.json()).batch.status, "running");
+    assert.equal(JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.control.json`), "utf8")).pause, false);
+    const cancelled = await fetch(`${base}/api/batches/${batch.id}/cancel`, { method: "POST" });
+    assert.equal(cancelled.status, 200);
+    assert.equal((await cancelled.json()).batch.status, "running");
+    assert.equal(JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.control.json`), "utf8")).cancel, true);
+    assert.equal(JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.json`), "utf8")).status, "running");
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("batch retry and approval leave worker-owned record states untouched", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-control-contract-"));
+  let workerRuns = 0;
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async () => {
+      workerRuns += 1;
+      return { code: 0 };
+    },
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const created = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const id = (await created.json()).batch.id;
+    const recordPath = join(dataRoot, "batches", `${id}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    record.status = "completed";
+    record.items = [
+      {
+        key: "retry-contract",
+        repository: "moonbitlang/retry-contract",
+        module_names: ["moonbitlang/retry-contract"],
+        status: "failed",
+        attempts: 1,
+        error: "network",
+        validation: {},
+      },
+      {
+        key: "approve-contract",
+        repository: "moonbitlang/approve-contract",
+        module_names: ["moonbitlang/approve-contract"],
+        status: "verified_pending_publish",
+        attempts: 1,
+        error: "",
+        validation: {},
+      },
+    ];
+    const persistedBefore = JSON.stringify(record, null, 2) + "\n";
+    await writeFile(recordPath, persistedBefore, "utf8");
+
+    const retried = await fetch(`${base}/api/batches/${id}/items/retry-contract/retry`, { method: "POST" });
+    assert.equal(retried.status, 202);
+    const retryBody = (await retried.json()).batch;
+    assert.equal(retryBody.status, "completed");
+    assert.equal(retryBody.items.find((item) => item.key === "retry-contract").status, "failed");
+    assert.equal(await readFile(recordPath, "utf8"), persistedBefore);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${id}.control.json`), "utf8")).retry_items,
+      ["retry-contract"],
+    );
+
+    const deadline = Date.now() + 1000;
+    while (workerRuns < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const approved = await fetch(`${base}/api/batches/${id}/items/approve-contract/approve`, { method: "POST" });
+    assert.equal(approved.status, 202);
+    const approveBody = (await approved.json()).batch;
+    assert.equal(approveBody.status, "completed");
+    assert.equal(
+      approveBody.items.find((item) => item.key === "approve-contract").status,
+      "verified_pending_publish",
+    );
+    assert.equal(await readFile(recordPath, "utf8"), persistedBefore);
+    const control = JSON.parse(await readFile(join(dataRoot, "batches", `${id}.control.json`), "utf8"));
+    assert.deepEqual(control.retry_items, ["retry-contract"]);
+    assert.deepEqual(control.approved_items, ["approve-contract"]);
+    assert.equal(workerRuns, 2);
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("batch item retry and approval restart terminal work without duplicating items", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-items-"));
+  let runCount = 0;
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async (batch, emit, _signal, context) => {
+      runCount += 1;
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "running" });
+      if (runCount === 1) {
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "item_enqueued",
+          item: { id: "retry-item", repository: "moonbitlang/retry", status: "failed" },
+        });
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "item_state", item_id: "retry-item", state: "failed", message: "network",
+        });
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "item_enqueued",
+          item: { id: "approval-item", repository: "moonbitlang/approval", status: "verified_pending_publish" },
+        });
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "item_state", item_id: "approval-item", state: "verified_pending_publish",
+        });
+      } else if (runCount === 2) {
+        const control = JSON.parse(await readFile(context.paths.control, "utf8"));
+        assert.deepEqual(control.retry_items, ["retry-item"]);
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "item_state", item_id: "retry-item", state: "no_changes", attempts: 1,
+        });
+      } else {
+        const control = JSON.parse(await readFile(context.paths.control, "utf8"));
+        assert.deepEqual(control.approved_items, ["approval-item"]);
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "publish",
+          item_id: "approval-item",
+          status: "created",
+          pr_url: "https://github.com/moonbitlang/approval/pull/2",
+        });
+      }
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "completed" });
+      return { code: 0 };
+    },
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const created = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const id = (await created.json()).batch.id;
+    await fetch(`${base}/api/batches/${id}/run`, { method: "POST" });
+    await waitForBatch(base, id, (batch) => batch.status === "completed" && batch.items.length === 2);
+
+    const retried = await fetch(`${base}/api/batches/${id}/items/retry-item/retry`, { method: "POST" });
+    assert.equal(retried.status, 202);
+    const afterRetry = await waitForBatch(base, id, (batch) => (
+      batch.status === "completed" && batch.items.find((item) => item.id === "retry-item")?.status === "no_changes"
+    ));
+    assert.equal(afterRetry.items.find((item) => item.id === "retry-item").attempts, 1);
+
+    const approved = await fetch(`${base}/api/batches/${id}/items/approval-item/approve`, { method: "POST" });
+    assert.equal(approved.status, 202);
+    const afterApproval = await waitForBatch(base, id, (batch) => (
+      batch.status === "completed" && batch.items.find((item) => item.id === "approval-item")?.status === "created"
+    ));
+    assert.equal(afterApproval.items.length, 2);
+    assert.equal(runCount, 3);
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("batch recovery requeues in-progress items and restarts the worker", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-recovery-"));
+  const first = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async (batch, emit, signal, context) => {
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "running" });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "item_enqueued",
+        item: { id: "moonbitlang-recover", repository: "moonbitlang/recover", status: "auditing" },
+      });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "item_state", item_id: "moonbitlang-recover", state: "auditing",
+      });
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+      return { aborted: true };
+    },
+  });
+  await new Promise((resolve) => first.once("listening", resolve));
+  const firstBase = `http://127.0.0.1:${first.address().port}`;
+  const created = await fetch(firstBase + "/api/batches", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const id = (await created.json()).batch.id;
+  await fetch(`${firstBase}/api/batches/${id}/run`, { method: "POST" });
+  await waitForBatch(firstBase, id, (batch) => batch.items[0]?.status === "auditing");
+  await closeServer(first);
+  await writeFile(join(dataRoot, "batches", `${id}.lock`), "interrupted-worker\n", "utf8");
+
+  let recoveredStatus = "";
+  const second = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async (batch, emit, _signal, context) => {
+      recoveredStatus = batch.items[0]?.status || "";
+      // The real MoonBit worker calls recover_batch before executing queued work.
+      batch.items[0].status = "queued";
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "batch_state", state: "running", recovered: true,
+      });
+      await persistFakeBatchEvent(batch, context, emit, {
+        type: "item_state", item_id: "moonbitlang-recover", state: "no_changes",
+      });
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "completed" });
+      return { code: 0 };
+    },
+  });
+  await new Promise((resolve) => second.once("listening", resolve));
+  const secondBase = `http://127.0.0.1:${second.address().port}`;
+  try {
+    const completed = await waitForBatch(secondBase, id, (batch) => batch.status === "completed");
+    assert.equal(recoveredStatus, "auditing");
+    assert.equal(completed.items[0].status, "no_changes");
+    await assert.rejects(readFile(join(dataRoot, "batches", `${id}.lock`), "utf8"), /ENOENT/);
+    const events = await readFile(join(dataRoot, "batches", `${id}.jsonl`), "utf8");
+    assert.match(events, /"recovered":true/);
+  } finally {
+    await closeServer(second);
+    await rm(dataRoot, { recursive: true, force: true });
   }
 });
 

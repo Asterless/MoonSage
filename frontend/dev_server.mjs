@@ -57,8 +57,10 @@ const dataRoot = normalize(
 let activeDataRoot = dataRoot;
 function workspaceRegistryPath() { return join(activeDataRoot, "workspaces.json"); }
 function taskStorePath() { return join(activeDataRoot, "tasks"); }
+function batchStorePath(dataDirectory = activeDataRoot) { return join(dataDirectory, "batches"); }
 const workspaceIdPattern = /^[a-z0-9-]{8,80}$/;
 const taskIdPattern = /^[a-z0-9-]{8,80}$/;
+const batchIdPattern = /^[a-z0-9-]{8,100}$/;
 const runningWriteTasks = new Map();
 
 function isIgnoredWorkspaceDirectory(name) {
@@ -263,6 +265,250 @@ async function readTaskEvents(id) {
   try {
     const source = await readFile(taskPaths(id).events, "utf8");
     return source.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function batchPaths(id, dataDirectory = activeDataRoot) {
+  const directory = batchStorePath(dataDirectory);
+  return {
+    directory,
+    meta: join(directory, `${id}.json`),
+    events: join(directory, `${id}.jsonl`),
+    control: join(directory, `${id}.control.json`),
+    lock: join(directory, `${id}.lock`),
+  };
+}
+
+function batchError(message, status = 400) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function requireBatchId(id) {
+  if (typeof id !== "string" || !batchIdPattern.test(id)) {
+    throw batchError("Invalid batch id.");
+  }
+  return id;
+}
+
+function stringList(value, name) {
+  if (value === undefined || value === null || value === "") return [];
+  const values = Array.isArray(value) ? value : [value];
+  if (values.length > 100 || values.some((entry) => typeof entry !== "string")) {
+    throw batchError(`${name} must be a string or an array of strings.`);
+  }
+  const normalized = values.map((entry) => entry.trim()).filter(Boolean);
+  if (normalized.some((entry) => entry.length > 200 || /[\0\r\n]/.test(entry))) {
+    throw batchError(`${name} contains an invalid value.`);
+  }
+  return [...new Set(normalized)];
+}
+
+function boundedInteger(value, fallback, minimum, maximum, name) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < minimum || number > maximum) {
+    throw batchError(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  }
+  return number;
+}
+
+function durationMilliseconds(value, fallback, minimum, maximum, name) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < minimum || value > maximum) {
+      throw batchError(`${name} is outside the supported range.`);
+    }
+    return Math.round(value);
+  }
+  if (typeof value !== "string") throw batchError(`${name} must be a duration.`);
+  const match = value.trim().toLowerCase().match(/^(\d+)(ms|s|m|h|d)$/);
+  if (!match) throw batchError(`${name} must use ms, s, m, h, or d.`);
+  const units = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+  const milliseconds = Number(match[1]) * units[match[2]];
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < minimum || milliseconds > maximum) {
+    throw batchError(`${name} is outside the supported range.`);
+  }
+  return milliseconds;
+}
+
+/** Validate and normalize the Web/CLI batch configuration persisted for the worker. */
+export function normalizeBatchConfig(document = {}) {
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    throw batchError("Batch configuration must be an object.");
+  }
+  const source = document.config && typeof document.config === "object"
+    ? { ...document, ...document.config }
+    : document;
+  const watch = source.watch === true || source.mode === "watch" || source.mode === "watching";
+  return {
+    watch,
+    interval_ms: durationMilliseconds(
+      source.interval_ms ?? source.interval,
+      6 * 3_600_000,
+      1000,
+      30 * 86_400_000,
+      "interval",
+    ),
+    limit: boundedInteger(source.limit, 0, 0, 1_000_000, "limit"),
+    includes: stringList(source.includes ?? source.include, "include"),
+    owners: stringList(source.owners ?? source.owner, "owner"),
+    keywords: stringList(source.keywords ?? source.keyword, "keyword"),
+    excludes: stringList(source.excludes ?? source.exclude, "exclude"),
+    concurrency: boundedInteger(source.concurrency, 2, 1, 4, "concurrency"),
+    max_prs: boundedInteger(source.max_prs ?? source.maxPrs, 10, 0, 1000, "max_prs"),
+    package_timeout_ms: durationMilliseconds(
+      source.package_timeout_ms ?? source.package_timeout ?? source.packageTimeout,
+      20 * 60_000,
+      1000,
+      24 * 3_600_000,
+      "package_timeout",
+    ),
+    max_calls: boundedInteger(source.max_calls ?? source.maxCalls, 80, 1, 10_000, "max_calls"),
+    network_retries: boundedInteger(source.network_retries ?? source.networkRetries, 3, 0, 10, "network_retries"),
+    policy_hash: typeof source.policy_hash === "string" && source.policy_hash.trim()
+      ? source.policy_hash.trim().slice(0, 200)
+      : "mode1-v1",
+  };
+}
+
+function batchCounters(items) {
+  const counters = {
+    total: items.length,
+    queued: 0,
+    running: 0,
+    created: 0,
+    no_changes: 0,
+    skipped: 0,
+    failed: 0,
+    cancelled: 0,
+    verified_pending_publish: 0,
+  };
+  const active = new Set(["fetching", "auditing", "fixing", "verifying", "publishing"]);
+  for (const item of items) {
+    const status = String(item?.status || "queued");
+    if (active.has(status)) counters.running += 1;
+    else if (Object.hasOwn(counters, status)) counters[status] += 1;
+  }
+  return counters;
+}
+
+function publicBatch(batch) {
+  const counts = {};
+  for (const item of batch.items) {
+    const status = String(item?.status || "queued");
+    counts[status] = (counts[status] || 0) + 1;
+  }
+  const completed = ["created", "no_changes", "skipped", "failed", "cancelled"]
+    .reduce((total, status) => total + (counts[status] || 0), 0);
+  const createdAt = Number.isSafeInteger(batch.created_at_ms) && batch.created_at_ms > 0
+    ? new Date(batch.created_at_ms).toISOString()
+    : "";
+  return {
+    ...batch,
+    mode: "batch-audit",
+    total: batch.items.length,
+    completed,
+    failed: counts.failed || 0,
+    created_prs: Number.isInteger(batch.pr_count)
+      ? batch.pr_count
+      : counts.created || 0,
+    created_at: createdAt,
+    counts,
+    items: batch.items.map((item) => {
+      const validation = item.validation && typeof item.validation === "object" ? item.validation : {};
+      const validationSummary = [
+        validation.check_passed ? "check passed" : "check failed",
+        validation.build_passed ? "build passed" : "build failed",
+        validation.test_passed ? "test passed" : "test failed",
+      ].join(" · ");
+      return {
+        ...item,
+        id: item.key,
+        module: Array.isArray(item.module_names) ? item.module_names[0] || "" : "",
+        validation_summary: validationSummary,
+      };
+    }),
+  };
+}
+
+function redactBatchValue(value, key = "", depth = 0) {
+  if (depth > 12) return "[truncated]";
+  if (typeof value === "string") {
+    if (/(token|secret|password|credential|api[_-]?key|authorization)/i.test(key)) return "[redacted]";
+    const redacted = value
+      .replace(/\b(?:ghp_[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,})\b/g, "[redacted]")
+      .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]{12,}/gi, "$1[redacted]");
+    return redacted.length > 65_536 ? `${redacted.slice(0, 65_536)}\n[truncated]` : redacted;
+  }
+  if (Array.isArray(value)) return value.slice(0, 5000).map((entry) => redactBatchValue(entry, key, depth + 1));
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [childKey, childValue] of Object.entries(value).slice(0, 5000)) {
+      result[childKey] = redactBatchValue(childValue, childKey, depth + 1);
+    }
+    return result;
+  }
+  return value;
+}
+
+export async function readBatch(id, dataDirectory = activeDataRoot) {
+  requireBatchId(id);
+  try {
+    const batch = JSON.parse(await readFile(batchPaths(id, dataDirectory).meta, "utf8"));
+    if (!batch || batch.id !== id || !Array.isArray(batch.items)) {
+      throw batchError("Batch metadata is invalid.");
+    }
+    return batch;
+  } catch (error) {
+    if (error.code === "ENOENT") throw batchError("Batch is not found.", 404);
+    if (error instanceof SyntaxError) throw batchError("Batch metadata is invalid.");
+    throw error;
+  }
+}
+
+async function writeBatch(batch, dataDirectory = activeDataRoot) {
+  const paths = batchPaths(requireBatchId(batch.id), dataDirectory);
+  await mkdir(paths.directory, { recursive: true });
+  const target = paths.meta;
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  const contents = JSON.stringify(redactBatchValue(batch), null, 2) + "\n";
+  await writeFile(temporary, contents, "utf8");
+  try {
+    let replaced = false;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await rename(temporary, target);
+        replaced = true;
+        break;
+      } catch (error) {
+        if (!['EACCES', 'EPERM'].includes(error.code) || process.platform !== "win32") throw error;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 5 * (attempt + 1)));
+      }
+    }
+    // Windows scanners can briefly hold the destination open. Each new batch
+    // has a unique id, so a direct fallback avoids failing batch creation.
+    if (!replaced) await writeFile(target, contents, "utf8");
+  } finally {
+    try { await rm(temporary, { force: true }); } catch { /* rename removed it */ }
+  }
+  return batch;
+}
+
+export async function readBatchEvents(id, dataDirectory = activeDataRoot) {
+  requireBatchId(id);
+  try {
+    const source = await readFile(batchPaths(id, dataDirectory).events, "utf8");
+    const events = [];
+    for (const line of source.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try { events.push(JSON.parse(line)); } catch { /* ignore a partial final line */ }
+    }
+    return events;
   } catch (error) {
     if (error.code === "ENOENT") return [];
     throw error;
@@ -1209,13 +1455,679 @@ async function serveTasks(request, response, pathname, agentRunner) {
   }
 }
 
+const batchStates = new Set([
+  "queued",
+  "running",
+  "paused",
+  "watching",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+const batchItemStates = new Set([
+  "queued",
+  "fetching",
+  "auditing",
+  "fixing",
+  "verifying",
+  "verified_pending_publish",
+  "publishing",
+  "created",
+  "no_changes",
+  "skipped",
+  "failed",
+  "cancelled",
+]);
+const terminalBatchStates = new Set(["completed", "failed", "cancelled"]);
+
+function batchItemKey(event) {
+  if (!event || typeof event !== "object") return "";
+  const item = event.item && typeof event.item === "object" ? event.item : null;
+  const value = event.item_id ?? event.item_key ?? item?.id ?? item?.key ?? item?.repository;
+  return typeof value === "string" && value.length <= 300 && !/[\0\r\n]/.test(value) ? value : "";
+}
+
+function findBatchItem(batch, key) {
+  return batch.items.find((item) => (
+    item.id === key || item.key === key || item.repository === key
+  ));
+}
+
+function ensureBatchItem(batch, event) {
+  const key = batchItemKey(event);
+  if (!key) return null;
+  let item = findBatchItem(batch, key);
+  if (!item) {
+    const source = event.item && typeof event.item === "object" ? event.item : event;
+    item = {
+      key: String(source.key || source.id || key),
+      id: String(source.id || source.key || key),
+      owner: typeof source.owner === "string" ? source.owner : "",
+      repo: typeof source.repo === "string" ? source.repo : "",
+      repository: typeof source.repository === "string" ? source.repository : "",
+      module_names: Array.isArray(source.module_names)
+        ? source.module_names.filter((entry) => typeof entry === "string").slice(0, 1000)
+        : Array.isArray(source.modules)
+          ? source.modules.filter((entry) => typeof entry === "string").slice(0, 1000)
+          : typeof source.module === "string" ? [source.module] : [],
+      module_version: typeof source.module_version === "string" ? source.module_version : "",
+      source_revision: typeof source.source_revision === "string" ? source.source_revision : "",
+      fingerprint: typeof source.fingerprint === "string" ? source.fingerprint : "",
+      status: batchItemStates.has(source.status) ? source.status : "queued",
+      attempts: Number.isInteger(source.attempts) && source.attempts >= 0 ? source.attempts : 0,
+      cycle: Number.isInteger(source.cycle) && source.cycle >= 0 ? source.cycle : batch.cycle || 1,
+      validation: source.validation && typeof source.validation === "object"
+        ? source.validation
+        : {
+            check_passed: false,
+            build_passed: false,
+            test_passed: false,
+            check_output: "",
+            build_output: "",
+            test_output: "",
+          },
+      report: typeof source.report === "string" ? source.report : "",
+      report_path: typeof source.report_path === "string" ? source.report_path : "",
+      diff_summary: typeof source.diff_summary === "string" ? source.diff_summary : "",
+      changed_files: Array.isArray(source.changed_files) ? source.changed_files.slice(0, 5000) : [],
+      additions: Number.isInteger(source.additions) ? source.additions : 0,
+      deletions: Number.isInteger(source.deletions) ? source.deletions : 0,
+      sensitive_changes: source.sensitive_changes === true,
+      retryable: source.retryable === true,
+      pr_url: typeof source.pr_url === "string" ? source.pr_url : "",
+      error: typeof source.error === "string" ? source.error : "",
+      created_at_ms: Number.isSafeInteger(source.created_at_ms) ? source.created_at_ms : Date.now(),
+      updated_at_ms: Number.isSafeInteger(source.updated_at_ms) ? source.updated_at_ms : Date.now(),
+    };
+    batch.items.push(item);
+  }
+  return item;
+}
+
+/** Apply a canonical worker event to the persisted batch summary. */
+export function applyBatchEvent(batch, rawEvent) {
+  const sourceEvent = redactBatchValue(rawEvent);
+  const event = sourceEvent.kind
+    ? {
+        ...(sourceEvent.data && typeof sourceEvent.data === "object" ? sourceEvent.data : {}),
+        type: sourceEvent.kind,
+        item_id: sourceEvent.item_key,
+        cycle: sourceEvent.cycle,
+        message: sourceEvent.message,
+        timestamp_ms: sourceEvent.timestamp_ms,
+      }
+    : sourceEvent;
+  if (event.type === "snapshot_fetched" && Array.isArray(event.items)) {
+    for (const source of event.items) {
+      if (!source || typeof source !== "object") continue;
+      ensureBatchItem(batch, { type: "item_enqueued", item: source });
+    }
+    if (Number.isInteger(event.cycle) && event.cycle >= 0) batch.cycle = event.cycle;
+  }
+  if (event.type === "item_enqueued") ensureBatchItem(batch, event);
+  const item = ensureBatchItem(batch, event);
+  if (item) {
+    if (event.item && typeof event.item === "object") {
+      const source = event.item;
+      if (typeof source.repository === "string") item.repository = source.repository;
+      if (Array.isArray(source.module_names) || Array.isArray(source.modules)) {
+        item.module_names = (source.module_names || source.modules)
+          .filter((entry) => typeof entry === "string")
+          .slice(0, 1000);
+      }
+      if (typeof source.source_revision === "string") item.source_revision = source.source_revision;
+      if (typeof source.fingerprint === "string") item.fingerprint = source.fingerprint;
+    }
+    const nextStatus = event.status ?? event.state ?? event.item?.status;
+    if ((event.type === "item_state" || event.type === "item_enqueued") && batchItemStates.has(nextStatus)) {
+      item.status = nextStatus;
+    }
+    if (event.type === "validation") item.validation = event.validation ?? event.result ?? event;
+    if (event.type === "publish") {
+      const url = event.pr_url ?? event.url;
+      if (typeof url === "string") item.pr_url = url;
+      if (event.status === "created" || event.created === true || item.pr_url) item.status = "created";
+    }
+    if (typeof event.error === "string") item.error = event.error;
+    if (typeof event.message === "string" && event.type === "item_state" && item.status === "failed") {
+      item.error = event.message;
+    }
+    if (Number.isInteger(event.attempts) && event.attempts >= 0) item.attempts = event.attempts;
+    item.updated_at_ms = Number.isSafeInteger(event.timestamp_ms) ? event.timestamp_ms : Date.now();
+  }
+  if (event.type === "cycle" && Number.isInteger(event.cycle) && event.cycle >= 0) {
+    batch.cycle = event.cycle;
+  }
+  if (event.type === "batch_state") {
+    const state = event.status ?? event.state;
+    if (batchStates.has(state)) batch.status = state;
+  }
+  if (event.type === "worker_started") batch.status = batch.config?.watch ? "watching" : "running";
+  if (event.type === "batch_completed") batch.status = batch.config?.watch ? "watching" : "completed";
+  if (event.type === "batch_failed") {
+    batch.status = "failed";
+    if (typeof event.message === "string") batch.error = event.message;
+  }
+  batch.counts = batchCounters(batch.items);
+  batch.updated_at_ms = Number.isSafeInteger(event.timestamp_ms) ? event.timestamp_ms : Date.now();
+  return batch;
+}
+
+export function eventForBatchOutput(line) {
+  let event;
+  try { event = typeof line === "string" ? JSON.parse(line) : line; } catch { return null; }
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+  const kind = typeof event.kind === "string" ? event.kind : event.type;
+  if (typeof kind !== "string") return null;
+  const accepted = new Set([
+    "batch_created",
+    "snapshot_fetched",
+    "item_enqueued",
+    "item_state",
+    "validation",
+    "publish",
+    "batch_state",
+    "cycle",
+    "warning",
+    "error",
+    "log",
+    "batch_completed",
+    "batch_failed",
+    "worker_started",
+  ]);
+  return accepted.has(kind) ? redactBatchValue(event) : null;
+}
+
+function canonicalBatchEvent(id, rawEvent) {
+  const event = redactBatchValue(rawEvent);
+  if (typeof event.kind === "string") {
+    return {
+      kind: event.kind,
+      batch_id: id,
+      item_key: typeof event.item_key === "string" ? event.item_key : "",
+      cycle: Number.isInteger(event.cycle) ? event.cycle : 0,
+      timestamp_ms: Number.isSafeInteger(event.timestamp_ms) ? event.timestamp_ms : Date.now(),
+      message: typeof event.message === "string" ? event.message : "",
+      data: event.data && typeof event.data === "object" ? event.data : {},
+    };
+  }
+  const kind = typeof event.type === "string" ? event.type : "log";
+  const ignored = new Set(["type", "batch_id", "item_id", "item_key", "cycle", "timestamp", "timestamp_ms", "message"]);
+  const data = {};
+  for (const [key, value] of Object.entries(event)) if (!ignored.has(key)) data[key] = value;
+  return {
+    kind,
+    batch_id: id,
+    item_key: batchItemKey(event),
+    cycle: Number.isInteger(event.cycle) ? event.cycle : 0,
+    timestamp_ms: Number.isSafeInteger(event.timestamp_ms) ? event.timestamp_ms : Date.now(),
+    message: typeof event.message === "string" ? event.message : "",
+    data,
+  };
+}
+
+function defaultBatchWorkerCommand(batch, dataDirectory) {
+  const configuredBin = process.env.MOONSAGE_AGENT_BIN;
+  const builtBin = !configuredBin && existsSync(releaseAgentBin) ? releaseAgentBin : null;
+  const executable = configuredBin || builtBin || "moon";
+  const workerArgs = ["batch-audit", "--worker", "--batch-id", batch.id, "--stream-json"];
+  const args = configuredBin || builtBin
+    ? workerArgs
+    : ["run", "cmd/main", "--", ...workerArgs];
+  return {
+    executable,
+    args,
+    options: {
+      cwd: root,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, MOONSAGE_DATA_DIR: dataDirectory },
+    },
+  };
+}
+
+/** Run the MoonBit batch worker and translate its JSONL stdout into events. */
+export async function runBatchWorker(batch, emit, signal, context = {}) {
+  const command = defaultBatchWorkerCommand(batch, context.dataDirectory || activeDataRoot);
+  const spawnWorker = context.workerSpawner || spawn;
+  return new Promise((resolveWorker) => {
+    let child;
+    try {
+      child = spawnWorker(command.executable, command.args, command.options);
+    } catch (error) {
+      resolveWorker({ code: 1, error: error.message });
+      return;
+    }
+    context.onChild?.(child);
+    let pending = "";
+    let stderr = "";
+    let outputBytes = 0;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      resolveWorker(result);
+    };
+    const acceptLine = (line) => {
+      if (!line.trim()) return;
+      const event = eventForBatchOutput(line);
+      if (event) emit(event);
+    };
+    const abort = () => {
+      killProcessTree(child);
+      finish({ code: null, aborted: true });
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      outputBytes += Buffer.byteLength(chunk);
+      if (outputBytes > 16 * 1024 * 1024) {
+        killProcessTree(child);
+        finish({ code: 1, error: "Batch worker output exceeded 16 MB." });
+        return;
+      }
+      pending += chunk;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? "";
+      for (const line of lines) acceptLine(line);
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => { stderr = (stderr + chunk).slice(-65_536); });
+    child.once?.("error", (error) => finish({ code: 1, error: error.message }));
+    child.once?.("close", (code, childSignal) => {
+      if (pending.trim()) acceptLine(pending);
+      finish({
+        code,
+        signal: childSignal,
+        error: code === 0 ? "" : stderr.trim() || `Batch worker exited with code ${code}.`,
+      });
+    });
+  });
+}
+
+function createBatchController({ dataDirectory, workerRunner, workerSpawner } = {}) {
+  const storeRoot = dataDirectory || activeDataRoot;
+  const running = new Map();
+  const subscribers = new Map();
+  const controlWrites = new Map();
+  let stopping = false;
+
+  const broadcast = (id, event) => {
+    for (const listener of subscribers.get(id) || []) {
+      try { listener(event); } catch { /* disconnected subscriber */ }
+    }
+  };
+
+  const writeControl = (id, action, itemId = "") => {
+    const previous = controlWrites.get(id) || Promise.resolve();
+    const next = previous.catch(() => {}).then(async () => {
+      const paths = batchPaths(requireBatchId(id), storeRoot);
+      await mkdir(paths.directory, { recursive: true });
+      let existing = { pause: false, cancel: false, approved_items: [], retry_items: [], updated_at_ms: 0 };
+      try {
+        const document = JSON.parse(await readFile(paths.control, "utf8"));
+        if (document && typeof document === "object") {
+          existing = {
+            pause: document.pause === true,
+            cancel: document.cancel === true,
+            approved_items: Array.isArray(document.approved_items)
+              ? document.approved_items.filter((entry) => typeof entry === "string")
+              : [],
+            retry_items: Array.isArray(document.retry_items)
+              ? document.retry_items.filter((entry) => typeof entry === "string")
+              : [],
+            updated_at_ms: Number.isSafeInteger(document.updated_at_ms) ? document.updated_at_ms : 0,
+          };
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      }
+      const clearsPause = ["run", "resume", "retry", "approve"].includes(action);
+      const clearsCancel = ["run", "resume", "retry", "approve"].includes(action);
+      const control = {
+        pause: action === "pause" ? true : clearsPause ? false : existing.pause,
+        cancel: action === "cancel" ? true : clearsCancel ? false : existing.cancel,
+        approved_items: action === "approve" && itemId
+          ? [...new Set([...existing.approved_items, itemId])]
+          : existing.approved_items,
+        retry_items: action === "retry" && itemId
+          ? [...new Set([...existing.retry_items, itemId])]
+          : existing.retry_items,
+        updated_at_ms: Date.now(),
+      };
+      await writeFile(paths.control, JSON.stringify(control, null, 2) + "\n", "utf8");
+      return control;
+    });
+    const tracked = next.catch(() => {});
+    controlWrites.set(id, tracked);
+    return next.finally(() => {
+      if (controlWrites.get(id) === tracked) controlWrites.delete(id);
+    });
+  };
+
+  const runInjected = async (batch, emit, signal, onChild) => {
+    const runner = workerRunner || runBatchWorker;
+    const result = await runner(batch, emit, signal, {
+      dataDirectory: storeRoot,
+      workerSpawner,
+      onChild,
+      paths: batchPaths(batch.id, storeRoot),
+    });
+    if (result && typeof result[Symbol.asyncIterator] === "function") {
+      for await (const event of result) emit(event);
+      return {};
+    }
+    if (Array.isArray(result?.events)) for (const event of result.events) emit(event);
+    return result || {};
+  };
+
+  async function start(id, { recovery = false, allowTerminal = false } = {}) {
+    requireBatchId(id);
+    if (running.has(id)) throw batchError("Batch worker is already running.", 409);
+    const batch = await readBatch(id, storeRoot);
+    if (terminalBatchStates.has(batch.status) && !recovery && !allowTerminal) {
+      throw batchError("Completed, failed, or cancelled batches must be retried explicitly.", 409);
+    }
+    const controller = new AbortController();
+    const state = { controller, child: null, promise: null };
+    running.set(id, state);
+    try {
+      await writeControl(id, "run");
+    } catch (error) {
+      running.delete(id);
+      throw error;
+    }
+    const emit = (event) => {
+      const accepted = eventForBatchOutput(event);
+      if (!accepted) return;
+      // The MoonBit worker persists the record and JSONL before emitting to
+      // stdout. The server only fans the event out to live SSE clients.
+      broadcast(id, canonicalBatchEvent(id, accepted));
+    };
+    state.promise = (async () => {
+      let result;
+      try {
+        result = await runInjected(batch, emit, controller.signal, (child) => { state.child = child; });
+        const latest = await readBatch(id, storeRoot);
+        if (stopping || result?.aborted || ["paused", "cancelled"].includes(latest.status)) return;
+        if (result?.error || (result?.code !== undefined && result.code !== 0)) {
+          console.error(`MoonSage batch worker ${id} failed; inspect the persisted batch report.`);
+        }
+      } catch {
+        if (!stopping) console.error(`MoonSage batch worker ${id} failed; inspect the persisted batch report.`);
+      } finally {
+        running.delete(id);
+      }
+    })();
+    return { ...batch, status: batch.config?.watch ? "watching" : "running" };
+  }
+
+  const pause = async (id) => {
+    const batch = await readBatch(id, storeRoot);
+    if (!["running", "watching"].includes(batch.status)) throw batchError("Only running batches can be paused.", 409);
+    await writeControl(id, "pause");
+    return batch;
+  };
+
+  const resume = async (id) => {
+    const batch = await readBatch(id, storeRoot);
+    let pauseRequested = false;
+    try {
+      pauseRequested = JSON.parse(await readFile(batchPaths(id, storeRoot).control, "utf8"))?.pause === true;
+    } catch { /* a missing control file means no pending pause */ }
+    if (batch.status !== "paused" && !pauseRequested) {
+      throw batchError("Only paused batches can be resumed.", 409);
+    }
+    if (running.has(id)) {
+      await writeControl(id, "resume");
+      return batch;
+    }
+    await start(id);
+    return batch;
+  };
+
+  const cancel = async (id) => {
+    const batch = await readBatch(id, storeRoot);
+    if (batch.status === "cancelled") return batch;
+    if (batch.status === "completed") throw batchError("Completed batches cannot be cancelled.", 409);
+    await writeControl(id, "cancel");
+    return batch;
+  };
+
+  const retry = async (id, itemId) => {
+    const batch = await readBatch(id, storeRoot);
+    const item = findBatchItem(batch, itemId);
+    if (!item) throw batchError("Batch item is not found.", 404);
+    if (!["failed", "cancelled", "skipped", "no_changes"].includes(item.status)) {
+      throw batchError("Only terminal non-PR items can be retried.", 409);
+    }
+    await writeControl(id, "retry", item.id || itemId);
+    if (!running.has(id)) await start(id, { allowTerminal: true });
+    return batch;
+  };
+
+  const approve = async (id, itemId) => {
+    const batch = await readBatch(id, storeRoot);
+    const item = findBatchItem(batch, itemId);
+    if (!item) throw batchError("Batch item is not found.", 404);
+    if (item.status !== "verified_pending_publish") {
+      throw batchError("Only verified pending items can be approved.", 409);
+    }
+    await writeControl(id, "approve", item.id || itemId);
+    if (!running.has(id)) await start(id, { allowTerminal: true });
+    return batch;
+  };
+
+  const recover = async () => {
+    let entries;
+    try { entries = await readdir(batchStorePath(storeRoot), { withFileTypes: true }); }
+    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json") || entry.name.endsWith(".control.json")) continue;
+      const id = entry.name.slice(0, -5);
+      if (!batchIdPattern.test(id)) continue;
+      let batch;
+      try { batch = await readBatch(id, storeRoot); } catch { continue; }
+      if (!["running", "watching"].includes(batch.status)) continue;
+      // A server restart terminates its worker process, so any remaining lock
+      // for a persisted running batch belongs to that interrupted worker.
+      await rm(batchPaths(id, storeRoot).lock, { force: true }).catch(() => {});
+      await start(id, { recovery: true }).catch(async () => {
+        console.error(`MoonSage batch recovery failed for ${id}.`);
+      });
+    }
+  };
+
+  const subscribe = (id, listener) => {
+    let listeners = subscribers.get(id);
+    if (!listeners) {
+      listeners = new Set();
+      subscribers.set(id, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) subscribers.delete(id);
+    };
+  };
+
+  const stopAll = () => {
+    stopping = true;
+    for (const state of running.values()) {
+      state.controller.abort();
+      if (state.child) killProcessTree(state.child);
+    }
+  };
+
+  return { approve, cancel, pause, recover, resume, retry, start, stopAll, subscribe, storeRoot };
+}
+
+function beginSse(response) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    ...secureHeaders,
+  });
+  response.flushHeaders();
+}
+
+function sendSse(response, event, index = "") {
+  if (response.writableEnded || response.destroyed) return;
+  if (index !== "") response.write(`id: ${index}\n`);
+  const kind = typeof event?.kind === "string" ? event.kind : event?.type;
+  if (typeof kind === "string" && /^[a-z0-9_-]{1,64}$/i.test(kind)) response.write(`event: ${kind}\n`);
+  response.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+async function listBatches(dataDirectory) {
+  const batches = [];
+  try {
+    const entries = await readdir(batchStorePath(dataDirectory), { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json") || entry.name.endsWith(".control.json")) continue;
+      const id = entry.name.slice(0, -5);
+      if (!batchIdPattern.test(id)) continue;
+      try { batches.push(await readBatch(id, dataDirectory)); } catch { /* ignore partial metadata */ }
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  batches.sort((a, b) => Number(b.updated_at_ms || 0) - Number(a.updated_at_ms || 0));
+  return batches;
+}
+
+async function createBatch(document, controller) {
+  const config = normalizeBatchConfig(document);
+  const now = Date.now();
+  const batch = {
+    schema_version: 1,
+    id: randomUUID(),
+    status: "queued",
+    config,
+    cycle: 1,
+    items: [],
+    pr_count: 0,
+    created_at_ms: now,
+    updated_at_ms: now,
+    last_snapshot_at_ms: now,
+    last_error: "",
+  };
+  await writeBatch(batch, controller.storeRoot);
+  return readBatch(batch.id, controller.storeRoot);
+}
+
+async function serveBatchEvents(request, response, id, controller) {
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Only GET is supported." });
+    return;
+  }
+  await readBatch(id, controller.storeRoot);
+  beginSse(response);
+  const events = await readBatchEvents(id, controller.storeRoot);
+  const requestedEventId = Number(request.headers["last-event-id"] || queryPath(request.url, "after") || -1);
+  const lastEventId = Number.isInteger(requestedEventId) && requestedEventId >= -1 ? requestedEventId : -1;
+  for (let index = 0; index < events.length; index += 1) {
+    if (index > lastEventId) sendSse(response, events[index], index);
+  }
+  const unsubscribe = controller.subscribe(id, (event) => sendSse(response, event));
+  const keepalive = setInterval(() => {
+    if (!response.writableEnded && !response.destroyed) response.write(": keep-alive\n\n");
+  }, 15_000);
+  keepalive.unref?.();
+  request.on("close", () => {
+    clearInterval(keepalive);
+    unsubscribe();
+  });
+}
+
+async function serveBatches(request, response, pathname, controller) {
+  try {
+    if (pathname === "/api/batches" && request.method === "GET") {
+      sendJson(response, 200, { batches: (await listBatches(controller.storeRoot)).map(publicBatch) });
+      return true;
+    }
+    if (pathname === "/api/batches" && request.method === "POST") {
+      if (!requireJsonContentType(request)) {
+        sendJson(response, 415, { error: "Writes require application/json." });
+        return true;
+      }
+      const batch = await createBatch(await readJsonBody(request), controller);
+      sendJson(response, 201, { batch: publicBatch(batch) });
+      return true;
+    }
+    const events = pathname.match(/^\/api\/batches\/([^/]+)\/events$/);
+    if (events) {
+      await serveBatchEvents(request, response, decodeURIComponent(events[1]), controller);
+      return true;
+    }
+    const action = pathname.match(/^\/api\/batches\/([^/]+)\/(run|pause|resume|cancel)$/);
+    if (action) {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Only POST is supported." });
+        return true;
+      }
+      const id = decodeURIComponent(action[1]);
+      let batch;
+      if (action[2] === "run") batch = await controller.start(id);
+      else if (action[2] === "pause") batch = await controller.pause(id);
+      else if (action[2] === "resume") batch = await controller.resume(id);
+      else batch = await controller.cancel(id);
+      sendJson(response, action[2] === "run" ? 202 : 200, { batch: publicBatch(batch) });
+      return true;
+    }
+    const itemAction = pathname.match(/^\/api\/batches\/([^/]+)\/items\/([^/]+)\/(retry|approve)$/);
+    if (itemAction) {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Only POST is supported." });
+        return true;
+      }
+      const id = decodeURIComponent(itemAction[1]);
+      const itemId = decodeURIComponent(itemAction[2]);
+      const batch = itemAction[3] === "retry"
+        ? await controller.retry(id, itemId)
+        : await controller.approve(id, itemId);
+      sendJson(response, 202, { batch: publicBatch(batch) });
+      return true;
+    }
+    const detail = pathname.match(/^\/api\/batches\/([^/]+)$/);
+    if (detail && request.method === "GET") {
+      const batch = await readBatch(decodeURIComponent(detail[1]), controller.storeRoot);
+      sendJson(response, 200, { batch: publicBatch(batch) });
+      return true;
+    }
+    sendJson(response, 405, { error: "Unsupported batch operation." });
+    return true;
+  } catch (error) {
+    const status = [404, 409, 413].includes(error?.status) ? error.status : 400;
+    if (response.headersSent) {
+      sendSse(response, { type: "error", message: error.message });
+      try { response.end(); } catch { /* client disconnected */ }
+    } else {
+      sendJson(response, status, { error: error.message });
+    }
+    return true;
+  }
+}
+
 export function serve({
   listenPort = port,
   agentRunner = runAgent,
+  batchWorker,
+  batchRunner,
+  workerRunner,
+  workerSpawner,
   workspaceRoot = root,
   workspaceDataDirectory,
 } = {}) {
   if (workspaceDataDirectory) activeDataRoot = normalize(resolve(workspaceDataDirectory));
+  const batchController = createBatchController({
+    dataDirectory: activeDataRoot,
+    workerRunner: batchWorker || batchRunner || workerRunner,
+    workerSpawner,
+  });
   let server;
   server = createServer((request, response) => {
     const address = server.address();
@@ -1235,6 +2147,10 @@ export function serve({
     }
     if (pathname === "/api/tasks" || pathname.startsWith("/api/tasks/")) {
       void serveTasks(request, response, pathname, agentRunner);
+      return;
+    }
+    if (pathname === "/api/batches" || pathname.startsWith("/api/batches/")) {
+      void serveBatches(request, response, pathname, batchController);
       return;
     }
     if (pathname.startsWith("/api/workspace/")) {
@@ -1268,8 +2184,13 @@ export function serve({
     if (normalize(resolve(workspaceRoot)) === root) {
       void registerWorkspace(workspaceRoot).catch(() => {});
     }
+    void batchController.recover().catch((error) => {
+      console.error(`MoonSage batch recovery failed: ${error.message}`);
+    });
     console.log(`MoonSage frontend: http://127.0.0.1:${activePort}/frontend/`);
   });
+  server.on("close", () => batchController.stopAll());
+  server.batchController = batchController;
   return server;
 }
 

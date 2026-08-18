@@ -292,6 +292,104 @@ async fn run_moon_tool(root : String, arguments : String) -> String {
 }
 
 ///|
+fn verification_args(command : String) -> Array[String] raise {
+  guard command == "check" || command == "build" || command == "test" else {
+    fail("verification command must be check, build, or test")
+  }
+  [command, "--target", "native"]
+}
+
+///|
+fn verification_environment() -> Map[String, String] {
+  let environment : Map[String, String] = Map([])
+  for name in [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "TEMP",
+    "TMP",
+    "MOON_HOME",
+    "MOONBIT_HOME",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+  ] {
+    match @sys.get_env_var(name) {
+      Some(value) if value != "" => environment[name] = value
+      _ => ()
+    }
+  }
+  environment
+}
+
+///|
+// Batch audits run untrusted repositories. Keep model and GitHub credentials
+// in the orchestrator process and expose only the toolchain environment here.
+pub async fn run_moon_verification(
+  root : String,
+  command : String,
+  timeout_ms? : Int = run_moon_default_timeout_ms,
+) -> String {
+  let args = verification_args(command)
+  let timeout_ms = if timeout_ms < 1000 { 1000 } else { timeout_ms }
+  let payload = @async.with_timeout_opt(timeout_ms, async fn() {
+    let (exit, out, err) = @process.collect_output(
+      "moon",
+      args,
+      cwd=root,
+      extra_env=verification_environment(),
+      inherit_env=false,
+      no_console_window=true,
+    )
+    Json::object({
+      "exit_code": Json::number(exit.to_double()),
+      "stdout": Json::string(truncate_output(out.text(), 6000)),
+      "stderr": Json::string(truncate_output(err.text(), 2000)),
+    }).stringify()
+  })
+  match payload {
+    Some(result) => result
+    None => command_timeout_json(timeout_ms)
+  }
+}
+
+///|
+pub fn verification_tools(ws : @editing.Workspace) -> Array[@tools.Tool] {
+  [
+    {
+      schema: {
+        name: "run_moon",
+        description: "Run one required MoonBit verification command in the workspace. command must be check, build, or test; target is always native and credentials are not inherited.",
+        parameters: @tools.object_schema(
+          {
+            "command": @tools.string_field("check, build, or test"),
+            "timeout_ms": @tools.string_field(
+              "Optional timeout in milliseconds",
+            ),
+          },
+          ["command"],
+        ),
+      },
+      execute: async fn(arguments) {
+        try {
+          let document = @json.parse(arguments)
+          let command = @util.json_string_arg(document, "command")
+          let timeout_ms = @util.parse_int_or(
+            @util.json_string_arg(document, "timeout_ms"),
+            run_moon_default_timeout_ms,
+          )
+          run_moon_verification(ws.get_root(), command, timeout_ms~)
+        } catch {
+          error => @tools.error_json(error.to_string())
+        }
+      },
+    },
+  ]
+}
+
+///|
 // Default cap for a single `run_moon` call: 5 minutes.
 // A hung moon process must not block the whole agent session forever.
 let run_moon_default_timeout_ms : Int = 300000

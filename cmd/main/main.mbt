@@ -11,6 +11,10 @@ fn usage() -> String {
     #|  moonsage task [--workspace <dir>] [--permission read-only|controlled-write|full-auto] [--stream-json] <goal>
     #|  moonsage audit <owner/module> [--fix] [--confirm prompt|diff|yes] [--workspace <dir>] [--max-calls <n>]
     #|  moonsage audit --clean
+    #|  moonsage batch-audit [start] [options]
+    #|  moonsage mode 1 [start] [options]
+    #|  moonsage batch-audit status|pause|resume|cancel <batch-id>
+    #|  moonsage batch-audit retry|publish <batch-id> --item <item-key>
     #|  moonsage --version
     #|
     #|Run `moonsage --help` for the full option reference.
@@ -351,7 +355,7 @@ fn enable_utf8_console() -> Unit {
 async fn main {
   enable_utf8_console()
   @dotenv.load_dotenv(".env")
-  let args = cli_args()
+  let args = normalize_mode_one_args(cli_args())
   let matches = root_command().parse(argv=args[1:]) catch {
     error => {
       @stdio.stderr.write("error: \{error.to_string()}\n") catch {
@@ -372,6 +376,7 @@ async fn main {
       run_ask(ask_question(m), stream_json=flag_of(m, "stream-json"))
     Some(("task", m)) => run_task(m)
     Some(("audit", m)) => @audit.run_audit(audit_args(m))
+    Some(("batch-audit", m)) => run_batch_audit_command(m)
     _ => println(usage())
   }
 }

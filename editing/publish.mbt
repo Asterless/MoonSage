@@ -19,30 +19,210 @@ pub fn build_pr_body(report : String, owner : String, repo : String) -> String {
 }
 
 ///|
+fn valid_branch_name(branch : String) -> Bool {
+  if branch == "" || branch.length() > 180 || branch.has_prefix("-") ||
+    branch.has_prefix("/") ||
+    branch.has_suffix("/") ||
+    branch.has_suffix(".") ||
+    branch.has_suffix(".lock") ||
+    branch.contains("..") ||
+    branch.contains("//") ||
+    branch.contains("@{") {
+    return false
+  }
+  for code in branch {
+    let ok = (code >= 'a' && code <= 'z') ||
+      (code >= 'A' && code <= 'Z') ||
+      (code >= '0' && code <= '9') ||
+      code == '-' ||
+      code == '_' ||
+      code == '.' ||
+      code == '/'
+    if !ok {
+      return false
+    }
+  }
+  true
+}
+
+///|
+let publish_command_timeout_ms = 120000
+
+///|
+fn clip_publish_output(text : String) -> String {
+  if text.length() <= 8192 {
+    text
+  } else {
+    text[:8192].to_owned() + "\n... (output truncated)"
+  }
+}
+
+///|
+#cfg(platform="windows")
+fn publish_null_device() -> String {
+  "NUL"
+}
+
+///|
+#cfg(not(platform="windows"))
+fn publish_null_device() -> String {
+  "/dev/null"
+}
+
+///|
+fn copy_publish_environment(names : Array[String]) -> Map[String, String] {
+  let environment : Map[String, String] = Map([])
+  for name in names {
+    match @sys.get_env_var(name) {
+      Some(value) if value != "" => environment[name] = value
+      _ => ()
+    }
+  }
+  environment
+}
+
+///|
+fn repository_command_environment() -> Map[String, String] {
+  let environment = copy_publish_environment([
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+  ])
+  environment["GIT_CONFIG_GLOBAL"] = publish_null_device()
+  environment["GIT_LFS_SKIP_SMUDGE"] = "1"
+  environment["GIT_TERMINAL_PROMPT"] = "0"
+  environment["GCM_INTERACTIVE"] = "Never"
+  environment
+}
+
+///|
+fn github_command_environment() -> Map[String, String] {
+  // GitHub credentials are deliberately copied only for direct `gh` calls.
+  // Repository commands get the environment above and cannot read these
+  // tokens, model credentials, SSH agents, or repository .env files.
+  copy_publish_environment([
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "XDG_CONFIG_HOME",
+    "GH_CONFIG_DIR",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+  ])
+}
+
+///|
+fn secure_git_args(
+  args : Array[String],
+  github_auth? : Bool = false,
+) -> Array[String] {
+  let secured = [
+    "-c",
+    "core.hooksPath=\{publish_null_device()}",
+    "-c",
+    "credential.helper=",
+    "-c",
+    "submodule.recurse=false",
+    "-c",
+    "fetch.recurseSubmodules=false",
+  ]
+  // Push is the sole Git operation allowed to obtain a credential, and even
+  // then it must ask the already-authenticated GitHub CLI via a fixed helper.
+  // No repository-controlled helper or ambient token is inherited.
+  if github_auth {
+    secured.push("-c")
+    secured.push("credential.https://github.com.helper=!gh auth git-credential")
+  }
+  for arg in args {
+    secured.push(arg)
+  }
+  secured
+}
+
+///|
+async fn collect_publish_output(
+  cmd : String,
+  args : Array[String],
+  cwd? : String = "",
+) -> (Int, String, String) {
+  let actual_args = if cmd == "git" {
+    secure_git_args(args, github_auth=args.get(0) == Some("push"))
+  } else {
+    args
+  }
+  let environment = if cmd == "gh" {
+    github_command_environment()
+  } else {
+    repository_command_environment()
+  }
+  let result = @async.with_timeout_opt(publish_command_timeout_ms, async fn() {
+    let (exit, out, err) = if cwd == "" {
+      @process.collect_output(
+        cmd,
+        actual_args,
+        extra_env=environment,
+        inherit_env=false,
+        no_console_window=true,
+      )
+    } else {
+      @process.collect_output(
+        cmd,
+        actual_args,
+        cwd~,
+        extra_env=environment,
+        inherit_env=false,
+        no_console_window=true,
+      )
+    }
+    (
+      exit,
+      clip_publish_output(out.text() catch { _ => "" }),
+      clip_publish_output(err.text() catch { _ => "" }),
+    )
+  })
+  match result {
+    Some(value) => value
+    None => (
+      -1,
+      "",
+      "\{cmd} command timed out after \{publish_command_timeout_ms} ms",
+    )
+  }
+}
+
+///|
 async fn git_text(args : Array[String], cwd : String) -> String {
-  let (exit, out, _) = @process.collect_output(
-    "git",
-    args,
-    cwd~,
-    no_console_window=true,
-  )
+  let (exit, out, _) = collect_publish_output("git", args, cwd~)
   if exit != 0 {
     ""
   } else {
-    out.text() catch {
-      _ => ""
-    }
+    out
   }
 }
 
 ///|
 // 本地是否存在同名分支（含 remote-tracking ref）。
 async fn branch_exists_local(project_dir : String, branch : String) -> Bool {
-  let (exit, _, _) = @process.collect_output(
+  let (exit, _, _) = collect_publish_output(
     "git",
     ["rev-parse", "--verify", "--quiet", branch],
     cwd=project_dir,
-    no_console_window=true,
   )
   exit == 0
 }
@@ -55,17 +235,67 @@ async fn remote_has_branch(
   remote : String,
   branch : String,
 ) -> Bool {
-  let (exit, out, _) = @process.collect_output(
+  guard valid_branch_name(branch) else { return false }
+  let (exit, out, _) = collect_publish_output(
     "git",
-    ["ls-remote", "--heads", remote, branch],
+    ["ls-remote", "--heads", remote, "refs/heads/\{branch}"],
     cwd=project_dir,
-    no_console_window=true,
   )
   if exit != 0 {
     false
   } else {
-    (out.text() catch { _ => "" }).trim() != ""
+    out.trim() != ""
   }
+}
+
+///|
+fn canonical_github_url_matches(
+  url : String,
+  owner : String,
+  repo : String,
+) -> Bool {
+  let actual = url.trim().to_lower()
+  let base = "https://github.com/\{owner}/\{repo}".to_lower()
+  actual == base || actual == base + ".git"
+}
+
+///|
+async fn validate_remote_repository(
+  project_dir : String,
+  remote : String,
+  owner : String,
+  repo : String,
+) -> Unit {
+  let fetch_url = git_text(["remote", "get-url", remote], project_dir).trim().to_owned()
+  let push_url = git_text(
+    ["remote", "get-url", "--push", remote],
+    project_dir,
+  ).trim().to_owned()
+  guard canonical_github_url_matches(fetch_url, owner, repo) else {
+    fail(
+      "\{remote} fetch URL is not canonical https://github.com/\{owner}/\{repo}.git",
+    )
+  }
+  guard canonical_github_url_matches(push_url, owner, repo) else {
+    fail(
+      "\{remote} push URL is not canonical https://github.com/\{owner}/\{repo}.git",
+    )
+  }
+}
+
+///|
+fn parse_remote_head(text : String) -> String? {
+  let prefix = "ref: refs/heads/"
+  for line_view in text.split("\n") {
+    let line = line_view.trim().to_owned()
+    if line.has_prefix(prefix) && line.has_suffix("\tHEAD") {
+      let branch = line[prefix.length():line.length() - 5].to_owned()
+      if valid_branch_name(branch) {
+        return Some(branch)
+      }
+    }
+  }
+  None
 }
 
 ///|
@@ -77,11 +307,10 @@ async fn branch_taken(project_dir : String, branch : String) -> Bool {
   if remote_has_branch(project_dir, "origin", branch) {
     return true
   }
-  let (remote_exit, _, _) = @process.collect_output(
+  let (remote_exit, _, _) = collect_publish_output(
     "git",
     ["remote", "get-url", "moonsage-fork"],
     cwd=project_dir,
-    no_console_window=true,
   )
   remote_exit == 0 && remote_has_branch(project_dir, "moonsage-fork", branch)
 }
@@ -101,58 +330,78 @@ async fn unique_branch_name(project_dir : String, base : String) -> String {
 }
 
 ///|
-// 仓库默认分支：优先 origin/HEAD，其次当前分支（非发布分支），最后 main。
+// 仓库默认分支必须由 origin 自身证明，禁止从当前分支猜测 PR base。
 async fn remote_default_branch(
   project_dir : String,
-  current : String,
+  _current : String,
 ) -> String {
   let head = git_text(
     ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     project_dir,
-  )
+  ).trim().to_owned()
   let prefix = "origin/"
-  if head.has_prefix(prefix) {
-    head[prefix.length():].to_owned()
-  } else if current != "" && !current.has_prefix("moonsage/fix-") {
-    current
+  let local_head = if head.has_prefix(prefix) {
+    let value = head[prefix.length():].to_owned()
+    if valid_branch_name(value) { Some(value) } else { None }
   } else {
-    "main"
+    None
   }
+  let branch = match local_head {
+    Some(value) => value
+    None => {
+      let (exit, out, err) = collect_publish_output(
+        "git",
+        ["ls-remote", "--symref", "origin", "HEAD"],
+        cwd=project_dir,
+      )
+      guard exit == 0 else {
+        fail("cannot resolve origin default branch: \{err}")
+      }
+      guard parse_remote_head(out) is Some(value) else {
+        fail("origin did not report a valid default branch")
+      }
+      value
+    }
+  }
+  guard remote_has_branch(project_dir, "origin", branch) else {
+    fail("origin default branch does not exist: \{branch}")
+  }
+  branch
+}
+
+///|
+fn is_moonsage_publish_branch(branch : String) -> Bool {
+  branch.has_prefix("moonsage/fix-") || branch.has_prefix("moonsage/mode1/")
 }
 
 ///|
 // GitHub 提交身份：优先从 gh 读取；失败时退回通用身份。
 async fn github_identity() -> (String, String) {
-  let (name_exit, name_out, _) = @process.collect_output(
+  let (name_exit, name_out, _) = collect_publish_output(
     "gh",
     ["api", "user", "--jq", ".name"],
-    no_console_window=true,
   )
-  let (id_exit, id_out, _) = @process.collect_output(
+  let (id_exit, id_out, _) = collect_publish_output(
     "gh",
     ["api", "user", "--jq", ".id"],
-    no_console_window=true,
   )
-  let (login_exit, login_out, _) = @process.collect_output(
+  let (login_exit, login_out, _) = collect_publish_output(
     "gh",
     ["api", "user", "--jq", ".login"],
-    no_console_window=true,
   )
   let login = if login_exit == 0 {
-    login_out.text() catch {
-      _ => ""
-    }
+    login_out
   } else {
     ""
   }
   let login = login.trim().to_owned()
   let id = if id_exit == 0 {
-    @util.parse_int_or((id_out.text() catch { _ => "" }).trim().to_owned(), 0)
+    @util.parse_int_or(id_out.trim().to_owned(), 0)
   } else {
     0
   }
   let name = if name_exit == 0 {
-    (name_out.text() catch { _ => "" }).trim().to_owned()
+    name_out.trim().to_owned()
   } else {
     ""
   }
@@ -175,26 +424,433 @@ async fn github_identity() -> (String, String) {
 // 工作区是否存在可发布的改动：已跟踪文件的 diff 或未跟踪/暂存文件。
 // git 本身失败时保守视为“有改动”，让后续命令给出更明确的错误。
 async fn git_has_changes(project_dir : String) -> Bool {
-  let (diff_exit, _, _) = @process.collect_output(
+  let (diff_exit, _, _) = collect_publish_output(
     "git",
     ["diff", "--quiet"],
     cwd=project_dir,
-    no_console_window=true,
   )
   if diff_exit != 0 {
     return true
   }
-  let (status_exit, status_out, _) = @process.collect_output(
+  let (status_exit, status_out, _) = collect_publish_output(
     "git",
-    ["status", "--porcelain"],
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     cwd=project_dir,
-    no_console_window=true,
   )
   if status_exit != 0 {
     return true
   }
-  let status_text = status_out.text() catch { _ => "" }
-  status_text.trim() != ""
+  status_out != ""
+}
+
+///|
+async fn required_git_text(
+  project_dir : String,
+  args : Array[String],
+  operation : String,
+) -> String {
+  let (exit, out, err) = collect_publish_output("git", args, cwd=project_dir)
+  guard exit == 0 else { fail("\{operation} failed: \{err}") }
+  out
+}
+
+///|
+fn valid_repo_relative_path(path : String) -> Bool {
+  if path == "" || path.has_prefix("/") || path.has_prefix("\\") ||
+    path.contains("\\") ||
+    path.contains("\u{0000}") ||
+    path.contains("\n") ||
+    path.contains("\r") {
+    return false
+  }
+  let segments = path.split("/").to_array()
+  !segments.is_empty() && segments.all(fn(segment) {
+    segment != "" && segment != "." && segment != ".."
+  })
+}
+
+///|
+fn nul_separated_paths(text : String) -> Array[String] {
+  text
+    .split("\u{0000}")
+    .filter(fn(path) { path != "" })
+    .map(fn(path) { path.to_owned() })
+    .to_array()
+}
+
+///|
+fn normalize_publish_paths(paths : Array[String]) -> Array[String] raise {
+  let result : Array[String] = []
+  for path in paths {
+    guard valid_repo_relative_path(path) else {
+      fail("refusing invalid repository path: \{path}")
+    }
+    guard !is_protected_write_path(path) else {
+      fail("refusing to publish protected path: \{path}")
+    }
+    if !result.contains(path) {
+      result.push(path)
+    }
+  }
+  result.sort()
+  result
+}
+
+///|
+fn same_publish_paths(left : Array[String], right : Array[String]) -> Bool {
+  if left.length() != right.length() {
+    return false
+  }
+  for index, path in left {
+    if right[index] != path {
+      return false
+    }
+  }
+  true
+}
+
+///|
+async fn git_changed_paths(project_dir : String) -> Array[String] {
+  let paths : Array[String] = []
+  for args in [
+    ["diff", "--name-only", "-z", "--"],
+    ["diff", "--cached", "--name-only", "-z", "--"],
+    ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+  ] {
+    let text = required_git_text(project_dir, args, "enumerating changed files")
+    for path in nul_separated_paths(text) {
+      if !paths.contains(path) {
+        paths.push(path)
+      }
+    }
+  }
+  normalize_publish_paths(paths)
+}
+
+///|
+async fn path_tree_has_link_or_special(
+  project_dir : String,
+  path : String,
+) -> Bool {
+  let segments = path.split("/").to_array()
+  let mut current = project_dir.trim_end(chars="/\\").to_owned()
+  for index, segment in segments {
+    current = current + "/" + segment.to_owned()
+    let kind = @fs.kind(current, follow_symlink=false) catch {
+      _ => @fs.FileKind::Unknown
+    }
+    if kind is @fs.FileKind::SymLink {
+      return true
+    }
+    if index + 1 < segments.length() {
+      if !(kind is @fs.FileKind::Directory) {
+        return true
+      }
+    } else if !(kind is @fs.FileKind::Regular) &&
+      !(kind is @fs.FileKind::Unknown) {
+      return true
+    }
+  }
+  false
+}
+
+///|
+async fn file_sample_has_nul(path : String) -> Bool {
+  let file = @fs.open(path, mode=@fs.Mode::ReadOnly)
+  let sample = try file.read_some(max_len=8192) catch {
+    error => {
+      file.close()
+      raise error
+    }
+  }
+  file.close()
+  match sample {
+    Some(bytes) => {
+      for byte in bytes {
+        if byte == 0 {
+          return true
+        }
+      }
+      false
+    }
+    None => false
+  }
+}
+
+///|
+fn raw_diff_has_symlink_mode(raw : String) -> Bool {
+  raw.contains(":120000 ") || raw.contains(" 120000 ")
+}
+
+///|
+fn numstat_has_binary(numstat : String) -> Bool {
+  numstat.has_prefix("-\t-\t") || numstat.contains("\u{0000}-\t-\t")
+}
+
+///|
+async fn validate_changed_file_kinds(
+  project_dir : String,
+  paths : Array[String],
+) -> Unit {
+  let raw = required_git_text(
+    project_dir,
+    ["diff", "--raw", "-z", "--"],
+    "checking worktree file modes",
+  ) + required_git_text(
+    project_dir,
+    ["diff", "--cached", "--raw", "-z", "--"],
+    "checking staged file modes",
+  )
+  guard !raw_diff_has_symlink_mode(raw) else {
+    fail("refusing to publish a symbolic-link mode change")
+  }
+  let numstat = required_git_text(
+    project_dir,
+    ["diff", "--numstat", "-z", "--"],
+    "checking worktree binary changes",
+  ) + required_git_text(
+    project_dir,
+    ["diff", "--cached", "--numstat", "-z", "--"],
+    "checking staged binary changes",
+  )
+  guard !numstat_has_binary(numstat) else {
+    fail("refusing to publish a binary change")
+  }
+  for path in paths {
+    guard !path_tree_has_link_or_special(project_dir, path) else {
+      fail("refusing to publish a symbolic link or special file: \{path}")
+    }
+    let absolute = project_dir.trim_end(chars="/\\").to_owned() + "/" + path
+    let kind = @fs.kind(absolute, follow_symlink=false) catch {
+      _ => @fs.FileKind::Unknown
+    }
+    if kind is @fs.FileKind::Regular {
+      guard !file_sample_has_nul(absolute) else {
+        fail("refusing to publish a binary file: \{path}")
+      }
+    }
+  }
+}
+
+///|
+async fn stage_changed_paths(
+  project_dir : String,
+  verified_paths? : Array[String] = [],
+) -> Array[String] {
+  let actual = git_changed_paths(project_dir)
+  let expected = if verified_paths.is_empty() {
+    actual.copy()
+  } else {
+    normalize_publish_paths(verified_paths)
+  }
+  guard same_publish_paths(actual, expected) else {
+    fail("worktree changes do not match the verified changed-file allowlist")
+  }
+  let paths = expected
+  guard paths.length() > 0 else { fail("no changes to publish (git diff is empty)") }
+  validate_changed_file_kinds(project_dir, paths)
+  for path in paths {
+    let add = collect_publish_output(
+      "git",
+      ["add", "--", path],
+      cwd=project_dir,
+    )
+    guard add.0 == 0 else {
+      fail("git add failed for \{path}: \{add.2}")
+    }
+  }
+  let staged = normalize_publish_paths(nul_separated_paths(required_git_text(
+    project_dir,
+    ["diff", "--cached", "--name-only", "-z", "--"],
+    "checking staged files",
+  )))
+  guard same_publish_paths(staged, paths) else {
+    fail("staged files do not match the verified changed-file allowlist")
+  }
+  // Re-check after staging so Git attributes and index modes cannot turn an
+  // apparently regular text file into an unsafe binary or symlink entry.
+  let staged_raw = required_git_text(
+    project_dir,
+    ["diff", "--cached", "--raw", "-z", "--"],
+    "checking staged file modes",
+  )
+  guard !raw_diff_has_symlink_mode(staged_raw) else {
+    fail("refusing to publish a staged symbolic-link mode change")
+  }
+  let staged_numstat = required_git_text(
+    project_dir,
+    ["diff", "--cached", "--numstat", "-z", "--"],
+    "checking staged binary changes",
+  )
+  guard !numstat_has_binary(staged_numstat) else {
+    fail("refusing to publish a staged binary change")
+  }
+  paths
+}
+
+///|
+fn valid_git_revision(revision : String) -> Bool {
+  if revision.length() != 40 && revision.length() != 64 {
+    return false
+  }
+  for code in revision {
+    let hex = (code >= '0' && code <= '9') ||
+      (code >= 'a' && code <= 'f') ||
+      (code >= 'A' && code <= 'F')
+    if !hex {
+      return false
+    }
+  }
+  true
+}
+
+///|
+async fn remote_branch_revision(
+  project_dir : String,
+  remote : String,
+  branch : String,
+) -> String {
+  let (exit, out, err) = collect_publish_output(
+    "git",
+    ["ls-remote", "--heads", remote, "refs/heads/\{branch}"],
+    cwd=project_dir,
+  )
+  guard exit == 0 else {
+    fail("cannot verify pushed branch \{remote}/\{branch}: \{err}")
+  }
+  for line_view in out.split("\n") {
+    let line = line_view.trim().to_owned()
+    match line.split_once("\t") {
+      Some((revision, reference)) if
+        reference == "refs/heads/\{branch}" &&
+        valid_git_revision(revision.to_owned()) =>
+        return revision.to_owned()
+      _ => ()
+    }
+  }
+  fail("remote branch was not found after push: \{remote}/\{branch}")
+}
+
+///|
+fn valid_pull_request_url(url : String, owner : String, repo : String) -> Bool {
+  let prefix = "https://github.com/\{owner}/\{repo}/pull/".to_lower()
+  let lower = url.to_lower()
+  guard lower.has_prefix(prefix) else { return false }
+  let number = url[prefix.length():].to_owned()
+  number != "" && number.all(fn(code) { code >= '0' && code <= '9' })
+}
+
+///|
+fn validated_pr_record(
+  output : String,
+  owner : String,
+  repo : String,
+  head_owner : String,
+  head_branch : String,
+  base_branch : String,
+) -> String? raise {
+  let line = output.trim().to_owned()
+  guard line != "" else { return None }
+  let fields = line.split("\t").to_array()
+  guard fields.length() == 5 else {
+    fail("gh returned malformed pull request metadata")
+  }
+  let url = fields[0].to_owned()
+  let draft = fields[1].to_owned()
+  let base = fields[2].to_owned()
+  let head = fields[3].to_owned()
+  let actual_owner = fields[4].to_owned()
+  guard valid_pull_request_url(url, owner, repo) else {
+    fail("gh returned a pull request URL for a different repository")
+  }
+  guard draft == "false" else {
+    fail("refusing to reuse or report a draft pull request")
+  }
+  guard base == base_branch && head == head_branch &&
+    actual_owner.to_lower() == head_owner.to_lower() else {
+    fail("existing pull request head/base metadata does not match the publish request")
+  }
+  Some(url)
+}
+
+///|
+async fn find_existing_ready_pr(
+  owner : String,
+  repo : String,
+  head_owner : String,
+  head_branch : String,
+  base_branch : String,
+) -> String? {
+  let (exit, out, err) = collect_publish_output(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      "\{owner}/\{repo}",
+      "--head",
+      "\{head_owner}:\{head_branch}",
+      "--state",
+      "all",
+      "--limit",
+      "1",
+      "--json",
+      "url,isDraft,baseRefName,headRefName,headRepositoryOwner",
+      "--jq",
+      ".[0] | [.url, (.isDraft|tostring), .baseRefName, .headRefName, .headRepositoryOwner.login] | @tsv",
+    ],
+  )
+  guard exit == 0 else {
+    fail("cannot query existing pull requests: \{err}")
+  }
+  validated_pr_record(
+    out,
+    owner,
+    repo,
+    head_owner,
+    head_branch,
+    base_branch,
+  )
+}
+
+///|
+async fn verify_ready_pr(
+  url : String,
+  owner : String,
+  repo : String,
+  head_owner : String,
+  head_branch : String,
+  base_branch : String,
+) -> String {
+  let (exit, out, err) = collect_publish_output(
+    "gh",
+    [
+      "pr",
+      "view",
+      url,
+      "--repo",
+      "\{owner}/\{repo}",
+      "--json",
+      "url,isDraft,baseRefName,headRefName,headRepositoryOwner",
+      "--jq",
+      "[.url, (.isDraft|tostring), .baseRefName, .headRefName, .headRepositoryOwner.login] | @tsv",
+    ],
+  )
+  guard exit == 0 else {
+    fail("cannot verify the created pull request: \{err}")
+  }
+  guard
+    validated_pr_record(
+      out,
+      owner,
+      repo,
+      head_owner,
+      head_branch,
+      base_branch,
+    ) is Some(verified) else {
+    fail("created pull request metadata is missing")
+  }
+  verified
 }
 
 ///|
@@ -208,14 +864,92 @@ pub async fn publish_changes(
   report : String,
   title? : String,
   branch? : String = "",
+  verified_paths? : Array[String] = [],
+  source_revision? : String = "",
 ) -> String? {
   let requested = branch.trim().to_owned()
+  let expected_revision = source_revision.trim().to_owned()
+  guard valid_component(owner) && valid_component(repo) else {
+    fail("invalid GitHub repository: \{owner}/\{repo}")
+  }
+  guard requested == "" || valid_branch_name(requested) else {
+    fail("invalid branch name: \{requested}")
+  }
+  guard expected_revision == "" || valid_git_revision(expected_revision) else {
+    fail("invalid verified source revision")
+  }
+  // Validate both fetch and push URLs before any local mutation. This rejects
+  // SSH remotes, URL rewrites, alternate push targets, and path-shaped URLs.
+  validate_remote_repository(project_dir, "origin", owner, repo)
   let current_branch = git_text(["branch", "--show-current"], project_dir)
+    .trim()
+    .to_owned()
   let base_branch = remote_default_branch(project_dir, current_branch)
+  let remote_base = "refs/remotes/origin/\{base_branch}"
   let ahead = @util.parse_int_or(
-    git_text(["rev-list", "--count", base_branch + "..HEAD"], project_dir),
+    required_git_text(
+      project_dir,
+      ["rev-list", "--count", "\{remote_base}..HEAD"],
+      "checking publish branch ancestry",
+    ).trim().to_owned(),
     0,
   )
+  let has_changes = git_has_changes(project_dir)
+  let on_publish_branch = is_moonsage_publish_branch(current_branch)
+  // Reuse a committed publish branch after a transient push/PR failure.
+  let reuse_branch = !has_changes && on_publish_branch && ahead > 0
+  guard has_changes || reuse_branch else {
+    fail("no changes to publish (git diff is empty)")
+  }
+  guard has_changes || requested == "" || requested == current_branch else {
+    fail("current publish branch does not match the requested branch")
+  }
+  if expected_revision != "" {
+    let baseline = if has_changes {
+      required_git_text(
+        project_dir,
+        ["rev-parse", "HEAD"],
+        "checking verified source revision",
+      )
+    } else {
+      required_git_text(
+        project_dir,
+        ["merge-base", "HEAD", remote_base],
+        "checking verified source revision",
+      )
+    }
+    guard baseline.trim().to_lower() == expected_revision.to_lower() else {
+      fail("workspace HEAD no longer matches the verified source revision")
+    }
+  }
+  let approved_paths = if has_changes {
+    let actual = git_changed_paths(project_dir)
+    let expected = if verified_paths.is_empty() {
+      actual.copy()
+    } else {
+      normalize_publish_paths(verified_paths)
+    }
+    guard same_publish_paths(actual, expected) else {
+      fail("worktree changes do not match the verified changed-file allowlist")
+    }
+    validate_changed_file_kinds(project_dir, expected)
+    expected
+  } else {
+    []
+  }
+  // Authenticate before creating a branch or commit. A missing credential must
+  // leave the user's working tree untouched.
+  let (login_exit, login_out, login_err) = collect_publish_output(
+    "gh",
+    ["api", "user", "--jq", ".login"],
+  )
+  guard login_exit == 0 else {
+    fail("gh is not authenticated; cannot publish a pull request: \{login_err}")
+  }
+  let login = login_out.trim().to_owned()
+  guard valid_component(login) else {
+    fail("gh returned an invalid login; cannot publish a pull request")
+  }
   let diff_stat = git_text(["diff", "--stat"], project_dir)
   let status_short = git_text(["status", "--short"], project_dir)
   let title = if title is Some(t) && t != "" {
@@ -223,7 +957,6 @@ pub async fn publish_changes(
   } else {
     pr_title(owner, repo)
   }
-  let body = build_pr_body(report, owner, repo)
   @stdio.stdout.write("\n── PR 预览 ──\n")
   @stdio.stdout.write("标题: \{title}\n")
   @stdio.stdout.write("\{diff_stat}\n")
@@ -242,14 +975,6 @@ pub async fn publish_changes(
       return None
     }
   }
-  let has_changes = git_has_changes(project_dir)
-  let on_publish_branch = current_branch != "" &&
-    current_branch.has_prefix("moonsage/fix-")
-  // 复用场景：改动已提交在当前发布分支（例如上次推送失败），工作树干净。
-  let reuse_branch = !has_changes && on_publish_branch && ahead > 0
-  guard has_changes || reuse_branch else {
-    fail("no changes to publish (git diff is empty)")
-  }
   let mut branch = current_branch
   if has_changes {
     branch = if requested != "" {
@@ -263,97 +988,148 @@ pub async fn publish_changes(
           "branch \{branch} already exists locally or on the remote; pass a different branch name to create_pr",
         )
       }
-      let checkout = @process.collect_output(
+      let checkout = collect_publish_output(
         "git",
         ["checkout", "-b", branch],
         cwd=project_dir,
-        no_console_window=true,
       )
       guard checkout.0 == 0 else {
-        fail("git checkout failed: \{checkout.2.text()}")
+        fail("git checkout failed: \{checkout.2}")
       }
     }
+    let checked_out = git_text(["branch", "--show-current"], project_dir)
+      .trim()
+      .to_owned()
+    guard checked_out == branch else {
+      fail("git checked out an unexpected publish branch")
+    }
     let (name, email) = github_identity()
-    let add = @process.collect_output(
-      "git",
-      ["-c", "user.name=\{name}", "-c", "user.email=\{email}", "add", "-A"],
-      cwd=project_dir,
-      no_console_window=true,
+    let staged_paths = stage_changed_paths(
+      project_dir,
+      verified_paths=approved_paths,
     )
-    guard add.0 == 0 else { fail("git add failed: \{add.2.text()}") }
-    let commit = @process.collect_output(
+    let commit = collect_publish_output(
       "git",
       [
         "-c",
         "user.name=\{name}",
+        "-c",
         "user.email=\{email}",
         "commit",
         "-m",
         "fix: apply MoonSage audit fixes",
       ],
       cwd=project_dir,
-      no_console_window=true,
     )
-    guard commit.0 == 0 else { fail("git commit failed: \{commit.2.text()}") }
+    guard commit.0 == 0 else { fail("git commit failed: \{commit.2}") }
+    let committed_paths = normalize_publish_paths(nul_separated_paths(
+      required_git_text(
+        project_dir,
+        ["show", "--format=", "--name-only", "-z", "HEAD", "--"],
+        "checking committed files",
+      ),
+    ))
+    guard same_publish_paths(committed_paths, staged_paths) else {
+      fail("committed files do not match the verified changed-file allowlist")
+    }
+    if expected_revision != "" {
+      let parent = required_git_text(
+        project_dir,
+        ["rev-parse", "HEAD^"],
+        "checking publish commit parent",
+      )
+      guard parent.trim().to_lower() == expected_revision.to_lower() else {
+        fail("publish commit parent does not match the verified source revision")
+      }
+    }
   }
 
-  let (login_exit, login_out, _) = @process.collect_output(
-    "gh",
-    ["api", "user", "--jq", ".login"],
-    no_console_window=true,
-  )
-  guard login_exit == 0 else {
-    fail("gh is not authenticated; cannot publish a pull request")
-  }
-  let login = (login_out.text() catch { _ => "" }).trim().to_owned()
-  let direct = owner == login
+  let direct = owner.to_lower() == login.to_lower()
   let push_remote = if direct {
     "origin"
   } else {
     let fork_url = "https://github.com/\{login}/\{repo}.git"
-    let fork = @process.collect_output(
+    let fork = collect_publish_output(
       "gh",
       ["repo", "fork", "\{owner}/\{repo}", "--clone=false"],
-      no_console_window=true,
     )
     if fork.0 != 0 {
       // 已 fork 时 gh 可能报错；确认 fork 是否已存在。
-      let probe = @process.collect_output(
+      let probe = collect_publish_output(
         "gh",
-        ["repo", "view", "\{login}/\{repo}", "--json", "nameWithOwner"],
-        no_console_window=true,
+        [
+          "repo",
+          "view",
+          "\{login}/\{repo}",
+          "--json",
+          "nameWithOwner",
+          "--jq",
+          ".nameWithOwner",
+        ],
       )
-      guard probe.0 == 0 else {
-        fail("cannot fork \{owner}/\{repo}: \{fork.2.text()}")
+      guard probe.0 == 0 &&
+        probe.1.trim().to_lower() == "\{login}/\{repo}".to_lower() else {
+        fail("cannot fork \{owner}/\{repo}: \{fork.2}")
       }
     }
-    let (get_exit, _, _) = @process.collect_output(
+    let parent = collect_publish_output(
+      "gh",
+      [
+        "repo",
+        "view",
+        "\{login}/\{repo}",
+        "--json",
+        "parent",
+        "--jq",
+        ".parent.nameWithOwner",
+      ],
+    )
+    let parent_name = if parent.0 == 0 {
+      parent.1.trim().to_lower()
+    } else {
+      ""
+    }
+    guard parent_name == "\{owner}/\{repo}".to_lower() else {
+      fail("\{login}/\{repo} is not a verified fork of \{owner}/\{repo}")
+    }
+    let (get_exit, _, _) = collect_publish_output(
       "git",
       ["remote", "get-url", "moonsage-fork"],
       cwd=project_dir,
-      no_console_window=true,
     )
     if get_exit != 0 {
-      let add_remote = @process.collect_output(
+      let add_remote = collect_publish_output(
         "git",
         ["remote", "add", "moonsage-fork", fork_url],
         cwd=project_dir,
-        no_console_window=true,
       )
       guard add_remote.0 == 0 else {
-        fail("cannot add fork remote: \{add_remote.2.text()}")
+        fail("cannot add fork remote: \{add_remote.2}")
       }
     }
+    validate_remote_repository(project_dir, "moonsage-fork", login, repo)
     "moonsage-fork"
   }
-  let push = @process.collect_output(
+  let local_revision = required_git_text(
+    project_dir,
+    ["rev-parse", "HEAD"],
+    "checking publish head",
+  ).trim().to_owned()
+  guard valid_git_revision(local_revision) else {
+    fail("git returned an invalid publish revision")
+  }
+  let push = collect_publish_output(
     "git",
-    ["push", push_remote, branch],
+    [
+      "push",
+      "--porcelain",
+      push_remote,
+      "HEAD:refs/heads/\{branch}",
+    ],
     cwd=project_dir,
-    no_console_window=true,
   )
   guard push.0 == 0 else {
-    let detail = push.2.text()
+    let detail = push.2
     if detail.contains("Failed to connect") ||
       detail.contains("Could not connect") ||
       detail.contains("timed out") ||
@@ -371,7 +1147,22 @@ pub async fn publish_changes(
       fail("git push failed: \{detail}")
     }
   }
-  let head = if direct { branch } else { "\{login}:\{branch}" }
+  let pushed_revision = remote_branch_revision(
+    project_dir,
+    push_remote,
+    branch,
+  )
+  guard pushed_revision.to_lower() == local_revision.to_lower() else {
+    fail("pushed branch revision does not match the verified local commit")
+  }
+  let head_owner = if direct { owner } else { login }
+  match find_existing_ready_pr(owner, repo, head_owner, branch, base_branch) {
+    Some(url) => return Some(url)
+    None => ()
+  }
+  let head = "\{head_owner}:\{branch}"
+  let body = build_pr_body(report, owner, repo) +
+    "\n\n<!-- moonsage-publish:\{owner}/\{repo}:\{branch} -->"
   let body_dir = @fs.tmpdir(prefix="moonsage-pr-body-")
   let result = try {
     let body_file = body_dir + "/body.md"
@@ -380,7 +1171,7 @@ pub async fn publish_changes(
       body,
       create_mode=@fs.CreateMode::CreateOrTruncate,
     )
-    let pr = @process.collect_output(
+    let pr = collect_publish_output(
       "gh",
       [
         "pr",
@@ -396,19 +1187,34 @@ pub async fn publish_changes(
         "--body-file",
         body_file,
       ],
-      no_console_window=true,
     )
     if pr.0 != 0 {
-      let detail = pr.2.text()
+      let detail = pr.2
       if detail.contains("already exists") {
-        fail(
-          "gh pr create failed: \{detail}\n该分支可能已有 PR；请查看 https://github.com/\{owner}/\{repo}/pulls",
-        )
+        match
+          find_existing_ready_pr(
+            owner,
+            repo,
+            head_owner,
+            branch,
+            base_branch,
+          ) {
+          Some(url) => url
+          None =>
+            fail(
+              "gh pr create reported an existing PR but it could not be verified: \{detail}",
+            )
+        }
       } else {
         fail("gh pr create failed: \{detail}")
       }
+    } else {
+      let url = pr.1.trim().to_owned()
+      guard valid_pull_request_url(url, owner, repo) else {
+        fail("gh returned an invalid pull request URL")
+      }
+      verify_ready_pr(url, owner, repo, head_owner, branch, base_branch)
     }
-    (pr.1.text() catch { _ => "" }).trim().to_owned()
   } catch {
     e => {
       @fs.rmdir(body_dir, recursive=true) catch {

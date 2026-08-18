@@ -8,6 +8,7 @@ import {
   "moonsage/tools",
   "moonsage/md_ansi",
   "moonsage/mooncakes",
+  "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/async/process",
   "moonbitlang/async/stdio",
@@ -15,7 +16,3 @@ import {
   "moonbitlang/core/string",
   "moonbitlang/x/sys",
 }
-
-import {
-  "moonbitlang/async",
-} for "wbtest"

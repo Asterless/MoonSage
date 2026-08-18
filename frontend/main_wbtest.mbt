@@ -33,6 +33,7 @@ fn test_model(
     compact: false,
     workspace_overlay: false,
     workspace: initial_workspace(),
+    batch: initial_batch(),
     next_id: 100,
   }
 }
@@ -546,5 +547,116 @@ test "workspace ignores file responses from a different workspace" {
     is Some((updated, _)) else {
     fail("expected workspace update")
   }
-  assert_eq(updated, workspace)
+  assert_true(updated == workspace)
+}
+
+///|
+test "batch API records decode counters, modules, and validation evidence" {
+  let source =
+    #|{"batches":[{"id":"batch-1","mode":"batch-audit","status":"running","created_at":"2026-08-17T00:00:00Z","counters":{"total":4,"created":1,"no_changes":1,"failed":1,"queued":1},"items":[{"key":"moonbitlang--demo","modules":["moonbitlang/demo","moonbitlang/demo-extra"],"repository":"https://github.com/moonbitlang/demo","status":"failed","attempts":2,"validation":{"check_passed":true,"build_passed":true,"test_passed":false,"test_output":"one test failed"},"diff_summary":"2 files changed","error":"test failed"}]}]}
+  guard decode_batch_list(source) is Some(batches) else {
+    fail("expected batch list")
+  }
+  assert_eq(batches.length(), 1)
+  assert_eq(batches[0].total, 4)
+  assert_eq(batches[0].completed, 3)
+  assert_eq(batches[0].failed, 1)
+  assert_eq(batches[0].created_prs, 1)
+  guard @json.parse(source) is Object(root) else { fail("expected object") }
+  guard root.get("batches") is Some(Array(values)) else {
+    fail("expected values")
+  }
+  guard decode_batch_record(values[0]) is Some(detail) else {
+    fail("expected detail")
+  }
+  assert_eq(detail.items.length(), 1)
+  assert_eq(
+    detail.items[0].module_name,
+    "moonbitlang/demo, moonbitlang/demo-extra",
+  )
+  assert_eq(
+    detail.items[0].validation,
+    "check 通过 · build 通过 · test 失败",
+  )
+  assert_eq(detail.items[0].validation_log, "moon test\none test failed")
+}
+
+///|
+test "batch mode opens independently and updates its configuration" {
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let batch = initial_batch()
+  guard batch_update(batch, ToggleBatch, emit) is Some((opened, _)) else {
+    fail("expected batch update")
+  }
+  assert_true(opened.open)
+  assert_true(opened.loading)
+  guard batch_update(opened, BatchConfigChanged("watch", "true"), emit)
+    is Some((watching, _)) else {
+    fail("expected config update")
+  }
+  assert_true(watching.config.watch)
+  guard batch_update(watching, BatchConfigChanged("limit", "25"), emit)
+    is Some((limited, _)) else {
+    fail("expected limit update")
+  }
+  assert_eq(limited.config.limit, "25")
+  assert_eq(
+    batch_json_string_list("moonbitlang/*, user/pkg\nother/pkg").stringify(),
+    "[\"moonbitlang/*\",\"user/pkg\",\"other/pkg\"]",
+  )
+}
+
+///|
+#warnings("-alert_unstable")
+test "batch view exposes controls, status, item detail, and PR link" {
+  let summary : BatchSummary = {
+    id: "batch-1",
+    status: "paused",
+    mode: "batch-audit",
+    total: 1,
+    completed: 1,
+    failed: 0,
+    created_prs: 0,
+    created_at: "2026-08-17T00:00:00Z",
+  }
+  let item : BatchItem = {
+    key: "moonbitlang--demo",
+    module_name: "moonbitlang/demo",
+    repository: "https://github.com/moonbitlang/demo",
+    status: "verified_pending_publish",
+    attempts: 1,
+    validation: "check 通过 · build 通过 · test 通过",
+    validation_log: "moon test\npassed",
+    diff_summary: "1 file changed",
+    pr_url: "https://github.com/moonbitlang/demo/pull/7",
+    error: "",
+    report: "Audit report",
+  }
+  let batch : BatchModel = {
+    ..initial_batch(),
+    open: true,
+    batches: [summary],
+    detail: {
+      summary,
+      cycle: 1,
+      source_revision: "abc123",
+      items: [item],
+      notice: "",
+    },
+    selected_id: "batch-1",
+    selected_item: item.key,
+  }
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let html = @rabbita.render_to_string(fn() {
+    Val::constant(batch_view(batch, "light", emit))
+  })
+  assert_true(html.contains("自动审计"))
+  assert_true(html.contains("aria-pressed=\"false\""))
+  assert_true(html.contains("aria-current=\"page\""))
+  assert_true(html.contains("aria-current=\"location\""))
+  assert_true(html.contains("批准创建 Ready PR"))
+  assert_true(html.contains("验证日志"))
+  assert_true(
+    html.contains("href=\"https://github.com/moonbitlang/demo/pull/7\""),
+  )
 }

@@ -31,6 +31,110 @@ pub(all) struct AuditEvidence {
 }
 
 ///|
+/// Final controller-owned verification. These commands run after the agent
+/// has finished editing, so a later edit cannot invalidate the evidence used
+/// by the publisher.
+pub(all) struct AuditVerificationSummary {
+  check_passed : Bool
+  build_passed : Bool
+  test_passed : Bool
+  check_output : String
+  build_output : String
+  test_output : String
+} derive(Eq, Debug)
+
+///|
+pub fn AuditVerificationSummary::passed(
+  self : AuditVerificationSummary,
+) -> Bool {
+  self.check_passed && self.build_passed && self.test_passed
+}
+
+///|
+fn verification_output_passed(output : String) -> Bool {
+  tool_exit_code(output) is Some(0)
+}
+
+///|
+pub async fn run_final_audit_verification(
+  project_dir : String,
+  timeout_ms? : Int = 300000,
+) -> AuditVerificationSummary {
+  let check_output = @local.run_moon_verification(
+    project_dir,
+    "check",
+    timeout_ms~,
+  )
+  let build_output = @local.run_moon_verification(
+    project_dir,
+    "build",
+    timeout_ms~,
+  )
+  let test_output = @local.run_moon_verification(
+    project_dir,
+    "test",
+    timeout_ms~,
+  )
+  {
+    check_passed: verification_output_passed(check_output),
+    build_passed: verification_output_passed(build_output),
+    test_passed: verification_output_passed(test_output),
+    check_output,
+    build_output,
+    test_output,
+  }
+}
+
+///|
+async fn audit_worktree_has_changes(project_dir : String) -> Bool {
+  let (exit, out, _) = @process.collect_output(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    cwd=project_dir,
+    no_console_window=true,
+  )
+  exit == 0 && (out.text() catch { _ => "" }).trim() != ""
+}
+
+///|
+pub fn audit_publish_block_reason(
+  verification : AuditVerificationSummary,
+  has_changes : Bool,
+) -> String? {
+  if !has_changes {
+    Some("no changes to publish (git diff is empty)")
+  } else if !verification.check_passed {
+    Some("moon check --target native failed")
+  } else if !verification.build_passed {
+    Some("moon build --target native failed")
+  } else if !verification.test_passed {
+    Some("moon test --target native failed")
+  } else {
+    None
+  }
+}
+
+///|
+async fn print_final_verification(
+  verification : AuditVerificationSummary,
+) -> Unit {
+  @stdio.stdout.write("\n--- final verification ---\n")
+  for entry in [
+    ("check", verification.check_passed, verification.check_output),
+    ("build", verification.build_passed, verification.build_output),
+    ("test", verification.test_passed, verification.test_output),
+  ] {
+    let (command, passed, output) = entry
+    @stdio.stdout.write(
+      "moon \{command} --target native: \{if passed { "passed" } else { "failed" }}\n",
+    )
+    if !passed {
+      @stdio.stdout.write(output + "\n")
+    }
+  }
+}
+
+///|
 fn tool_exit_code(result : String) -> Int? {
   let document = @json.parse(result) catch { _ => return None }
   guard document is Object(fields) else { return None }
@@ -618,29 +722,45 @@ pub async fn run_audit(args : ArrayView[String]) -> Unit {
       }
     }
     print_agent_report(answer.text)
-    print_audit_evidence(build_audit_evidence(Some(analysis), answer, true))
+    let evidence = build_audit_evidence(Some(analysis), answer, true)
+    print_audit_evidence(evidence)
     @stdio.stdout.write("\n=== changes ===\n")
-    @stdio.stdout.write(@local.git_diff(project_dir, None))
+    let diff = @local.git_diff(project_dir, None)
+    @stdio.stdout.write(diff)
     if opts.pr {
-      let pr_url = @editing.publish_changes(
-        project_dir,
-        owner,
-        repo,
-        if opts.confirm is ConfirmPrompt {
-          @editing.Prompt
-        } else {
-          @editing.Auto
-        },
-        answer.text,
-      ) catch {
-        e => {
-          println("error: publish failed: \{e.to_string()}")
-          None
+      let final_verification = run_final_audit_verification(project_dir)
+      print_final_verification(final_verification)
+      let block = audit_publish_block_reason(
+        final_verification,
+        audit_worktree_has_changes(project_dir),
+      )
+      match block {
+        Some(reason) =>
+          println(
+            "error: publish blocked: \{reason}; the workspace was kept for inspection",
+          )
+        None => {
+          let pr_url = @editing.publish_changes(
+            project_dir,
+            owner,
+            repo,
+            if opts.confirm is ConfirmPrompt {
+              @editing.Prompt
+            } else {
+              @editing.Auto
+            },
+            answer.text,
+          ) catch {
+            e => {
+              println("error: publish failed: \{e.to_string()}")
+              None
+            }
+          }
+          match pr_url {
+            Some(url) => println("\nPR created: \{url}")
+            None => ()
+          }
         }
-      }
-      match pr_url {
-        Some(url) => println("\nPR created: \{url}")
-        None => ()
       }
     }
     @stdio.stdout.write("\n--- analysis trace ---\n")
