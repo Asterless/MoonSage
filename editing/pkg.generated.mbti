@@ -20,7 +20,7 @@ pub fn pr_commit_email(String, Int) -> String
 
 pub fn pr_title(String, String) -> String
 
-pub async fn publish_changes(String, String, String, WriteConfirm, String, title? : String, branch? : String, verified_paths? : Array[String], source_revision? : String, quiet? : Bool, idempotency_key? : String) -> String?
+pub async fn publish_changes(String, String, String, WriteConfirm, String, title? : String, branch? : String, verified_paths? : Array[String], source_revision? : String, quiet? : Bool, idempotency_key? : String, prepare_only? : Bool) -> String?
 
 pub fn publish_tools(Workspace) -> Array[@tools.Tool]
 

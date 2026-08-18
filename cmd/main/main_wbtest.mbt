@@ -204,6 +204,35 @@ test "batch-audit config uses mode 1 defaults and repeated filters" {
 }
 
 ///|
+test "agent event summaries stay readable for the live activity feed" {
+  assert_eq(
+    agent_event_summary(
+      @runtime.ToolStarted({
+        round: 1,
+        call_id: "call-1",
+        name: "read_file",
+        arguments: "{\"path\":\"src/a.mbt\"}",
+      }),
+    ),
+    "调用工具 read_file",
+  )
+  assert_eq(
+    agent_event_summary(
+      @runtime.ToolFinished({
+        round: 1,
+        call_id: "call-1",
+        name: "run_moon",
+        status: "ok",
+        result: "{}",
+      }),
+    ),
+    "run_moon 完成",
+  )
+  assert_eq(agent_event_summary(@runtime.FinalStarted), "开始生成报告")
+  assert_eq(agent_event_summary(Error("boom")), "错误：boom")
+}
+
+///|
 test "cli accepts --version flag" {
   let root = root_command()
   let parsed = root.parse(argv=["--version"], env=Map([]))

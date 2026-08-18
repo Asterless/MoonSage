@@ -214,6 +214,9 @@ pub(all) struct BatchItem {
   mut retryable : Bool
   mut force_run : Bool
   mut pr_url : String
+  mut prepared_branch : String
+  mut prepared_commit : String
+  mut prepared_at_ms : Int64
   mut error : String
   created_at_ms : Int64
   mut updated_at_ms : Int64
@@ -250,6 +253,9 @@ pub fn BatchItem::from_module(
     retryable: false,
     force_run: false,
     pr_url: "",
+    prepared_branch: "",
+    prepared_commit: "",
+    prepared_at_ms: 0L,
     error: "",
     created_at_ms: now_ms,
     updated_at_ms: now_ms,
@@ -328,10 +334,14 @@ pub(all) struct BatchPublishRequest {
   report : String
   validation : ValidationSummary
   changed_files : Array[String]
+  prepare_only : Bool
 } derive(Eq, Debug)
 
 ///|
 pub(all) struct BatchPublishResult {
+  prepared : Bool
+  prepared_branch : String
+  prepared_commit : String
   created : Bool
   pr_url : String
   error : String
@@ -367,6 +377,7 @@ pub(all) struct BatchControl {
   pause : Bool
   cancel : Bool
   retry_items : Array[String]
+  prepare_items : Array[String]
   approved_items : Array[String]
   updated_at_ms : Int64
 } derive(Eq, Debug)
@@ -377,6 +388,7 @@ pub fn empty_batch_control() -> BatchControl {
     pause: false,
     cancel: false,
     retry_items: [],
+    prepare_items: [],
     approved_items: [],
     updated_at_ms: 0L,
   }

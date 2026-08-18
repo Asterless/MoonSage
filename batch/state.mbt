@@ -150,6 +150,9 @@ pub fn retry_batch_item(
   item.retryable = false
   item.force_run = force
   item.pr_url = ""
+  item.prepared_branch = ""
+  item.prepared_commit = ""
+  item.prepared_at_ms = 0L
   item.updated_at_ms = now_ms
   if record.status is (Completed | Failed) {
     record.status = Queued
@@ -323,6 +326,19 @@ pub fn can_auto_publish(record : BatchRecord, item : BatchItem) -> Bool {
 }
 
 ///|
+// 拟稿（本地 commit + PR 预览）不产生远端 PR，因此不受 max_prs 限制；
+// 敏感/超限项需要人工 approve 后才会被拟稿。
+pub fn can_prepare(record : BatchRecord, item : BatchItem) -> Bool {
+  !(record.status is Cancelled) &&
+  item.status is VerifiedPendingPublish &&
+  item.prepared_commit == "" &&
+  item.validation.passed() &&
+  publish_context_is_complete(item) &&
+  audit_result_item_has_changes(item) &&
+  item.error == ""
+}
+
+///|
 fn branch_component(value : String, max_chars : Int) -> String {
   let normalized = value.to_lower().replace_all(old=".", new="-")
   if normalized.length() <= max_chars {
@@ -373,6 +389,7 @@ pub fn prepare_publish(
     report: item.report,
     validation: item.validation,
     changed_files: item.changed_files.copy(),
+    prepare_only: false,
   })
 }
 
@@ -421,6 +438,47 @@ pub fn apply_publish_result(
     item.status = Failed
     item.error = if result.error == "" {
       "publish failed"
+    } else {
+      result.error
+    }
+    item.retryable = false
+  }
+  item.updated_at_ms = now_ms
+  record.updated_at_ms = now_ms
+}
+
+///|
+// 本地拟稿结果：prepared 成功回到 VerifiedPendingPublish 并记录分支/commit，
+// 供 Web 端展示预览并在人工确认后由 submit 复用本地提交。
+pub fn apply_prepare_result(
+  record : BatchRecord,
+  item_key : String,
+  result : BatchPublishResult,
+  now_ms : Int64,
+) -> Unit raise {
+  guard record.find_item(item_key) is Some(item) else {
+    fail("batch item not found: \{item_key}")
+  }
+  guard item.status is Publishing else {
+    fail("batch item is not preparing: \{item_key}")
+  }
+  if result.prepared &&
+    result.prepared_branch != "" &&
+    result.prepared_commit != "" {
+    item.status = VerifiedPendingPublish
+    item.prepared_branch = result.prepared_branch
+    item.prepared_commit = result.prepared_commit
+    item.prepared_at_ms = now_ms
+    item.error = ""
+    item.retryable = false
+  } else if result.retryable {
+    item.status = VerifiedPendingPublish
+    item.error = result.error
+    item.retryable = true
+  } else {
+    item.status = Failed
+    item.error = if result.error == "" {
+      "prepare failed"
     } else {
       result.error
     }
@@ -512,6 +570,9 @@ pub fn merge_snapshot(
           existing.retryable = false
           existing.force_run = false
           existing.pr_url = ""
+          existing.prepared_branch = ""
+          existing.prepared_commit = ""
+          existing.prepared_at_ms = 0L
           existing.error = ""
           existing.updated_at_ms = now_ms
           enqueued += 1

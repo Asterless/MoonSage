@@ -187,6 +187,9 @@ pub fn BatchItem::to_json(self : BatchItem) -> Json {
     "retryable": Json::boolean(self.retryable),
     "force_run": Json::boolean(self.force_run),
     "pr_url": Json::string(self.pr_url),
+    "prepared_branch": Json::string(self.prepared_branch),
+    "prepared_commit": Json::string(self.prepared_commit),
+    "prepared_at_ms": json_int64(self.prepared_at_ms),
     "error": Json::string(self.error),
     "created_at_ms": json_int64(self.created_at_ms),
     "updated_at_ms": json_int64(self.updated_at_ms),
@@ -225,6 +228,9 @@ pub fn BatchItem::from_json(document : Json) -> BatchItem raise {
     retryable: optional_bool(fields, "retryable", false),
     force_run: optional_bool(fields, "force_run", false),
     pr_url: optional_string(fields, "pr_url", ""),
+    prepared_branch: optional_string(fields, "prepared_branch", ""),
+    prepared_commit: optional_string(fields, "prepared_commit", ""),
+    prepared_at_ms: optional_int64(fields, "prepared_at_ms", 0L),
     error: optional_string(fields, "error", ""),
     created_at_ms: optional_int64(fields, "created_at_ms", 0L),
     updated_at_ms: optional_int64(fields, "updated_at_ms", 0L),
@@ -340,6 +346,7 @@ pub fn BatchControl::to_json(self : BatchControl) -> Json {
     "pause": Json::boolean(self.pause),
     "cancel": Json::boolean(self.cancel),
     "retry_items": json_strings(self.retry_items),
+    "prepare_items": json_strings(self.prepare_items),
     "approved_items": json_strings(self.approved_items),
     "updated_at_ms": json_int64(self.updated_at_ms),
   })
@@ -354,6 +361,7 @@ pub fn BatchControl::from_json(document : Json) -> BatchControl raise {
     pause: optional_bool(fields, "pause", false),
     cancel: optional_bool(fields, "cancel", false),
     retry_items: optional_strings(fields, "retry_items"),
+    prepare_items: optional_strings(fields, "prepare_items"),
     approved_items: optional_strings(fields, "approved_items"),
     updated_at_ms: optional_int64(fields, "updated_at_ms", 0L),
   }
@@ -374,5 +382,6 @@ pub fn BatchPublishRequest::to_json(self : BatchPublishRequest) -> Json {
     "report": Json::string(self.report),
     "validation": self.validation.to_json(),
     "changed_files": json_strings(self.changed_files),
+    "prepare_only": Json::boolean(self.prepare_only),
   })
 }

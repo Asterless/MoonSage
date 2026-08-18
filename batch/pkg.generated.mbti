@@ -14,6 +14,8 @@ pub fn apply_audit_result(BatchRecord, BatchItem, BatchAuditResult, Int64) -> Un
 
 pub fn apply_idempotency(BatchItem, Map[String, String], Int64) -> Bool
 
+pub fn apply_prepare_result(BatchRecord, String, BatchPublishResult, Int64) -> Unit raise
+
 pub fn apply_publish_result(BatchRecord, String, BatchPublishResult, Int64) -> Unit raise
 
 pub fn audit_result_has_changes(BatchAuditResult) -> Bool
@@ -51,6 +53,8 @@ pub fn batch_storage_dir(String) -> String
 pub fn binary_changed_path(String) -> Bool
 
 pub fn can_auto_publish(BatchRecord, BatchItem) -> Bool
+
+pub fn can_prepare(BatchRecord, BatchItem) -> Bool
 
 pub fn cancel_batch(BatchRecord, Int64) -> Unit
 
@@ -98,7 +102,11 @@ pub fn parse_github_repository(String) -> (String, String)?
 
 pub async fn pause_batch_by_id(String, String) -> BatchRecord?
 
+pub async fn prepare_batch_item_by_id(String, String, String, async (BatchPublishRequest) -> BatchPublishResult, approved? : Bool, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
+
 pub fn prepare_publish(BatchRecord, String, Int64, approved? : Bool) -> BatchPublishRequest?
+
+pub async fn prepare_ready_batch_items(String, BatchRecord, async (BatchPublishRequest) -> BatchPublishResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
 
 pub async fn publish_batch_item_by_id(String, String, String, async (BatchPublishRequest) -> BatchPublishResult, approved? : Bool, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
 
@@ -191,6 +199,7 @@ pub(all) struct BatchControl {
   pause : Bool
   cancel : Bool
   retry_items : Array[String]
+  prepare_items : Array[String]
   approved_items : Array[String]
   updated_at_ms : Int64
 } derive(Eq, @debug.Debug)
@@ -235,6 +244,9 @@ pub(all) struct BatchItem {
   mut retryable : Bool
   mut force_run : Bool
   mut pr_url : String
+  mut prepared_branch : String
+  mut prepared_commit : String
+  mut prepared_at_ms : Int64
   mut error : String
   created_at_ms : Int64
   mut updated_at_ms : Int64
@@ -283,10 +295,14 @@ pub(all) struct BatchPublishRequest {
   report : String
   validation : ValidationSummary
   changed_files : Array[String]
+  prepare_only : Bool
 } derive(Eq, @debug.Debug)
 pub fn BatchPublishRequest::to_json(Self) -> Json
 
 pub(all) struct BatchPublishResult {
+  prepared : Bool
+  prepared_branch : String
+  prepared_commit : String
   created : Bool
   pr_url : String
   error : String

@@ -29,6 +29,14 @@ async fn write_batch_control_action(
         retry_items: unique_batch_keys(previous.retry_items, item_key),
         updated_at_ms: @async.now(),
       }
+    "prepare" =>
+      {
+        ..previous,
+        pause: false,
+        cancel: false,
+        prepare_items: unique_batch_keys(previous.prepare_items, item_key),
+        updated_at_ms: @async.now(),
+      }
     "publish" =>
       {
         ..previous,
@@ -128,13 +136,35 @@ async fn run_batch_control_command(
         print_batch_record(retried)
       }
     }
+    "prepare" => {
+      let item_key = required_batch_item(m)
+      guard record.find_item(item_key) is Some(item) else {
+        fail("batch item not found: \{item_key}")
+      }
+      guard item.status is @batch.VerifiedPendingPublish else {
+        fail("only verified_pending_publish items can be prepared")
+      }
+      guard item.prepared_commit == "" else {
+        fail("item is already prepared for publish")
+      }
+      write_batch_control_action(data_root, id, "prepare", item_key~)
+      let prepared = run_mode1_worker(data_root, id, flag_of(m, "stream-json"))
+      if !flag_of(m, "stream-json") {
+        print_batch_record(prepared)
+      }
+    }
     "publish" => {
       let item_key = required_batch_item(m)
       guard record.find_item(item_key) is Some(item) else {
         fail("batch item not found: \{item_key}")
       }
       guard item.status is @batch.VerifiedPendingPublish else {
-        fail("only verified_pending_publish items can be approved")
+        fail("only verified_pending_publish items can be submitted")
+      }
+      guard item.prepared_commit != "" else {
+        fail(
+          "item is not prepared yet; run `batch-audit prepare` first to draft the PR locally",
+        )
       }
       write_batch_control_action(data_root, id, "publish", item_key~)
       let published = run_mode1_worker(data_root, id, flag_of(m, "stream-json"))

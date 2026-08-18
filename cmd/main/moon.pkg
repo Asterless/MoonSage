@@ -23,6 +23,7 @@ import {
   "moonsage/dotenv",
   "moonbitlang/async",
   "moonbitlang/async/fs",
+  "moonbitlang/async/process",
   "moonbitlang/async/stdio",
   "moonbitlang/core/argparse",
   "moonbitlang/core/env",

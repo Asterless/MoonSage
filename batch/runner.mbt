@@ -106,6 +106,14 @@ async fn cancel_batch_if_requested(
 }
 
 ///|
+fn publish_pause_requested(
+  control : BatchControl,
+  record : BatchRecord,
+) -> Bool {
+  control.pause || record.status is Paused
+}
+
+///|
 /// Persist one real audit phase reported by the structured executor. Stage
 /// callbacks from concurrent items are serialized so each update is merged
 /// into the latest record instead of overwriting a sibling item's phase.
@@ -463,6 +471,7 @@ pub async fn pause_batch_by_id(data_root : String, id : String) -> BatchRecord? 
     pause: true,
     cancel: false,
     retry_items: [],
+    prepare_items: [],
     approved_items: [],
     updated_at_ms: @async.now(),
   }) catch {
@@ -489,6 +498,7 @@ pub async fn resume_batch_by_id(
     pause: false,
     cancel: false,
     retry_items: [],
+    prepare_items: [],
     approved_items: [],
     updated_at_ms: @async.now(),
   }) catch {
@@ -512,6 +522,7 @@ pub async fn cancel_batch_by_id(
     pause: false,
     cancel: true,
     retry_items: [],
+    prepare_items: [],
     approved_items: [],
     updated_at_ms: @async.now(),
   }) catch {
@@ -565,6 +576,15 @@ pub async fn publish_batch_item_by_id(
   if cancel_batch_if_requested(data_root, record, on_event, secrets) {
     return Some(record)
   }
+  if publish_pause_requested(load_batch_control(data_root, id), record) {
+    return Some(record)
+  }
+  // submit 阶段只处理已完成本地拟稿（分支 + commit 就绪）的 item，
+  // 未拟稿项必须先经过 prepare，人工确认后才会被推送并创建 PR。
+  guard record.find_item(item_key) is Some(item) else { return None }
+  guard item.status is VerifiedPendingPublish && item.prepared_commit != "" else {
+    return Some(record)
+  }
   guard prepare_publish(record, item_key, @async.now(), approved~)
     is Some(request) else {
     return Some(record)
@@ -589,8 +609,14 @@ pub async fn publish_batch_item_by_id(
   if cancel_batch_if_requested(data_root, record, on_event, secrets) {
     return Some(record)
   }
+  if publish_pause_requested(load_batch_control(data_root, id), record) {
+    return Some(record)
+  }
   let result = execute_publish_with_retries(request, record.config, publish)
   if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+    return Some(record)
+  }
+  if publish_pause_requested(load_batch_control(data_root, id), record) {
     return Some(record)
   }
   apply_publish_result(record, item_key, result, @async.now()) catch {
@@ -620,6 +646,93 @@ pub async fn publish_batch_item_by_id(
 }
 
 ///|
+pub async fn prepare_batch_item_by_id(
+  data_root : String,
+  id : String,
+  item_key : String,
+  prepare : async (BatchPublishRequest) -> BatchPublishResult,
+  approved? : Bool = false,
+  on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
+  secrets? : Array[String] = [],
+) -> BatchRecord? {
+  guard load_batch(data_root, id) is Some(record) else { return None }
+  if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+    return Some(record)
+  }
+  if publish_pause_requested(load_batch_control(data_root, id), record) {
+    return Some(record)
+  }
+  guard record.find_item(item_key) is Some(item) else { return None }
+  let eligible = if approved {
+    can_prepare(record, item)
+  } else {
+    can_prepare(record, item) && can_auto_publish(record, item)
+  }
+  guard eligible else { return Some(record) }
+  guard prepare_publish(record, item_key, @async.now(), approved~)
+    is Some(request) else {
+    return Some(record)
+  }
+  let request = { ..request, prepare_only: true }
+  save_batch(data_root, record, secrets~) catch {
+    _ => ()
+  }
+  emit_event(
+    data_root,
+    BatchEvent::new(
+      "prepare",
+      id,
+      @async.now(),
+      item_key~,
+      cycle=record.cycle,
+      message="preparing",
+      data=request.to_json(),
+    ),
+    on_event,
+    secrets,
+  )
+  if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+    return Some(record)
+  }
+  if publish_pause_requested(load_batch_control(data_root, id), record) {
+    return Some(record)
+  }
+  let result = execute_publish_with_retries(request, record.config, prepare)
+  if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+    return Some(record)
+  }
+  if publish_pause_requested(load_batch_control(data_root, id), record) {
+    return Some(record)
+  }
+  apply_prepare_result(record, item_key, result, @async.now()) catch {
+    _ => return Some(record)
+  }
+  save_batch(data_root, record, secrets~) catch {
+    _ => ()
+  }
+  emit_event(
+    data_root,
+    BatchEvent::new(
+      "prepared",
+      id,
+      @async.now(),
+      item_key~,
+      cycle=record.cycle,
+      message=result.error,
+      data=Json::object({
+        "prepared": Json::boolean(result.prepared),
+        "prepared_branch": Json::string(result.prepared_branch),
+        "prepared_commit": Json::string(result.prepared_commit),
+        "retryable": Json::boolean(result.retryable),
+      }),
+    ),
+    on_event,
+    secrets,
+  )
+  Some(record)
+}
+
+///|
 async fn execute_publish_with_retries(
   request : BatchPublishRequest,
   config : BatchConfig,
@@ -632,6 +745,9 @@ async fn execute_publish_with_retries(
     }) catch {
       @async.TimeoutError(_) =>
         {
+          prepared: false,
+          prepared_branch: "",
+          prepared_commit: "",
           created: false,
           pr_url: "",
           error: "publish timed out",
@@ -639,6 +755,9 @@ async fn execute_publish_with_retries(
         }
       error =>
         {
+          prepared: false,
+          prepared_branch: "",
+          prepared_commit: "",
           created: false,
           pr_url: "",
           error: error.to_string(),
@@ -653,10 +772,122 @@ async fn execute_publish_with_retries(
 }
 
 ///|
-/// Publish every currently eligible item in deterministic record order. Safe
-/// items are automatic until the per-cycle PR cap is reached; sensitive or
-/// oversized items require their key in the persisted approval control list.
-/// The injected publisher owns all Git/fork/GitHub operations.
+/// 自动拟稿：对满足条件的 item 在本地完成分支 + commit + PR 拟稿（不推送、
+/// 不创建远端 PR）。安全项自动拟稿；敏感/超限项需要 key 出现在
+/// control.prepare_items（人工点击“拟稿”）中。
+pub async fn prepare_ready_batch_items(
+  data_root : String,
+  record : BatchRecord,
+  prepare : async (BatchPublishRequest) -> BatchPublishResult,
+  on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
+  secrets? : Array[String] = [],
+) -> BatchRecord {
+  let control = load_batch_control(data_root, record.id)
+  if control.cancel || record.status is Cancelled {
+    persist_cancelled_batch(data_root, record, on_event, secrets)
+    return record
+  }
+  if publish_pause_requested(control, record) {
+    return record
+  }
+  let mut consumed_prepare = false
+  let remaining_prepares = control.prepare_items.copy()
+  for item in record.items {
+    if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+      return record
+    }
+    if publish_pause_requested(load_batch_control(data_root, record.id), record) {
+      return record
+    }
+    let manual = remaining_prepares.contains(item.key)
+    guard can_prepare(record, item) &&
+      (manual || can_auto_publish(record, item)) else {
+      continue
+    }
+    guard prepare_publish(record, item.key, @async.now(), approved=manual)
+      is Some(request) else {
+      continue
+    }
+    if manual {
+      remaining_prepares.retain(fn(key) { key != item.key })
+      consumed_prepare = true
+    }
+    let request = { ..request, prepare_only: true }
+    save_batch(data_root, record, secrets~) catch {
+      _ => ()
+    }
+    emit_event(
+      data_root,
+      BatchEvent::new(
+        "prepare",
+        record.id,
+        @async.now(),
+        item_key=item.key,
+        cycle=record.cycle,
+        message="preparing",
+        data=request.to_json(),
+      ),
+      on_event,
+      secrets,
+    )
+    if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+      return record
+    }
+    if publish_pause_requested(load_batch_control(data_root, record.id), record) {
+      return record
+    }
+    let result = execute_publish_with_retries(request, record.config, prepare)
+    if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+      return record
+    }
+    if publish_pause_requested(load_batch_control(data_root, record.id), record) {
+      return record
+    }
+    apply_prepare_result(record, item.key, result, @async.now()) catch {
+      _ => ()
+    }
+    save_batch(data_root, record, secrets~) catch {
+      _ => ()
+    }
+    emit_event(
+      data_root,
+      BatchEvent::new(
+        "prepared",
+        record.id,
+        @async.now(),
+        item_key=item.key,
+        cycle=record.cycle,
+        message=result.error,
+        data=Json::object({
+          "prepared": Json::boolean(result.prepared),
+          "prepared_branch": Json::string(result.prepared_branch),
+          "prepared_commit": Json::string(result.prepared_commit),
+          "retryable": Json::boolean(result.retryable),
+        }),
+      ),
+      on_event,
+      secrets,
+    )
+  }
+  if consumed_prepare {
+    save_batch_control(data_root, record.id, {
+      ..control,
+      prepare_items: remaining_prepares,
+      updated_at_ms: @async.now(),
+    }) catch {
+      _ => ()
+    }
+  }
+  save_batch(data_root, record, secrets~) catch {
+    _ => ()
+  }
+  emit_event(data_root, batch_state_event(record), on_event, secrets)
+  record
+}
+
+///|
+/// 提交已批准且完成本地拟稿的 item：仅推送并创建远端 PR，绝不自动提交
+/// 未出现在 approved_items 中的拟稿。
 pub async fn publish_ready_batch_items(
   data_root : String,
   record : BatchRecord,
@@ -669,22 +900,30 @@ pub async fn publish_ready_batch_items(
     persist_cancelled_batch(data_root, record, on_event, secrets)
     return record
   }
+  if publish_pause_requested(control, record) {
+    return record
+  }
   let mut consumed_approval = false
   let remaining_approvals = control.approved_items.copy()
   for item in record.items {
     if cancel_batch_if_requested(data_root, record, on_event, secrets) {
       return record
     }
+    if publish_pause_requested(load_batch_control(data_root, record.id), record) {
+      return record
+    }
     let approved = remaining_approvals.contains(item.key)
-    guard approved || can_auto_publish(record, item) else { continue }
-    guard prepare_publish(record, item.key, @async.now(), approved~)
+    guard approved &&
+      item.status is VerifiedPendingPublish &&
+      item.prepared_commit != "" else {
+      continue
+    }
+    guard prepare_publish(record, item.key, @async.now(), approved=true)
       is Some(request) else {
       continue
     }
-    if approved {
-      remaining_approvals.retain(fn(key) { key != item.key })
-      consumed_approval = true
-    }
+    remaining_approvals.retain(fn(key) { key != item.key })
+    consumed_approval = true
     save_batch(data_root, record, secrets~) catch {
       _ => ()
     }
@@ -705,8 +944,14 @@ pub async fn publish_ready_batch_items(
     if cancel_batch_if_requested(data_root, record, on_event, secrets) {
       return record
     }
+    if publish_pause_requested(load_batch_control(data_root, record.id), record) {
+      return record
+    }
     let result = execute_publish_with_retries(request, record.config, publish)
     if cancel_batch_if_requested(data_root, record, on_event, secrets) {
+      return record
+    }
+    if publish_pause_requested(load_batch_control(data_root, record.id), record) {
       return record
     }
     apply_publish_result(record, item.key, result, @async.now()) catch {
