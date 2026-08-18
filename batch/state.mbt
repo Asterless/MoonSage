@@ -153,6 +153,7 @@ pub fn retry_batch_item(
   item.prepared_branch = ""
   item.prepared_commit = ""
   item.prepared_at_ms = 0L
+  item.needs_review = false
   item.updated_at_ms = now_ms
   if record.status is (Completed | Failed) {
     record.status = Queued
@@ -273,39 +274,54 @@ pub fn apply_audit_result(
     VerifiedPendingPublish =>
       if !result.evidence_conflicts.is_empty() {
         item.status = Failed
+        item.needs_review = false
         item.retryable = false
         item.error = "audit evidence conflict: " +
           result.evidence_conflicts.join("; ")
       } else if !result.validation.passed() {
         item.status = Failed
+        item.needs_review = false
         item.retryable = false
         item.error = "check, build and test must all pass before publishing"
       } else if !audit_result_has_changes(result) {
         item.status = NoChanges
+        item.needs_review = false
         item.error = ""
       } else if result.source_revision.trim() == "" {
         item.status = Failed
+        item.needs_review = false
         item.retryable = false
         item.error = "source revision is required before publishing"
       } else if result.workspace.trim() == "" || result.project_dir.trim() == "" {
         item.status = Failed
+        item.needs_review = false
         item.retryable = false
         item.error = "verified workspace is required before publishing"
       } else if result.changed_files.is_empty() || result.report.trim() == "" {
         item.status = Failed
+        item.needs_review = false
         item.retryable = false
         item.error = "audit report and changed file evidence are required before publishing"
       } else {
         item.status = VerifiedPendingPublish
+        item.needs_review = result.needs_review
       }
     NoChanges => {
       item.status = NoChanges
+      item.needs_review = false
       item.error = ""
     }
-    Skipped => item.status = Skipped
-    Failed => item.status = Failed
+    Skipped => {
+      item.status = Skipped
+      item.needs_review = false
+    }
+    Failed => {
+      item.status = Failed
+      item.needs_review = false
+    }
     _ => {
       item.status = Failed
+      item.needs_review = false
       item.retryable = false
       item.error = "audit executor returned an invalid terminal status"
     }
@@ -317,6 +333,7 @@ pub fn apply_audit_result(
 pub fn can_auto_publish(record : BatchRecord, item : BatchItem) -> Bool {
   !(record.status is Cancelled) &&
   item.status is VerifiedPendingPublish &&
+  !item.needs_review &&
   item.validation.passed() &&
   publish_context_is_complete(item) &&
   item.error == "" &&
@@ -331,6 +348,7 @@ pub fn can_auto_publish(record : BatchRecord, item : BatchItem) -> Bool {
 pub fn can_prepare(record : BatchRecord, item : BatchItem) -> Bool {
   !(record.status is Cancelled) &&
   item.status is VerifiedPendingPublish &&
+  !item.needs_review &&
   item.prepared_commit == "" &&
   item.validation.passed() &&
   publish_context_is_complete(item) &&
@@ -573,6 +591,7 @@ pub fn merge_snapshot(
           existing.prepared_branch = ""
           existing.prepared_commit = ""
           existing.prepared_at_ms = 0L
+          existing.needs_review = false
           existing.error = ""
           existing.updated_at_ms = now_ms
           enqueued += 1

@@ -22,6 +22,7 @@ fn failed_audit_result(message : String, retryable : Bool) -> BatchAuditResult {
     sensitive_changes: false,
     validation: empty_validation_summary(),
     evidence_conflicts: [],
+    needs_review: false,
     error: message,
     retryable,
   }

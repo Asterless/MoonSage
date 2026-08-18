@@ -95,10 +95,11 @@ test "audit tools include write_file only in fix mode" {
     confirm: ConfirmDiff,
   }
   let fix = audit_tools(fix_ctx)
-  assert_eq(fix.length(), 8)
+  assert_eq(fix.length(), 9)
   assert_true(fix.map(fn(t) { t.schema.name }).contains("write_file"))
   assert_true(fix.map(fn(t) { t.schema.name }).contains("multi_edit"))
   assert_true(fix.map(fn(t) { t.schema.name }).contains("remove"))
+  assert_true(fix.map(fn(t) { t.schema.name }).contains("submit_audit_status"))
   // git_diff tool is always present
   let always = fix.filter(fn(t) { t.schema.name == "git_diff" })
   assert_eq(always.length(), 1)
@@ -112,12 +113,103 @@ test "mode 1 audit tools replace arbitrary moon arguments with fixed verificatio
     confirm: ConfirmYes,
   }
   let tools = audit_tools(ctx, restricted_moon=true)
-  assert_eq(tools.length(), 8)
+  assert_eq(tools.length(), 9)
   let moon = tools.filter(fn(tool) { tool.schema.name == "run_moon" })
   assert_eq(moon.length(), 1)
   assert_true(moon[0].schema.description.contains("target is always native"))
   assert_true(tools.map(fn(tool) { tool.schema.name }).contains("write_file"))
+  assert_true(
+    tools.map(fn(tool) { tool.schema.name }).contains("submit_audit_status"),
+  )
   assert_true(!tools.map(fn(tool) { tool.schema.name }).contains("create_pr"))
+}
+
+///|
+async test "submit_audit_status validates status and self review gates publishing" {
+  let ctx : AuditContext = {
+    project_dir: "C:/p",
+    fix: true,
+    confirm: ConfirmYes,
+  }
+  let tools = audit_tools(ctx, restricted_moon=true)
+  let tool = @tools.find_tool(tools, "submit_audit_status").unwrap()
+  let done = tool.run("{\"status\":\"done\",\"summary\":\"all fixed\"}") catch {
+    _ => fail("done self check must succeed")
+  }
+  assert_true(done.contains("\"status\":\"done\""))
+  let invalid = tool.run("{\"status\":\"maybe\"}") catch {
+    _ => fail("invalid status must return an error payload, not raise")
+  }
+  assert_true(invalid.contains("error"))
+  // 无自检声明 / partial / blocked 都需要人工确认。
+  let empty : AuditEvidence = {
+    tools: [],
+    verification_ran: true,
+    verified: true,
+    conflicts: [],
+  }
+  assert_true(audit_self_review_needs_review(empty))
+  let done_evidence : AuditEvidence = {
+    ..empty,
+    tools: [
+      {
+        phase: "fix",
+        round: 1,
+        call_id: "self-1",
+        name: "submit_audit_status",
+        arguments: "{\"status\":\"done\"}",
+        status: "ok",
+        result: done,
+      },
+    ],
+  }
+  assert_true(!audit_self_review_needs_review(done_evidence))
+  let partial_evidence : AuditEvidence = {
+    ..done_evidence,
+    tools: [
+      {
+        phase: "fix",
+        round: 1,
+        call_id: "self-1",
+        name: "submit_audit_status",
+        arguments: "{\"status\":\"partial\"}",
+        status: "ok",
+        result: "{\"status\":\"partial\"}",
+      },
+    ],
+  }
+  assert_true(audit_self_review_needs_review(partial_evidence))
+  let blocked_evidence : AuditEvidence = {
+    ..partial_evidence,
+    tools: [
+      {
+        phase: "fix",
+        round: 1,
+        call_id: "self-1",
+        name: "submit_audit_status",
+        arguments: "{\"status\":\"blocked\"}",
+        status: "ok",
+        result: "{\"status\":\"blocked\"}",
+      },
+    ],
+  }
+  assert_true(audit_self_review_needs_review(blocked_evidence))
+  // 工具本身失败（非 ok）不算完成声明。
+  let failed_tool_evidence : AuditEvidence = {
+    ..empty,
+    tools: [
+      {
+        phase: "fix",
+        round: 1,
+        call_id: "self-1",
+        name: "submit_audit_status",
+        arguments: "{\"status\":\"done\"}",
+        status: "error",
+        result: "{\"error\":\"boom\"}",
+      },
+    ],
+  }
+  assert_true(audit_self_review_needs_review(failed_tool_evidence))
 }
 
 ///|
@@ -209,6 +301,70 @@ test "audit evidence verifies a successful post-fix moon command" {
   assert_true(evidence.verification_ran)
   assert_true(evidence.verified)
   assert_eq(evidence.conflicts.length(), 0)
+}
+
+///|
+test "controller verification substitutes for a missing agent run_moon" {
+  let evidence : AuditEvidence = {
+    tools: [],
+    verification_ran: false,
+    verified: false,
+    conflicts: ["No post-fix moon verification command was run."],
+  }
+  let validation : AuditVerificationSummary = {
+    check_passed: true,
+    build_passed: true,
+    test_passed: true,
+    check_output: "{\"exit_code\":0}",
+    build_output: "{\"exit_code\":0}",
+    test_output: "{\"exit_code\":0}",
+  }
+  let resolved = finalize_with_controller_verification(evidence, validation)
+  assert_true(resolved.verification_ran)
+  assert_true(resolved.verified)
+  assert_eq(resolved.conflicts.length(), 0)
+  // 其他证据冲突（例如验证期间工作区被改动）不能被 controller 验证掩盖。
+  let blocked : AuditEvidence = {
+    ..evidence,
+    conflicts: [
+      "The worktree changed during controller-owned verification; the final diff was not verified.",
+    ],
+  }
+  let kept = finalize_with_controller_verification(blocked, validation)
+  assert_true(!kept.verified)
+  assert_eq(kept.conflicts.length(), 1)
+  // controller 验证未通过时保留原冲突。
+  let failed_validation : AuditVerificationSummary = {
+    ..validation,
+    test_passed: false,
+  }
+  let kept_failed = finalize_with_controller_verification(
+    evidence, failed_validation,
+  )
+  assert_true(!kept_failed.verified)
+  assert_eq(kept_failed.conflicts.length(), 1)
+}
+
+///|
+async test "audit workspace excludes generated directories from git" {
+  let project_dir = @fs.tmpdir(prefix="moonsage-exclude-test-")
+  @fs.mkdir(project_dir + "/.git/info", recursive=true) catch {
+    _ => fail("cannot create git info directory")
+  }
+  ignore_audit_generated_dirs(project_dir)
+  let exclude = @fs.read_file(project_dir + "/.git/info/exclude").text() catch {
+    _ => fail("exclude file was not written")
+  }
+  assert_true(exclude.contains("# MoonSage audit generated dirs"))
+  assert_true(exclude.contains("_build/"))
+  assert_true(exclude.contains("node_modules/"))
+  let first = exclude
+  ignore_audit_generated_dirs(project_dir)
+  let second = @fs.read_file(project_dir + "/.git/info/exclude").text() catch {
+    _ => fail("exclude file disappeared")
+  }
+  assert_eq(first, second)
+  @fs.rmdir(project_dir, recursive=true)
 }
 
 ///|
@@ -461,6 +617,7 @@ test "structured audit publish gate requires evidence diff and all validations" 
       build_output: "ok",
       test_output: "ok",
     },
+    needs_review: false,
     error: "",
   }
   assert_true(result.publishable())
@@ -469,6 +626,8 @@ test "structured audit publish gate requires evidence diff and all validations" 
     validation: { ..result.validation, test_passed: false },
   }
   assert_true(!failed.publishable())
+  let review = { ..result, needs_review: true }
+  assert_true(!review.publishable())
 }
 
 ///|

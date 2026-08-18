@@ -173,6 +173,7 @@ pub(all) struct BatchAuditResult {
   sensitive_changes : Bool
   validation : ValidationSummary
   evidence_conflicts : Array[String]
+  needs_review : Bool
   error : String
   retryable : Bool
 } derive(Eq, @debug.Debug)
@@ -247,6 +248,7 @@ pub(all) struct BatchItem {
   mut prepared_branch : String
   mut prepared_commit : String
   mut prepared_at_ms : Int64
+  mut needs_review : Bool
   mut error : String
   created_at_ms : Int64
   mut updated_at_ms : Int64

@@ -1731,6 +1731,66 @@ test("batch prepare drafts locally before a manual submit", async () => {
   }
 });
 
+test("batch review releases a needs-review item without publishing", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-review-"));
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async () => ({ code: 0 }),
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const created = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const id = (await created.json()).batch.id;
+    const recordPath = join(dataRoot, "batches", `${id}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    record.status = "completed";
+    record.items = [
+      {
+        key: "review-item",
+        repository: "moonbitlang/review",
+        module_names: ["moonbitlang/review"],
+        status: "verified_pending_publish",
+        needs_review: true,
+        attempts: 1,
+        validation: { check_passed: true, build_passed: true, test_passed: true },
+      },
+      {
+        key: "plain-item",
+        repository: "moonbitlang/plain",
+        module_names: ["moonbitlang/plain"],
+        status: "verified_pending_publish",
+        needs_review: false,
+        attempts: 1,
+        validation: { check_passed: true, build_passed: true, test_passed: true },
+      },
+    ];
+    await writeFile(recordPath, JSON.stringify(record, null, 2) + "\n", "utf8");
+
+    // 非 needs_review 的 item 不能走 review。
+    const rejected = await fetch(`${base}/api/batches/${id}/items/plain-item/review`, { method: "POST" });
+    assert.equal(rejected.status, 409);
+
+    const released = await fetch(`${base}/api/batches/${id}/items/review-item/review`, { method: "POST" });
+    assert.equal(released.status, 202);
+    const persisted = JSON.parse(await readFile(recordPath, "utf8"));
+    assert.equal(persisted.items.find((item) => item.key === "review-item").needs_review, false);
+    assert.equal(persisted.items.find((item) => item.key === "review-item").status, "verified_pending_publish");
+
+    // 放行后再次 review 被拒绝。
+    const again = await fetch(`${base}/api/batches/${id}/items/review-item/review`, { method: "POST" });
+    assert.equal(again.status, 409);
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("batch recovery requeues in-progress items and restarts the worker", async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-recovery-"));
   const first = serve({

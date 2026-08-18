@@ -2052,6 +2052,9 @@ function ensureBatchItem(batch, event) {
       sensitive_changes: source.sensitive_changes === true,
       retryable: source.retryable === true,
       pr_url: typeof source.pr_url === "string" ? source.pr_url : "",
+      needs_review: source.needs_review === true,
+      prepared_branch: typeof source.prepared_branch === "string" ? source.prepared_branch : "",
+      prepared_commit: typeof source.prepared_commit === "string" ? source.prepared_commit : "",
       error: typeof source.error === "string" ? source.error : "",
       created_at_ms: Number.isSafeInteger(source.created_at_ms) ? source.created_at_ms : Date.now(),
       updated_at_ms: Number.isSafeInteger(source.updated_at_ms) ? source.updated_at_ms : Date.now(),
@@ -2548,6 +2551,18 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     return batch;
   };
 
+  const review = async (id, itemId) => {
+    const batch = await readBatch(id, storeRoot);
+    const item = findBatchItem(batch, itemId);
+    if (!item) throw batchError("Batch item is not found.", 404);
+    if (item.status !== "verified_pending_publish" || item.needs_review !== true) {
+      throw batchError("Only verified items awaiting review can be released.", 409);
+    }
+    item.needs_review = false;
+    await writeBatch(batch, storeRoot);
+    return batch;
+  };
+
   const recover = async () => {
     let entries;
     try { entries = await readdir(batchStorePath(storeRoot), { withFileTypes: true }); }
@@ -2589,7 +2604,7 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     }
   };
 
-  return { approve, cancel, pause, prepare, recover, resume, retry, start, stopAll, subscribe, storeRoot };
+  return { approve, cancel, pause, prepare, recover, resume, retry, review, start, stopAll, subscribe, storeRoot };
 }
 
 function beginSse(response) {
@@ -2706,7 +2721,7 @@ async function serveBatches(request, response, pathname, controller) {
       sendJson(response, action[2] === "run" ? 202 : 200, { batch: publicBatch(batch) });
       return true;
     }
-    const itemAction = pathname.match(/^\/api\/batches\/([^/]+)\/items\/([^/]+)\/(retry|approve|prepare)$/);
+    const itemAction = pathname.match(/^\/api\/batches\/([^/]+)\/items\/([^/]+)\/(retry|approve|prepare|review)$/);
     if (itemAction) {
       if (request.method !== "POST") {
         sendJson(response, 405, { error: "Only POST is supported." });
@@ -2718,7 +2733,9 @@ async function serveBatches(request, response, pathname, controller) {
         ? await controller.retry(id, itemId)
         : itemAction[3] === "prepare"
           ? await controller.prepare(id, itemId)
-          : await controller.approve(id, itemId);
+          : itemAction[3] === "review"
+            ? await controller.review(id, itemId)
+            : await controller.approve(id, itemId);
       sendJson(response, 202, { batch: publicBatch(batch) });
       return true;
     }

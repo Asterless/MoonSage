@@ -235,6 +235,12 @@ pub async fn run_mode1_audit_item(
     NoChanges
   } else if result.publishable() {
     VerifiedPendingPublish
+  } else if result.needs_review &&
+    validation.passed() &&
+    result.evidence.conflicts.is_empty() {
+    // 修复 Agent 自检未完成（或未声明）：验证虽然通过，但结果挂起等待
+    // 人工确认，绝不自动拟稿或发布。
+    VerifiedPendingPublish
   } else {
     Failed
   }
@@ -269,6 +275,7 @@ pub async fn run_mode1_audit_item(
     (result.diff.trim() != "" && files.is_empty()),
     validation,
     evidence_conflicts: result.evidence.conflicts.copy(),
+    needs_review: result.needs_review,
     error,
     retryable: status is Failed && retryable_audit_failure(error),
   }

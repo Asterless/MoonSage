@@ -217,6 +217,7 @@ pub(all) struct BatchItem {
   mut prepared_branch : String
   mut prepared_commit : String
   mut prepared_at_ms : Int64
+  mut needs_review : Bool
   mut error : String
   created_at_ms : Int64
   mut updated_at_ms : Int64
@@ -256,6 +257,7 @@ pub fn BatchItem::from_module(
     prepared_branch: "",
     prepared_commit: "",
     prepared_at_ms: 0L,
+    needs_review: false,
     error: "",
     created_at_ms: now_ms,
     updated_at_ms: now_ms,
@@ -316,6 +318,7 @@ pub(all) struct BatchAuditResult {
   sensitive_changes : Bool
   validation : ValidationSummary
   evidence_conflicts : Array[String]
+  needs_review : Bool
   error : String
   retryable : Bool
 } derive(Eq, Debug)
