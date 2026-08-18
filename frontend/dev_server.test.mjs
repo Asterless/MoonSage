@@ -1237,6 +1237,15 @@ test("batch worker uses the internal batch-audit command and forwards JSONL", as
               message: "",
               data: { status: "running" },
             }) + "\n");
+            child.stdout.write(JSON.stringify({
+              kind: "agent_event",
+              batch_id: "batch-command-1234",
+              item_key: "moonbitlang--demo",
+              cycle: 1,
+              timestamp_ms: 2,
+              message: "调用工具 read_file",
+              data: { type: "tool_started", tool: "read_file" },
+            }) + "\n");
             child.stdout.end();
             child.emit("close", 0, null);
           });
@@ -1259,6 +1268,8 @@ test("batch worker uses the internal batch-audit command and forwards JSONL", as
   assert.equal(invocation.options.env.GITHUB_TOKEN, undefined);
   assert.equal(result.code, 0);
   assert.equal(events[0].kind, "batch_state");
+  assert.equal(events.some((event) => event.kind === "agent_event"), true);
+  assert.equal(events.find((event) => event.kind === "agent_event").data.tool, "read_file");
 });
 
 test("batch API persists worker events, serves SSE, and redacts secrets", async () => {
@@ -1387,6 +1398,83 @@ test("batch controls pause, resume, and cancel an injected worker", async () => 
     assert.equal((await cancelled.json()).batch.status, "running");
     assert.equal(JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.control.json`), "utf8")).cancel, true);
     assert.equal(JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.json`), "utf8")).status, "running");
+    // Once the injected worker exits, the server settles the record from the
+    // durable control file so the batch cannot remain "running" forever.
+    await waitForBatch(base, batch.id, (current) => current.status === "cancelled");
+    assert.equal(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.json`), "utf8")).status,
+      "cancelled",
+    );
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("cancelling a queued batch without a running worker persists cancelled", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-queued-cancel-"));
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async () => ({ code: 0 }),
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const created = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const batch = (await created.json()).batch;
+    assert.equal(batch.status, "queued");
+    const cancelled = await fetch(`${base}/api/batches/${batch.id}/cancel`, { method: "POST" });
+    assert.equal(cancelled.status, 200);
+    const body = (await cancelled.json()).batch;
+    assert.equal(body.status, "cancelled");
+    assert.equal(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.json`), "utf8")).status,
+      "cancelled",
+    );
+    assert.equal(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.control.json`), "utf8")).cancel,
+      true,
+    );
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("pausing a queued batch without a running worker persists paused", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-queued-pause-"));
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async () => ({ code: 0 }),
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const created = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const batch = (await created.json()).batch;
+    assert.equal(batch.status, "queued");
+    const paused = await fetch(`${base}/api/batches/${batch.id}/pause`, { method: "POST" });
+    assert.equal(paused.status, 200);
+    const body = (await paused.json()).batch;
+    assert.equal(body.status, "paused");
+    assert.equal(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.json`), "utf8")).status,
+      "paused",
+    );
+    assert.equal(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${batch.id}.control.json`), "utf8")).pause,
+      true,
+    );
   } finally {
     await closeServer(server);
     await rm(dataRoot, { recursive: true, force: true });
@@ -1433,6 +1521,7 @@ test("batch retry and approval leave worker-owned record states untouched", asyn
         status: "verified_pending_publish",
         attempts: 1,
         error: "",
+        prepared_commit: "local-draft-commit",
         validation: {},
       },
     ];
@@ -1498,6 +1587,12 @@ test("batch item retry and approval restart terminal work without duplicating it
         await persistFakeBatchEvent(batch, context, emit, {
           type: "item_state", item_id: "approval-item", state: "verified_pending_publish",
         });
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "prepared",
+          item_id: "approval-item",
+          prepared_branch: "moonsage/mode1/approval",
+          prepared_commit: "local-approval-commit",
+        });
       } else if (runCount === 2) {
         const control = JSON.parse(await readFile(context.paths.control, "utf8"));
         assert.deepEqual(control.retry_items, ["retry-item"]);
@@ -1543,6 +1638,92 @@ test("batch item retry and approval restart terminal work without duplicating it
       batch.status === "completed" && batch.items.find((item) => item.id === "approval-item")?.status === "created"
     ));
     assert.equal(afterApproval.items.length, 2);
+    assert.equal(runCount, 3);
+  } finally {
+    await closeServer(server);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("batch prepare drafts locally before a manual submit", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-prepare-"));
+  let runCount = 0;
+  const server = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async (batch, emit, _signal, context) => {
+      runCount += 1;
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "running" });
+      if (runCount === 1) {
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "item_enqueued",
+          item: { id: "draft-item", repository: "moonbitlang/draft", status: "verified_pending_publish" },
+        });
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "item_state", item_id: "draft-item", state: "verified_pending_publish",
+        });
+      } else if (runCount === 2) {
+        const control = JSON.parse(await readFile(context.paths.control, "utf8"));
+        assert.deepEqual(control.prepare_items, ["draft-item"]);
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "prepared",
+          item_id: "draft-item",
+          prepared_branch: "moonsage/mode1/draft",
+          prepared_commit: "local-draft-commit",
+        });
+      } else {
+        const control = JSON.parse(await readFile(context.paths.control, "utf8"));
+        assert.deepEqual(control.approved_items, ["draft-item"]);
+        await persistFakeBatchEvent(batch, context, emit, {
+          type: "publish",
+          item_id: "draft-item",
+          status: "created",
+          pr_url: "https://github.com/moonbitlang/draft/pull/3",
+        });
+      }
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "completed" });
+      return { code: 0 };
+    },
+  });
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const created = await fetch(base + "/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const id = (await created.json()).batch.id;
+    await fetch(`${base}/api/batches/${id}/run`, { method: "POST" });
+    await waitForBatch(base, id, (batch) => (
+      batch.status === "completed" && batch.items.find((item) => item.id === "draft-item")
+    ));
+
+    // 未拟稿时确认提交必须被拒绝。
+    const premature = await fetch(`${base}/api/batches/${id}/items/draft-item/approve`, { method: "POST" });
+    assert.equal(premature.status, 409);
+
+    const prepared = await fetch(`${base}/api/batches/${id}/items/draft-item/prepare`, { method: "POST" });
+    assert.equal(prepared.status, 202);
+    await waitForBatch(base, id, (batch) => (
+      batch.items.find((item) => item.id === "draft-item")?.prepared_commit === "local-draft-commit"
+    ));
+    assert.deepEqual(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${id}.control.json`), "utf8")).prepare_items,
+      ["draft-item"],
+    );
+
+    // 已拟稿后再次 prepare 被拒绝。
+    const reprepared = await fetch(`${base}/api/batches/${id}/items/draft-item/prepare`, { method: "POST" });
+    assert.equal(reprepared.status, 409);
+
+    const submitted = await fetch(`${base}/api/batches/${id}/items/draft-item/approve`, { method: "POST" });
+    assert.equal(submitted.status, 202);
+    await waitForBatch(base, id, (batch) => (
+      batch.items.find((item) => item.id === "draft-item")?.status === "created"
+    ));
+    const finalBatch = await (await fetch(`${base}/api/batches/${id}`)).json();
+    assert.equal(finalBatch.batch.items.find((item) => item.id === "draft-item").pr_url, "https://github.com/moonbitlang/draft/pull/3");
     assert.equal(runCount, 3);
   } finally {
     await closeServer(server);

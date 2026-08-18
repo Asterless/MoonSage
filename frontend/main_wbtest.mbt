@@ -708,6 +708,7 @@ test "batch view exposes controls, status, item detail, and PR link" {
     mode: "batch-audit",
     total: 1,
     completed: 1,
+    active: 0,
     failed: 0,
     created_prs: 0,
     created_at: "2026-08-17T00:00:00Z",
@@ -722,6 +723,8 @@ test "batch view exposes controls, status, item detail, and PR link" {
     validation_log: "moon test\npassed",
     diff_summary: "1 file changed",
     pr_url: "https://github.com/moonbitlang/demo/pull/7",
+    prepared_branch: "",
+    prepared_commit: "",
     error: "",
     report: "Audit report",
   }
@@ -747,9 +750,51 @@ test "batch view exposes controls, status, item detail, and PR link" {
   assert_true(html.contains("aria-pressed=\"false\""))
   assert_true(html.contains("aria-current=\"page\""))
   assert_true(html.contains("aria-current=\"location\""))
-  assert_true(html.contains("批准创建 Ready PR"))
+  assert_true(html.contains("拟稿 PR"))
   assert_true(html.contains("验证日志"))
   assert_true(
     html.contains("href=\"https://github.com/moonbitlang/demo/pull/7\""),
   )
+  let prepared_item : BatchItem = {
+    ..item,
+    key: "moonbitlang--prepared",
+    prepared_branch: "moonsage/mode1/demo",
+    prepared_commit: "local-commit-abc",
+  }
+  let prepared_html = @rabbita.render_to_string(fn() {
+    Val::constant(
+      batch_view(
+        {
+          ..batch,
+          detail: { ..batch.detail, items: [prepared_item] },
+          selected_item: prepared_item.key,
+        },
+        "light",
+        emit,
+      ),
+    )
+  })
+  assert_true(prepared_html.contains("已拟稿待确认"))
+  assert_true(prepared_html.contains("moonsage/mode1/demo"))
+  assert_true(prepared_html.contains("local-commit-abc"))
+  assert_true(prepared_html.contains("确认提交 PR"))
+}
+
+///|
+test "batch activity decode keeps agent tool events readable" {
+  let entry = decode_batch_activity(
+    "{\"kind\":\"agent_event\",\"item_key\":\"acme--demo\",\"timestamp_ms\":1787078266478,\"message\":\"调用工具 read_file\",\"data\":{\"type\":\"tool_started\",\"tool\":\"read_file\"}}",
+  )
+  guard entry is Some(value) else { fail("expected activity entry") }
+  assert_eq(value.kind, "agent_event")
+  assert_eq(value.tool, "read_file")
+  assert_eq(value.message, "调用工具 read_file")
+  assert_eq(batch_activity_class(value.kind), "agent")
+  let item_entry = decode_batch_activity(
+    "{\"kind\":\"item_state\",\"item_key\":\"acme--demo\",\"timestamp_ms\":1,\"message\":\"\",\"data\":{\"status\":\"fixing\"}}",
+  )
+  guard item_entry is Some(item) else { fail("expected item entry") }
+  assert_eq(item.status, "fixing")
+  assert_eq(batch_activity_label(item), "包任务：修复中")
+  assert_true(item.timestamp != "")
 }
