@@ -24,8 +24,14 @@ fn test_model(
 ) -> Model {
   {
     draft: "",
-    sessions,
-    active_session: active,
+    projects: [{
+      id: "project-test",
+      name: "Test",
+      path: "/test",
+      sessions,
+      active_session: active,
+    }],
+    active_project: 0,
     request,
     command_open: false,
     sidebar_open: true,
@@ -35,11 +41,59 @@ fn test_model(
     workspace: initial_workspace(),
     batch: initial_batch(),
     next_id: 100,
-    pending_new_session: false,
     session_filter: "",
   }
 }
 
+///|
+test "project creation adds project to list" {
+  let model = test_model([], 0, Idle)
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (next, _) = update(model, ProjectCreated("/home/user/code/mooncake"), emit)
+  assert_eq(next.projects.length(), 2)
+  assert_eq(next.projects[1].name, "mooncake")
+  assert_eq(next.active_project, 1)
+}
+
+///|
+test "project switching loads workspace" {
+  let model = test_model([], 0, Idle)
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (next, _) = update(model, ProjectCreated("/home/user/code/mooncake"), emit)
+  let (switched, _) = update(next, ProjectSelected(0), emit)
+  assert_eq(switched.active_project, 0)
+}
+
+///|
+test "project deletion removes project" {
+  let model = test_model([], 0, Idle)
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (next, _) = update(model, ProjectCreated("/home/user/code/proj1"), emit)
+  let (next, _) = update(next, ProjectCreated("/home/user/code/proj2"), emit)
+  assert_eq(next.projects.length(), 3)
+  let (deleted, _) = update(next, ProjectDelete(1), emit)
+  assert_eq(deleted.projects.length(), 2)
+}
+
+///|
+test "new session does nothing when no projects" {
+  let model = {
+    ..test_model([], 0, Idle),
+    projects: [],
+  }
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (next, _) = update(model, NewSession, emit)
+  assert_eq(next.projects.length(), 0)
+}
+
+///|
+test "new session creates session in active project" {
+  let model = test_model([], 0, Idle)
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let (next, _) = update(model, NewSession, emit)
+  assert_eq(next.projects[0].sessions.length(), 1)
+  assert_eq(next.projects[0].active_session, 0)
+}
 ///|
 test "theme values normalize and toggle" {
   assert_eq(normalize_theme(""), "light")
@@ -50,22 +104,6 @@ test "theme values normalize and toggle" {
 }
 
 ///|
-test "workspace binding restores a valid session id before stored index" {
-  let sessions : Array[Session] = [
-    { id: "first", title: "First", detail: "", messages: [] },
-    { id: "bound", title: "Bound", detail: "", messages: [] },
-  ]
-  assert_eq(resolved_active_session_index(sessions, 0, "bound"), 1)
-  assert_eq(resolved_active_session_index(sessions, 1, "missing"), 1)
-  assert_eq(resolved_active_session_index(sessions, 99, "missing"), 0)
-  assert_eq(
-    decode_workspace_binding(
-      "{\"active_workspace_id\":\"legacy-workspace\",\"active_session_id\":\"legacy-session\"}",
-    ),
-    ("legacy-workspace", "legacy-session"),
-  )
-}
-
 ///|
 test "viewport changes only flip layout at the compact boundary" {
   let desktop = test_model(
@@ -134,7 +172,7 @@ test "semantic views expose navigation and workspace states" {
     selected_path: "src/main.mbt",
   }
   let workspace_html = @rabbita.render_to_string(fn() {
-    Val::constant(workspace_view(workspace, false, false, emit))
+    Val::constant(workspace_view(workspace, false, emit))
   })
   assert_true(workspace_html.contains("role=\"tab\""))
   assert_true(workspace_html.contains("aria-selected=\"true\""))
@@ -145,7 +183,7 @@ test "semantic views expose navigation and workspace states" {
   assert_true(workspace_html.contains("Local · ready"))
   assert_false(workspace_html.contains("{workspace.status}"))
   let modal_html = @rabbita.render_to_string(fn() {
-    Val::constant(workspace_view(workspace, true, false, emit))
+    Val::constant(workspace_view(workspace, true, emit))
   })
   assert_true(modal_html.contains("role=\"dialog\""))
   assert_true(modal_html.contains("aria-modal=\"true\""))
@@ -165,11 +203,11 @@ test "async replies stay with their originating session" {
     role: "assistant",
     text: "origin reply",
   })
-  assert_eq(updated.active_session, 1)
-  let origin_messages = updated.sessions[0].messages
+  assert_eq(updated.projects[0].active_session, 1)
+  let origin_messages = updated.projects[0].sessions[0].messages
   assert_eq(origin_messages[origin_messages.length() - 1].text, "origin reply")
   assert_true(
-    !updated.sessions[1].messages.any(fn(message) {
+    !updated.projects[0].sessions[1].messages.any(fn(message) {
       message.text == "origin reply"
     }),
   )
@@ -379,18 +417,18 @@ test "session title comes from the first user prompt" {
     model, "帮我找一个 JSON 解析库并比较它们的性能",
   )
   assert_eq(
-    titled.sessions[0].title,
+    titled.projects[0].sessions[0].title,
     "帮我找一个 JSON 解析库并比较它们的性能",
   )
   let kept = with_title_for_first_prompt(titled, "第二个问题")
   assert_eq(
-    kept.sessions[0].title,
+    kept.projects[0].sessions[0].title,
     "帮我找一个 JSON 解析库并比较它们的性能",
   )
   let long_prompt = "这是一个非常非常长的提示词用来验证超过二十四个字符之后标题会被截断并加上省略号"
   let truncated = with_title_for_first_prompt(model, long_prompt)
   assert_eq(
-    truncated.sessions[0].title,
+    truncated.projects[0].sessions[0].title,
     "这是一个非常非常长的提示词用来验证超过二十四个字…",
   )
 }
@@ -406,8 +444,8 @@ test "cancel commits the partial answer and returns to Idle" {
   let emit : Emit[Msg] = Emit(_ => @rabbita.none)
   let (stopped, _) = update(model, CancelRequest, emit)
   assert_true(stopped.request is Idle)
-  assert_eq(stopped.sessions[0].messages.length(), 1)
-  assert_eq(stopped.sessions[0].messages[0].text, "第一段")
+  assert_eq(stopped.projects[0].sessions[0].messages.length(), 1)
+  assert_eq(stopped.projects[0].sessions[0].messages[0].text, "第一段")
 }
 
 ///|
@@ -823,69 +861,3 @@ test "batch activity decode keeps agent tool events readable" {
 }
 
 ///|
-test "new conversation waits for a chosen workspace before creating the session" {
-  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
-  let entry : WorkspaceEntry = {
-    id: "ws-1",
-    name: "Demo",
-    path: "D:/demo",
-    kind: "local",
-    mode: "local",
-    managed: false,
-    lifecycle: "local",
-    branch: "main",
-    detached: false,
-    pinned: false,
-    status: "ready",
-    revision: "rev",
-    source_id: "",
-    owner_task_id: "",
-    owner_session_id: "",
-    eligible_for_cleanup: false,
-  }
-  let model = {
-    ..test_model([{ id: "s1", title: "S1", detail: "", messages: [] }], 0, Idle),
-    workspace: {
-      ..initial_workspace(),
-      entries: [entry],
-      id: "ws-1",
-      name: "Demo",
-    },
-  }
-  // 新对话只打开工作区面板，不直接创建会话。
-  let (pending, _) = update(model, NewSession, emit)
-  assert_true(pending.pending_new_session)
-  assert_true(pending.workspace.open)
-  assert_eq(pending.sessions.length(), 1)
-
-  // 关闭面板会取消待创建的新对话。
-  let (cancelled, _) = update(pending, ToggleWorkspace, emit)
-  assert_false(cancelled.pending_new_session)
-  assert_false(cancelled.workspace.open)
-  assert_eq(cancelled.sessions.length(), 1)
-
-  // 选择已注册的工作区后创建新会话并绑定。
-  let (chosen, _) = update(pending, WorkspaceSelect("ws-1"), emit)
-  assert_false(chosen.pending_new_session)
-  assert_eq(chosen.sessions.length(), 2)
-  assert_eq(chosen.workspace.id, "ws-1")
-  assert_eq(
-    chosen.workspace.session_id,
-    chosen.sessions[chosen.active_session].id,
-  )
-
-  // 通过目录选择器新建工作区也会触发新对话。
-  let picked_model = {
-    ..model,
-    pending_new_session: true,
-    workspace: { ..model.workspace, open: true },
-  }
-  let (picked, _) = update(
-    picked_model,
-    WorkspacePicked("{\"workspace\":{\"id\":\"ws-2\",\"name\":\"Picked\"}}"),
-    emit,
-  )
-  assert_false(picked.pending_new_session)
-  assert_eq(picked.workspace.id, "ws-2")
-  assert_eq(picked.sessions.length(), 2)
-}
