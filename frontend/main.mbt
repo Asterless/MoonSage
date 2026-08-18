@@ -44,6 +44,15 @@ struct Session {
 } derive(Debug, Eq)
 
 ///|
+struct Project {
+  id : String
+  name : String
+  path : String
+  sessions : Array[Session]
+  active_session : Int
+} derive(Debug, Eq)
+
+///|
 // One in-flight agent request. Deltas land in answer_buf and are committed
 // to answer_shown by the throttled AgentFlush tick, so streaming stays
 // responsive without O(n^2) string rebuilds on every chunk.
@@ -82,8 +91,8 @@ enum RequestState {
 ///|
 struct Model {
   draft : String
-  sessions : Array[Session]
-  active_session : Int
+  projects : Array[Project]
+  active_project : Int
   request : RequestState
   command_open : Bool
   sidebar_open : Bool
@@ -93,7 +102,6 @@ struct Model {
   workspace : WorkspaceModel
   batch : BatchModel
   next_id : Int
-  pending_new_session : Bool
   session_filter : String
 } derive(Eq)
 
@@ -124,6 +132,10 @@ enum Msg {
   NewSession
   SessionFilterChanged(String)
   ToggleWorkspace
+  ProjectCreate
+  ProjectCreated(String)
+  ProjectSelected(Int)
+  ProjectDelete(Int)
   WorkspacePick
   WorkspacePicked(String)
   WorkspaceSelect(String)
@@ -182,61 +194,21 @@ let commands : Array[(String, String)] = [
 ]
 
 ///|
-fn welcome_messages() -> Array[Message] {
-  [
-    {
-      role: "assistant",
-      text: "## 欢迎使用 MoonSage\n\n以工作区任务为中心：先读取本地项目，再根据你的目标检查、修改和验证文件。\n\n- 对话只用于描述任务目标\n- 输入 `/` 查看命令\n- 支持中文与 Markdown",
-    },
-    {
-      role: "assistant",
-      text: "当前界面通过同源服务连接 MoonSage Agent。模型与密钥配置保留在服务端，不会发送到浏览器。",
-    },
-  ]
-}
+
 
 ///|
-fn default_sessions() -> Array[Session] {
-  [
-    {
-      id: "welcome",
-      title: "欢迎使用 MoonSage",
-      detail: "刚刚",
-      messages: welcome_messages(),
-    },
-  ]
-}
+
 
 ///|
-fn resolved_active_session_index(
-  sessions : Array[Session],
-  stored_index : Int,
-  bound_session_id : String,
-) -> Int {
-  if bound_session_id != "" {
-    for index, session in sessions {
-      if session.id == bound_session_id {
-        return index
-      }
-    }
-  }
-  if stored_index >= 0 && stored_index < sessions.length() {
-    stored_index
-  } else {
-    0
-  }
-}
+
 
 ///|
 fn initial_model() -> Model {
-  let (sessions, active_session, next_id) = match load_persisted_state() {
-    Some((sessions, active, next)) => (sessions, active, next)
-    None => (default_sessions(), 0, 2)
+  let projects = match load_persisted_state() {
+    Some(projects) => projects
+    None => []
   }
-  let (stored_workspace_id, stored_session_id) = load_workspace_binding()
-  let active = resolved_active_session_index(
-    sessions, active_session, stored_session_id,
-  )
+  let active_project = 0
   let width = @dom.window().inner_width()
   let compact = is_compact_width(width)
   let workspace_overlay = is_workspace_overlay_width(width)
@@ -244,22 +216,17 @@ fn initial_model() -> Model {
   apply_document_theme(theme)
   {
     draft: "",
-    sessions,
-    active_session: active,
+    projects,
+    active_project,
     request: Idle,
     command_open: false,
     sidebar_open: !compact,
     theme,
     compact,
     workspace_overlay,
-    workspace: {
-      ..initial_workspace(),
-      id: stored_workspace_id,
-      session_id: sessions[active].id,
-    },
+    workspace: initial_workspace(),
     batch: initial_batch(),
-    next_id,
-    pending_new_session: false,
+    next_id: 2,
     session_filter: "",
   }
 }
@@ -306,15 +273,17 @@ fn append_message(
 
 ///|
 fn active_messages(model : Model) -> Array[Message] {
-  model.sessions[model.active_session].messages
+  model.projects[model.active_project].sessions[model.projects[model.active_project].active_session].messages
 }
 
 ///|
 fn set_active_messages(model : Model, messages : Array[Message]) -> Model {
-  let sessions = Array::copy(model.sessions)
-  let session = sessions[model.active_session]
-  sessions[model.active_session] = { ..session, messages, }
-  { ..model, sessions, }
+  let projects = Array::copy(model.projects)
+  let sessions = Array::copy(projects[model.active_project].sessions)
+  let session = sessions[projects[model.active_project].active_session]
+  sessions[projects[model.active_project].active_session] = { ..session, messages, }
+  projects[model.active_project] = { ..projects[model.active_project], sessions, }
+  { ..model, projects, }
 }
 
 ///|
@@ -323,7 +292,8 @@ fn append_session_message(
   session_id : String,
   message : Message,
 ) -> Model {
-  let sessions = Array::copy(model.sessions)
+  let projects = Array::copy(model.projects)
+  let sessions = Array::copy(projects[model.active_project].sessions)
   for index, session in sessions {
     if session.id == session_id {
       sessions[index] = {
@@ -333,12 +303,13 @@ fn append_session_message(
       break
     }
   }
-  { ..model, sessions, }
+  projects[model.active_project] = { ..projects[model.active_project], sessions, }
+  { ..model, projects, }
 }
 
 ///|
 fn session_messages(model : Model, session_id : String) -> Array[Message] {
-  for session in model.sessions {
+  for session in model.projects[model.active_project].sessions {
     if session.id == session_id {
       return session.messages
     }
@@ -359,21 +330,22 @@ fn append_exchange(model : Model, prompt : String, answer : String) -> Model {
 // Name a fresh session after its first user prompt instead of leaving
 // every session titled 新会话.
 fn with_title_for_first_prompt(model : Model, prompt : String) -> Model {
-  let sessions = Array::copy(model.sessions)
-  let session = sessions[model.active_session]
-  if session.title == "新会话" && !prompt.trim().is_empty() {
+  let projects = Array::copy(model.projects)
+  let sessions = Array::copy(projects[model.active_project].sessions)
+  let session = sessions[projects[model.active_project].active_session]
+  if session.title == "新对话" && !prompt.trim().is_empty() {
     let title = if prompt.length() > 24 {
       prompt[:24].to_owned() + "…"
     } else {
       prompt
     }
-    sessions[model.active_session] = { ..session, title, detail: "刚刚" }
-    { ..model, sessions, }
+    sessions[projects[model.active_project].active_session] = { ..session, title, detail: "刚刚" }
+    projects[model.active_project] = { ..projects[model.active_project], sessions, }
+    { ..model, projects, }
   } else {
     model
   }
 }
-
 ///|
 fn command_answer(command : String) -> String? {
   match command {
@@ -494,7 +466,7 @@ fn update_conversation(
             (next, persist_model(next))
           }
           None => {
-            let session_id = model.sessions[model.active_session].id
+            let session_id = model.projects[model.active_project].sessions[model.projects[model.active_project].active_session].id
             let with_message = set_active_messages(
               model,
               append_message(active_messages(model), { role: "user", text }),
@@ -503,7 +475,7 @@ fn update_conversation(
             let (next, request) = fresh_request(
               titled, session_id, text, "正在连接 Agent",
             )
-            let payload = next.sessions[next.active_session].messages
+            let payload = next.projects[next.active_project].sessions[next.projects[next.active_project].active_session].messages
             let ready = { ..next, draft: "", command_open: false }
             (
               ready,
@@ -746,10 +718,13 @@ fn update_conversation(
       }
     RunCommand(command) => update({ ..model, draft: command }, Submit, emit)
     SelectSession(index) => {
-      let selected_session_id = model.sessions[index].id
+      let projects = Array::copy(model.projects)
+      let project = projects[model.active_project]
+      let selected_session_id = project.sessions[index].id
+      projects[model.active_project] = { ..project, active_session: index }
       let next = {
         ..model,
-        active_session: index,
+        projects,
         workspace: { ..model.workspace, session_id: selected_session_id },
         command_open: false,
         sidebar_open: if model.compact {
@@ -789,6 +764,87 @@ fn update_conversation(
     }
     SessionFilterChanged(value) =>
       ({ ..model, session_filter: value }, @rabbita.none)
+    ProjectCreate =>
+      update(model, WorkspacePick, emit)
+    WorkspacePicked(path) => {
+      let name = path.split("/").last().unwrap_or("").to_owned().split("\\").last().unwrap_or("").to_owned()
+      let projects = Array::copy(model.projects)
+      let project_id = "project-" + model.next_id.to_string()
+      projects.push({
+        id: project_id,
+        name,
+        path,
+        sessions: [{
+          id: "session-" + (model.next_id + 1).to_string(),
+          title: "新对话",
+          detail: "刚刚",
+          messages: [],
+        }],
+        active_session: 0,
+      })
+      let next = {
+        ..model,
+        projects,
+        active_project: projects.length() - 1,
+        next_id: model.next_id + 2,
+        workspace: {
+          ..model.workspace,
+          id: project_id,
+          name,
+          root: path,
+          open: true,
+        },
+      }
+      (next, @cmd.batch([persist_model(next), load_workspace_registry(emit)]))
+    }
+    ProjectSelected(index) =>
+      if index >= 0 && index < model.projects.length() {
+        let project = model.projects[index]
+        let next = {
+          ..model,
+          active_project: index,
+          workspace: {
+            ..model.workspace,
+            id: project.id,
+            name: project.name,
+            root: project.path,
+            open: true,
+          },
+        }
+        (next, @cmd.batch([persist_model(next), load_workspace_registry(emit)]))
+      } else {
+        (model, @rabbita.none)
+      }
+    ProjectDelete(index) =>
+      if index >= 0 && index < model.projects.length() {
+        let projects = Array::copy(model.projects)
+        let _ = projects.remove(index)
+        let active_project = if projects.is_empty() {
+          0
+        } else if model.active_project >= projects.length() {
+          projects.length() - 1
+        } else if model.active_project == index {
+          if index >= projects.length() { 0 } else { index }
+        } else if model.active_project > index {
+          model.active_project - 1
+        } else {
+          model.active_project
+        }
+        let next = {
+          ..model,
+          projects,
+          active_project,
+          workspace: if projects.is_empty() {
+            initial_workspace()
+          } else {
+            let project = projects[active_project]
+            { ..model.workspace, id: project.id, name: project.name, root: project.path, open: true }
+          },
+        }
+        (next, persist_model(next))
+      } else {
+        (model, @rabbita.none)
+      }
     ToggleTheme => {
       let theme = opposite_theme(model.theme)
       ({ ..model, theme, }, persist_theme(theme))
@@ -813,78 +869,42 @@ fn update_conversation(
       (next, command)
     }
     NewSession =>
-      if model.pending_new_session {
+      if model.projects.is_empty() {
         (model, @rabbita.none)
       } else {
-        // Workspace-first flow: a new conversation starts by choosing or
-        // creating a workspace, then the session is created once the user
-        // picks one (WorkspacePicked / WorkspaceSelect).
+        let projects = Array::copy(model.projects)
+        let project = projects[model.active_project]
+        let sessions = Array::copy(project.sessions)
+        let session_id = "session-" + model.next_id.to_string()
+        sessions.push({
+          id: session_id,
+          title: "新对话",
+          detail: "刚刚",
+          messages: [],
+        })
+        projects[model.active_project] = {
+          ..project,
+          sessions,
+          active_session: sessions.length() - 1,
+        }
         let next = {
           ..model,
-          pending_new_session: true,
+          projects,
           draft: "",
           command_open: false,
+          next_id: model.next_id + 1,
         }
-        if model.workspace.open {
-          (next, @rabbita.none)
-        } else {
-          update(next, ToggleWorkspace, emit)
-        }
+        (next, persist_model(next))
       }
     _ => (model, @rabbita.none)
   }
 }
 
 ///|
-fn create_new_session(model : Model) -> (Model, Cmd) {
-  let sessions = Array::copy(model.sessions)
-  let session_id = "session-\{model.next_id}"
-  sessions.push({
-    id: session_id,
-    title: "新会话",
-    detail: "刚刚",
-    messages: [
-      {
-        role: "assistant",
-        text: "新的会话已准备好。你想从哪里开始？",
-      },
-    ],
-  })
-  let next = {
-    ..model,
-    draft: "",
-    sessions,
-    active_session: sessions.length() - 1,
-    command_open: false,
-    sidebar_open: !model.compact,
-    next_id: model.next_id + 1,
-    workspace: { ..model.workspace, session_id, },
-    pending_new_session: false,
-    session_filter: "",
-  }
-  (
-    next,
-    @cmd.batch([
-      persist_model(next),
-      persist_workspace_binding(next.workspace.id, session_id),
-      after_render_scroll(),
-      if model.compact {
-        after_render_focus(".composer-input")
-      } else {
-        @rabbita.none
-      },
-    ]),
-  )
-}
+
 
 ///|
-fn workspace_choose_completed(msg : Msg) -> Bool {
-  match msg {
-    WorkspacePicked(_) => true
-    WorkspaceSelect(_) => true
-    _ => false
-  }
-}
+
 
 ///|
 fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
@@ -894,28 +914,12 @@ fn update(model : Model, msg : Msg, emit : Emit[Msg]) -> (Model, Cmd) {
       match workspace_update(model.workspace, msg, emit) {
         Some((workspace, command)) => {
           let next = { ..model, workspace, }
-          if model.pending_new_session {
-            if workspace_choose_completed(msg) && workspace.id != "" {
-              // The user just picked a workspace; create the conversation
-              // bound to it and keep the workspace loading command.
-              let (created, session_command) = create_new_session(next)
-              (created, @cmd.batch([session_command, command]))
-            } else if msg is ToggleWorkspace && !workspace.open {
-              // The panel was closed without choosing a workspace; cancel the
-              // pending new conversation.
-              ({ ..next, pending_new_session: false }, command)
-            } else {
-              (next, command)
-            }
-          } else {
-            (next, command)
-          }
+          (next, command)
         }
         None => update_conversation(model, msg, emit)
       }
   }
 }
-
 ///|
 fn icon(name : String) -> Html {
   span(
@@ -1137,7 +1141,12 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
     base_sidebar_attrs
   }
 
-  let groups = group_sessions(model.sessions, model.session_filter)
+  let sessions = if model.projects.is_empty() {
+    []
+  } else {
+    model.projects[model.active_project].sessions
+  }
+  let groups = group_sessions(sessions, model.session_filter)
   let filter_empty = model.session_filter != "" && groups.is_empty()
   let session_rows : Array[Html] = []
   for group in groups {
@@ -1147,7 +1156,7 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
     for item in items {
       let index = item.0
       let session = item.1
-      let active = index == model.active_session
+      let active = index == model.projects[model.active_project].active_session
       let class = if active { "session active" } else { "session" }
       session_rows.push(
         button(
@@ -1166,10 +1175,8 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
     }
   }
 
-  let ws_label = if model.workspace.name != "" {
-    model.workspace.name
-  } else if model.workspace.root != "" {
-    model.workspace.root
+  let ws_label = if model.active_project < model.projects.length() {
+    model.projects[model.active_project].name
   } else {
     ""
   }
@@ -1188,6 +1195,28 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
         icon("panel-left-close"),
       ),
     ]),
+    div(class="project-selector", [
+      button(
+        class="project-selector-header",
+        type_="button",
+        title="切换项目",
+        attrs=@html.Attrs::build()
+          .aria_label("项目选择器")
+          .aria_expanded("false")
+          .aria_haspopup("true"),
+        on_click=emit(ProjectCreate),
+        [
+          icon("folder"),
+          span(class="project-selector-label",
+            if model.active_project < model.projects.length() {
+              model.projects[model.active_project].name
+            } else {
+              "选择项目"
+            },
+          ),
+        ],
+      ),
+    ]),
     div(class="sidebar-search-wrap", [
       icon("search"),
       input(
@@ -1198,10 +1227,14 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
         on_input=emit.map(value => SessionFilterChanged(value)),
       ),
     ]),
-    button(class="new-session", type_="button", on_click=emit(NewSession), [
-      icon("square-plus"),
-      span("新对话"),
-    ]),
+    if model.projects.is_empty() {
+      div(class="sidebar-empty-state", "请先创建项目")
+    } else {
+      button(class="new-session", type_="button", on_click=emit(NewSession), [
+        icon("square-plus"),
+        span("新对话"),
+      ])
+    },
     button(
       class="batch-entry",
       type_="button",
@@ -1384,7 +1417,7 @@ fn app() -> Val[Html] {
     if model.batch.open {
       return batch_view(model.batch, model.theme, emit)
     }
-    let active = model.sessions[model.active_session]
+    let active = model.projects[model.active_project].sessions[model.projects[model.active_project].active_session]
     let content : Array[Html] = active.messages.map(message_view)
     let shell_class = if model.sidebar_open {
       "shell sidebar-open"
@@ -1536,7 +1569,7 @@ fn app() -> Val[Html] {
                   } else {
                     div(content)
                   },
-                  if active.messages.length() == 2 && model.active_session == 0 {
+                  if active.messages.length() == 2 && model.projects[model.active_project].active_session == 0 {
                     prompt_suggestions(emit)
                   } else {
                     div(class="prompt-placeholder", "")
@@ -1613,7 +1646,6 @@ fn app() -> Val[Html] {
           workspace_view(
             model.workspace,
             workspace_modal,
-            model.pending_new_session,
             emit,
           )
         } else {

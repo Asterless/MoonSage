@@ -1,5 +1,6 @@
 ///|
 let sessions_storage_key : String = "moonsage.web.sessions.v1"
+let projects_storage_key : String = "moonsage.web.projects.v1"
 
 ///|
 // Workspace and chat bindings are kept separately so existing v1 session
@@ -71,6 +72,65 @@ fn tail_messages(messages : Array[Message], limit : Int) -> Array[Message] {
     }
   }
   kept
+}
+
+///|
+fn encode_project(project : Project) -> Json {
+  Json::object({
+    "id": Json::string(project.id),
+    "name": Json::string(project.name),
+    "path": Json::string(project.path),
+    "sessions": Json::array(project.sessions.map(encode_session)),
+    "active_session": Json::number(project.active_session.to_double()),
+  })
+}
+
+///|
+fn decode_project(value : Json) -> Project? {
+  guard value is Object(fields) else { return None }
+  guard fields.get("id") is Some(String(id)) else { return None }
+  guard fields.get("name") is Some(String(name)) else { return None }
+  let path = json_string_field(fields, "path")
+  let sessions = match fields.get("sessions") {
+    Some(Array(items)) =>
+      items.filter_map(fn(item) {
+        match decode_session(item) {
+          Some(session) => Some(session)
+          None => None
+        }
+      })
+    _ => []
+  }
+  let active_session = json_int_field(fields, "active_session", 0)
+  Some({ id, name, path, sessions, active_session })
+}
+
+///|
+fn encode_projects(projects : Array[Project]) -> String {
+  Json::object({
+    "version": Json::number(1.0),
+    "projects": Json::array(projects.map(encode_project)),
+  }).stringify()
+}
+
+///|
+fn decode_projects(source : String) -> Array[Project]? {
+  if source.trim() == "" {
+    return None
+  }
+  guard json_fields(source) is Some(fields) else { return None }
+  guard fields.get("projects") is Some(Array(items)) else { return None }
+  let projects : Array[Project] = []
+  for item in items {
+    match decode_project(item) {
+      Some(project) => projects.push(project)
+      None => ()
+    }
+  }
+  if projects.is_empty() {
+    return None
+  }
+  Some(projects)
 }
 
 ///|
@@ -177,15 +237,15 @@ fn persist_theme(theme : String) -> Cmd {
 fn persist_model(model : Model) -> Cmd {
   @cmd.custom_cmd(_ => {
     storage_save(
-      sessions_storage_key,
-      encode_storage(model.sessions, model.active_session, model.next_id),
+      projects_storage_key,
+      encode_projects(model.projects),
     )
   })
 }
 
 ///|
-fn load_persisted_state() -> (Array[Session], Int, Int)? {
-  decode_storage(storage_load(sessions_storage_key))
+fn load_persisted_state() -> Array[Project]? {
+  decode_projects(storage_load(projects_storage_key))
 }
 
 ///|
