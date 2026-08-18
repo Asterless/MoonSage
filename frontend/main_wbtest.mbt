@@ -35,6 +35,7 @@ fn test_model(
     workspace: initial_workspace(),
     batch: initial_batch(),
     next_id: 100,
+    pending_new_session: false,
   }
 }
 
@@ -132,7 +133,7 @@ test "semantic views expose navigation and workspace states" {
     selected_path: "src/main.mbt",
   }
   let workspace_html = @rabbita.render_to_string(fn() {
-    Val::constant(workspace_view(workspace, false, emit))
+    Val::constant(workspace_view(workspace, false, false, emit))
   })
   assert_true(workspace_html.contains("role=\"tab\""))
   assert_true(workspace_html.contains("aria-selected=\"true\""))
@@ -143,7 +144,7 @@ test "semantic views expose navigation and workspace states" {
   assert_true(workspace_html.contains("Local · ready"))
   assert_false(workspace_html.contains("{workspace.status}"))
   let modal_html = @rabbita.render_to_string(fn() {
-    Val::constant(workspace_view(workspace, true, emit))
+    Val::constant(workspace_view(workspace, true, false, emit))
   })
   assert_true(modal_html.contains("role=\"dialog\""))
   assert_true(modal_html.contains("aria-modal=\"true\""))
@@ -797,4 +798,72 @@ test "batch activity decode keeps agent tool events readable" {
   assert_eq(item.status, "fixing")
   assert_eq(batch_activity_label(item), "包任务：修复中")
   assert_true(item.timestamp != "")
+}
+
+///|
+test "new conversation waits for a chosen workspace before creating the session" {
+  let emit : Emit[Msg] = Emit(_ => @rabbita.none)
+  let entry : WorkspaceEntry = {
+    id: "ws-1",
+    name: "Demo",
+    path: "D:/demo",
+    kind: "local",
+    mode: "local",
+    managed: false,
+    lifecycle: "local",
+    branch: "main",
+    detached: false,
+    pinned: false,
+    status: "ready",
+    revision: "rev",
+    source_id: "",
+    owner_task_id: "",
+    owner_session_id: "",
+    eligible_for_cleanup: false,
+  }
+  let model = {
+    ..test_model([{ id: "s1", title: "S1", detail: "", messages: [] }], 0, Idle),
+    workspace: {
+      ..initial_workspace(),
+      entries: [entry],
+      id: "ws-1",
+      name: "Demo",
+    },
+  }
+  // 新对话只打开工作区面板，不直接创建会话。
+  let (pending, _) = update(model, NewSession, emit)
+  assert_true(pending.pending_new_session)
+  assert_true(pending.workspace.open)
+  assert_eq(pending.sessions.length(), 1)
+
+  // 关闭面板会取消待创建的新对话。
+  let (cancelled, _) = update(pending, ToggleWorkspace, emit)
+  assert_false(cancelled.pending_new_session)
+  assert_false(cancelled.workspace.open)
+  assert_eq(cancelled.sessions.length(), 1)
+
+  // 选择已注册的工作区后创建新会话并绑定。
+  let (chosen, _) = update(pending, WorkspaceSelect("ws-1"), emit)
+  assert_false(chosen.pending_new_session)
+  assert_eq(chosen.sessions.length(), 2)
+  assert_eq(chosen.workspace.id, "ws-1")
+  assert_eq(
+    chosen.workspace.session_id,
+    chosen.sessions[chosen.active_session].id,
+  )
+
+  // 通过目录选择器新建工作区也会触发新对话。
+  let picked_model = {
+    ..model,
+    pending_new_session: true,
+    workspace: { ..model.workspace, open: true },
+  }
+  let (picked, _) = update(
+    picked_model,
+    WorkspacePicked("{\"workspace\":{\"id\":\"ws-2\",\"name\":\"Picked\"}}"),
+    emit,
+  )
+  assert_false(picked.pending_new_session)
+  assert_eq(picked.workspace.id, "ws-2")
+  assert_eq(picked.sessions.length(), 2)
 }
