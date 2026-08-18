@@ -22,3 +22,4 @@ pub fn MdStreamPrinter::take_output(Self) -> String
 // Type aliases
 
 // Traits
+
