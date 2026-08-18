@@ -2400,7 +2400,10 @@ function createBatchController({ dataDirectory, workerRunner, workerSpawner } = 
     const state = { controller, child: null, promise: null };
     running.set(id, state);
     try {
-      await writeControl(id, "run");
+      // A normal start clears stale pause/cancel flags, but recovery must
+      // preserve them: restarting a worker for a batch the user asked to
+      // pause or cancel should settle that request instead of resuming work.
+      if (!recovery) await writeControl(id, "run");
     } catch (error) {
       running.delete(id);
       throw error;

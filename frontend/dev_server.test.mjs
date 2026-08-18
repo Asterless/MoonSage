@@ -1795,6 +1795,70 @@ test("batch recovery requeues in-progress items and restarts the worker", async 
   }
 });
 
+test("batch recovery preserves a pending cancel control file", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "moonsage-batch-recovery-cancel-"));
+  const seed = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async () => ({ code: 0 }),
+  });
+  await new Promise((resolve) => seed.once("listening", resolve));
+  const seedBase = `http://127.0.0.1:${seed.address().port}`;
+  const created = await fetch(seedBase + "/api/batches", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const id = (await created.json()).batch.id;
+  const recordPath = join(dataRoot, "batches", `${id}.json`);
+  const record = JSON.parse(await readFile(recordPath, "utf8"));
+  record.status = "running";
+  await writeFile(recordPath, JSON.stringify(record, null, 2) + "\n", "utf8");
+  await writeFile(
+    join(dataRoot, "batches", `${id}.control.json`),
+    JSON.stringify({
+      pause: false,
+      cancel: true,
+      retry_items: [],
+      approved_items: [],
+      prepare_items: [],
+      updated_at_ms: Date.now(),
+    }, null, 2) + "\n",
+    "utf8",
+  );
+  await writeFile(join(dataRoot, "batches", `${id}.lock`), "interrupted-worker\n", "utf8");
+  await closeServer(seed);
+
+  let observedCancel = null;
+  let workerRan = false;
+  const recovered = serve({
+    listenPort: 0,
+    workspaceDataDirectory: dataRoot,
+    batchWorker: async (batch, emit, _signal, context) => {
+      workerRan = true;
+      observedCancel = JSON.parse(await readFile(context.paths.control, "utf8")).cancel;
+      await persistFakeBatchEvent(batch, context, emit, { type: "batch_state", state: "running" });
+      return { code: 0 };
+    },
+  });
+  await new Promise((resolve) => recovered.once("listening", resolve));
+  try {
+    const deadline = Date.now() + 3000;
+    while (!workerRan && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(workerRan, true);
+    assert.equal(observedCancel, true);
+    assert.equal(
+      JSON.parse(await readFile(join(dataRoot, "batches", `${id}.control.json`), "utf8")).cancel,
+      true,
+    );
+  } finally {
+    await closeServer(recovered);
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("killProcessTree terminates the child process", { skip: !canSpawnChildren || process.platform !== "win32" }, async () => {
   const child = spawn("cmd.exe", ["/c", "ping", "-n", "60", "127.0.0.1"], { windowsHide: true, stdio: "ignore" });
   await new Promise((resolve, reject) => {
