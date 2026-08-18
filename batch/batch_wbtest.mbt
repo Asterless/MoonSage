@@ -4,7 +4,7 @@ fn summary(
   repository : String,
   version? : String = "1.0.0",
   keywords? : Array[String] = [],
-) -> @moonsage.ModuleSummary {
+) -> @types.ModuleSummary {
   {
     name,
     version,

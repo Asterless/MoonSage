@@ -31,7 +31,7 @@ test "slash input opens, filters, and selects the command menu" {
 test "runtime status and startup header show active configuration" {
   let session = @runtime.Session::from_json(Json::array([]))
   let composer = ChatComposer::new(100)
-  composer.set_runtime_status("deepseek-chat", @llm.OpenAi, "chat-123", session)
+  composer.set_runtime_status("deepseek-chat", @ai.OpenAi, "chat-123", session)
   let frame = composer.frame_lines().join("\n")
   assert_true(frame.contains("deepseek-chat"))
   assert_true(frame.contains("openai"))
@@ -40,7 +40,7 @@ test "runtime status and startup header show active configuration" {
   let header = startup_info(
     100,
     "deepseek-chat",
-    @llm.OpenAi,
+    @ai.OpenAi,
     "chat-123",
     "D:/work/moonsage",
     session,

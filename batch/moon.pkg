@@ -1,8 +1,9 @@
 import {
-  "moonsage",
+  "moonsage/types",
+  "moonsage/search",
   "moonsage/audit",
-  "moonsage/agent/runtime",
-  "moonsage/llm",
+  "moonsage/runtime",
+  "moonsage/ai",
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/core/json",

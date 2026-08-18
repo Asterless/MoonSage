@@ -52,7 +52,7 @@ fn chat_system_prompt(
 
 ///|
 fn chat_agent(
-  modules : Array[@moonsage.ModuleSummary],
+  modules : Array[@types.ModuleSummary],
   cwd : String,
   ws : @editing.Workspace,
   project_instructions? : String = "",
@@ -72,7 +72,7 @@ fn chat_agent(
 ///|
 /// Build the shared conversational agent used by alternate frontends.
 pub fn create_agent(
-  modules : Array[@moonsage.ModuleSummary],
+  modules : Array[@types.ModuleSummary],
   cwd : String,
   ws : @editing.Workspace,
   project_instructions? : String = "",
@@ -264,7 +264,7 @@ pub async fn run_chat(
   cwd : String,
   session_id : String?,
   continue_latest : Bool,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
 ) -> Unit {
   let modules = @mooncakes.fetch_modules() catch {
     _ => {
@@ -275,7 +275,7 @@ pub async fn run_chat(
   let ws = @editing.Workspace::new(cwd)
   let project_instructions = @project.load_project_instructions(cwd)
   let agent = chat_agent(modules, cwd, ws, project_instructions~)
-  let client = @llm_adapter.client(api_key, base_url, model, provider)
+  let client = @ai.client(api_key, base_url, model, provider)
   let store_root = session_root(cwd)
   let fresh_session = fn() -> (String, @runtime.Session) {
     (

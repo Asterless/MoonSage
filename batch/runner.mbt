@@ -213,7 +213,7 @@ pub async fn create_batch(
   data_root : String,
   id : String,
   config : BatchConfig,
-  snapshot : Array[@moonsage.ModuleSummary],
+  snapshot : Array[@types.ModuleSummary],
   on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
   secrets? : Array[String] = [],
 ) -> BatchRecord {
@@ -390,7 +390,7 @@ pub async fn start_batch(
   data_root : String,
   id : String,
   config : BatchConfig,
-  snapshot : Array[@moonsage.ModuleSummary],
+  snapshot : Array[@types.ModuleSummary],
   execute : async (BatchItem) -> BatchAuditResult,
   on_event? : async (BatchEvent) -> Unit = ignore_batch_event,
   secrets? : Array[String] = [],
@@ -1003,7 +1003,7 @@ pub async fn publish_ready_batch_items(
 pub async fn run_batch_watch(
   data_root : String,
   record : BatchRecord,
-  fetch_snapshot : async () -> Array[@moonsage.ModuleSummary],
+  fetch_snapshot : async () -> Array[@types.ModuleSummary],
   execute : async (BatchItem) -> BatchAuditResult,
   should_continue : async () -> Bool,
   max_cycles? : Int = 0,
@@ -1085,7 +1085,7 @@ pub async fn run_batch_watch(
 pub async fn run_batch_watch_by_id(
   data_root : String,
   id : String,
-  fetch_snapshot : async () -> Array[@moonsage.ModuleSummary],
+  fetch_snapshot : async () -> Array[@types.ModuleSummary],
   execute : async (BatchItem) -> BatchAuditResult,
   should_continue : async () -> Bool,
   max_cycles? : Int = 0,

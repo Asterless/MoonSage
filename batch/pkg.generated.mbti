@@ -3,8 +3,9 @@ package "moonsage/batch"
 
 import {
   "moonbitlang/core/debug",
-  "moonsage/agent/runtime",
-  "moonsage/llm",
+  "moonsage/ai",
+  "moonsage/runtime",
+  "moonsage/types",
 }
 
 // Values
@@ -70,7 +71,7 @@ pub async fn clear_batch_control(String, String) -> Unit
 
 pub fn completed_fingerprints(Array[BatchRecord]) -> Map[String, String]
 
-pub async fn create_batch(String, String, BatchConfig, Array[@moonsage.ModuleSummary], on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+pub async fn create_batch(String, String, BatchConfig, Array[@types.ModuleSummary], on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
 
 pub fn default_batch_config() -> BatchConfig
 
@@ -78,7 +79,7 @@ pub fn empty_batch_control() -> BatchControl
 
 pub fn empty_validation_summary() -> ValidationSummary
 
-pub fn filter_modules(Array[@moonsage.ModuleSummary], BatchConfig) -> Array[BatchModule] raise
+pub fn filter_modules(Array[@types.ModuleSummary], BatchConfig) -> Array[BatchModule] raise
 
 pub fn finalize_batch_cycle(BatchRecord, Int64) -> Unit
 
@@ -128,11 +129,11 @@ pub async fn run_batch_by_id(String, String, async (BatchItem) -> BatchAuditResu
 
 pub async fn run_batch_once(String, BatchRecord, async (BatchItem) -> BatchAuditResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
 
-pub async fn run_batch_watch(String, BatchRecord, async () -> Array[@moonsage.ModuleSummary], async (BatchItem) -> BatchAuditResult, async () -> Bool, max_cycles? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+pub async fn run_batch_watch(String, BatchRecord, async () -> Array[@types.ModuleSummary], async (BatchItem) -> BatchAuditResult, async () -> Bool, max_cycles? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
 
-pub async fn run_batch_watch_by_id(String, String, async () -> Array[@moonsage.ModuleSummary], async (BatchItem) -> BatchAuditResult, async () -> Bool, max_cycles? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
+pub async fn run_batch_watch_by_id(String, String, async () -> Array[@types.ModuleSummary], async (BatchItem) -> BatchAuditResult, async () -> Bool, max_cycles? : Int, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord?
 
-pub async fn run_mode1_audit_item(BatchItem, BatchConfig, String, String, String, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @llm.ProviderKind, should_skip? : async (String, String, String) -> Bool) -> BatchAuditResult
+pub async fn run_mode1_audit_item(BatchItem, BatchConfig, String, String, String, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @ai.ProviderKind, should_skip? : async (String, String, String) -> Bool) -> BatchAuditResult
 
 pub async fn save_batch(String, BatchRecord, secrets? : Array[String]) -> Unit
 
@@ -140,7 +141,7 @@ pub async fn save_batch_control(String, String, BatchControl) -> Unit
 
 pub fn sensitive_changed_path(String) -> Bool
 
-pub async fn start_batch(String, String, BatchConfig, Array[@moonsage.ModuleSummary], async (BatchItem) -> BatchAuditResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
+pub async fn start_batch(String, String, BatchConfig, Array[@types.ModuleSummary], async (BatchItem) -> BatchAuditResult, on_event? : async (BatchEvent) -> Unit, secrets? : Array[String]) -> BatchRecord
 
 pub fn transition_batch(BatchRecord, BatchStatus, Int64) -> Unit raise
 

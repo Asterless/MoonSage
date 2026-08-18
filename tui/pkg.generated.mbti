@@ -2,11 +2,11 @@
 package "moonsage/tui"
 
 import {
-  "moonsage/llm",
+  "moonsage/ai",
 }
 
 // Values
-pub async fn run_tui(String, String, String, String, String?, Bool, provider? : @llm.ProviderKind) -> Unit
+pub async fn run_tui(String, String, String, String, String?, Bool, provider? : @ai.ProviderKind) -> Unit
 
 // Errors
 

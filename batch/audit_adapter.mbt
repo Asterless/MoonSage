@@ -143,7 +143,7 @@ pub async fn run_mode1_audit_item(
   model : String,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
   on_stage? : async (String) -> Unit = @audit.ignore_audit_stage,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
   should_skip? : async (String, String, String) -> Bool = async fn(
     _owner,
     _repo,

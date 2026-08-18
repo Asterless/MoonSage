@@ -3,8 +3,8 @@ package "moonsage/audit"
 
 import {
   "moonbitlang/core/debug",
-  "moonsage/agent/runtime",
-  "moonsage/llm",
+  "moonsage/ai",
+  "moonsage/runtime",
 }
 
 // Values
@@ -20,9 +20,9 @@ pub async fn run_audit(ArrayView[String]) -> Unit
 
 pub async fn run_final_audit_verification(String, timeout_ms? : Int) -> AuditVerificationSummary
 
-pub async fn run_structured_audit_package(String, String, String, String, workspace? : String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @llm.ProviderKind, should_skip? : async (String, String, String) -> Bool) -> AuditPackageResult
+pub async fn run_structured_audit_package(String, String, String, String, workspace? : String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @ai.ProviderKind, should_skip? : async (String, String, String) -> Bool) -> AuditPackageResult
 
-pub async fn run_structured_audit_project(String, String, String, String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @llm.ProviderKind) -> StructuredAuditResult
+pub async fn run_structured_audit_project(String, String, String, String, max_tool_calls? : Int, max_rounds? : Int, timeout_ms? : Int, on_event? : async (@runtime.EngineEvent) -> Unit, on_stage? : async (String) -> Unit, provider? : @ai.ProviderKind) -> StructuredAuditResult
 
 // Errors
 

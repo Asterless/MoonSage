@@ -168,7 +168,7 @@ pub async fn run_structured_audit_project(
   timeout_ms? : Int = 20 * 60 * 1000,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
   on_stage? : async (String) -> Unit = ignore_audit_stage,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
 ) -> StructuredAuditResult {
   guard api_key != "" else {
     return structured_failure(project_dir, "MOONSAGE_API_KEY is required")
@@ -270,7 +270,7 @@ pub async fn run_structured_audit_package(
   timeout_ms? : Int = 20 * 60 * 1000,
   on_event? : async (@runtime.EngineEvent) -> Unit = @runtime.ignore_event,
   on_stage? : async (String) -> Unit = ignore_audit_stage,
-  provider? : @llm.ProviderKind = OpenAi,
+  provider? : @ai.ProviderKind = OpenAi,
   should_skip? : async (String, String, String) -> Bool = never_skip_package,
 ) -> AuditPackageResult {
   on_stage("fetching") catch {
