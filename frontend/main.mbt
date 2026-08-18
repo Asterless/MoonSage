@@ -94,6 +94,7 @@ struct Model {
   batch : BatchModel
   next_id : Int
   pending_new_session : Bool
+  session_filter : String
 } derive(Eq)
 
 ///|
@@ -121,6 +122,7 @@ enum Msg {
   ToggleTheme
   ViewportChanged(Int)
   NewSession
+  SessionFilterChanged(String)
   ToggleWorkspace
   WorkspacePick
   WorkspacePicked(String)
@@ -258,6 +260,7 @@ fn initial_model() -> Model {
     batch: initial_batch(),
     next_id,
     pending_new_session: false,
+    session_filter: "",
   }
 }
 
@@ -784,6 +787,8 @@ fn update_conversation(
         ),
       )
     }
+    SessionFilterChanged(value) =>
+      ({ ..model, session_filter: value }, @rabbita.none)
     ToggleTheme => {
       let theme = opposite_theme(model.theme)
       ({ ..model, theme, }, persist_theme(theme))
@@ -855,6 +860,7 @@ fn create_new_session(model : Model) -> (Model, Cmd) {
     next_id: model.next_id + 1,
     workspace: { ..model.workspace, session_id, },
     pending_new_session: false,
+    session_filter: "",
   }
   (
     next,
@@ -1056,16 +1062,67 @@ fn command_menu(draft : String, emit : Emit[Msg]) -> Html {
 }
 
 ///|
+///|
+fn group_sessions(
+  sessions : Array[Session],
+  filter : String,
+) -> Array[(String, Array[(Int, Session)])] {
+  // Apply filter first
+  let filtered = if filter.trim() == "" {
+    sessions
+  } else {
+    let lower = filter.trim().to_lower()
+    sessions.filter(fn(s) {
+      s.title.to_lower().contains(lower) || s.detail.to_lower().contains(lower)
+    })
+  }
+  if filtered.is_empty() {
+    return []
+  }
+  // Group by position: newest sessions at the end of the array
+  let len = filtered.length()
+  let groups : Array[(String, Array[(Int, Session)])] = []
+  let today_start = if len >= 1 { len - 1 } else { 0 }
+  let yesterday_start = if len >= 3 { len - 2 } else { 0 }
+  // Build indexed items
+  let items : Array[(Int, Session)] = []
+  for i, session in filtered {
+    items.push((i, session))
+  }
+  // Split into groups
+  if today_start < len {
+    let today_items : Array[(Int, Session)] = []
+    for i = today_start; i < len; i = i + 1 {
+      today_items.push(items[i])
+    }
+    groups.push(("今天", today_items))
+  }
+  if yesterday_start > 0 && yesterday_start < today_start {
+    let yesterday_items : Array[(Int, Session)] = []
+    for i = yesterday_start; i < today_start; i = i + 1 {
+      yesterday_items.push(items[i])
+    }
+    groups.push(("昨天", yesterday_items))
+  }
+  if 0 < yesterday_start {
+    let earlier_items : Array[(Int, Session)] = []
+    for i = 0; i < yesterday_start; i = i + 1 {
+      earlier_items.push(items[i])
+    }
+    groups.push(("更早", earlier_items))
+  }
+  groups
+}
 fn session_view(model : Model, emit : Emit[Msg]) -> Html {
   let workspace_modal = model.workspace.open && model.workspace_overlay
   let drawer_modal = model.sidebar_open && model.compact
   let sidebar_hidden = !model.sidebar_open || workspace_modal
-  let sidebar_attrs = @html.Attrs::build()
+  let base_sidebar_attrs = @html.Attrs::build()
     .aria_label("会话侧栏")
     .aria_hidden(if sidebar_hidden { "true" } else { "false" })
     .inert(sidebar_hidden)
   let sidebar_attrs = if drawer_modal {
-    sidebar_attrs
+    base_sidebar_attrs
     .role("dialog")
     .aria_modal("true")
     .on_keydown(event => {
@@ -1077,30 +1134,45 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
       }
     })
   } else {
-    sidebar_attrs
+    base_sidebar_attrs
   }
-  let rows : Array[Html] = [
-    for index, session in model.sessions => {
+
+  let groups = group_sessions(model.sessions, model.session_filter)
+  let filter_empty = model.session_filter != "" && groups.is_empty()
+  let session_rows : Array[Html] = []
+  for group in groups {
+    let label = group.0
+    let items = group.1
+    session_rows.push(div(class="sidebar-group-label", label))
+    for item in items {
+      let index = item.0
+      let session = item.1
       let active = index == model.active_session
       let class = if active { "session active" } else { "session" }
-      button(
-        class~,
-        type_="button",
-        attrs=@html.Attrs::build().aria_current(
-          if active {
-            "page"
-          } else {
-            "false"
-          },
+      session_rows.push(
+        button(
+          class~,
+          type_="button",
+          attrs=@html.Attrs::build().aria_current(
+            if active { "page" } else { "false" },
+          ),
+          on_click=emit(SelectSession(index)),
+          [
+            span(class="session-title", session.title),
+            span(class="session-detail", session.detail),
+          ],
         ),
-        on_click=emit(SelectSession(index)),
-        [
-          span(class="session-title", session.title),
-          span(class="session-detail", session.detail),
-        ],
       )
     }
-  ]
+  }
+
+  let ws_label = if model.workspace.name != "" {
+    model.workspace.name
+  } else if model.workspace.root != "" {
+    model.workspace.root
+  } else {
+    ""
+  }
   aside(class="sidebar", attrs=sidebar_attrs, [
     div(class="sidebar-head", [
       div(class="brand", [
@@ -1114,6 +1186,16 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
         attrs=@html.Attrs::build().aria_label("折叠侧栏"),
         on_click=emit(ToggleSidebar),
         icon("panel-left-close"),
+      ),
+    ]),
+    div(class="sidebar-search-wrap", [
+      icon("search"),
+      input(
+        class="sidebar-search",
+        value=model.session_filter,
+        placeholder="搜索会话...",
+        attrs=@html.Attrs::build().aria_label("搜索会话"),
+        on_input=emit.map(value => SessionFilterChanged(value)),
       ),
     ]),
     button(class="new-session", type_="button", on_click=emit(NewSession), [
@@ -1131,45 +1213,66 @@ fn session_view(model : Model, emit : Emit[Msg]) -> Html {
         span(class="batch-entry-kicker", "批量审计"),
       ],
     ),
-    div(class="sidebar-label", "对话"),
-    nav(
-      class="session-list",
-      attrs=@html.Attrs::build().aria_label("会话列表"),
-      rows,
-    ),
+    if filter_empty {
+      div(class="session-list", [
+        div(class="sidebar-group-label", "无匹配会话"),
+      ])
+    } else {
+      nav(
+        class="session-list",
+        attrs=@html.Attrs::build().aria_label("会话列表"),
+        session_rows,
+      )
+    },
     div(class="sidebar-footer", [
       div(class="connection-status", [
         span(class="online-dot", ""),
         div(class="footer-copy", [span("Agent API"), span("同源连接")]),
       ]),
       button(
-        class="theme-toggle",
+        class=if ws_label == "" { "workspace-indicator empty" } else { "workspace-indicator" },
         type_="button",
-        title=if model.theme == "dark" {
-          "切换浅色主题"
-        } else {
-          "切换暗色主题"
-        },
-        attrs=@html.Attrs::build()
-          .aria_label(
-            if model.theme == "dark" {
-              "切换浅色主题"
-            } else {
-              "切换暗色主题"
-            },
-          )
-          .aria_pressed(if model.theme == "dark" { "true" } else { "false" }),
-        on_click=emit(ToggleTheme),
-        if model.theme == "dark" {
-          icon("sun")
-        } else {
-          icon("moon")
-        },
+        title=if ws_label != "" { ws_label } else { "选择工作区" },
+        attrs=@html.Attrs::build().aria_label(
+          if ws_label != "" { ws_label } else { "选择工作区" },
+        ),
+        on_click=emit(ToggleWorkspace),
+        [
+          icon("folder"),
+          span(class="workspace-indicator-label",
+            if ws_label != "" { ws_label } else { "未选择工作区" },
+          ),
+        ],
       ),
+      div(class="sidebar-footer-theme", [
+        button(
+          class="theme-toggle",
+          type_="button",
+          title=if model.theme == "dark" {
+            "切换浅色主题"
+          } else {
+            "切换暗色主题"
+          },
+          attrs=@html.Attrs::build()
+            .aria_label(
+              if model.theme == "dark" {
+                "切换浅色主题"
+              } else {
+                "切换暗色主题"
+              },
+            )
+            .aria_pressed(if model.theme == "dark" { "true" } else { "false" }),
+          on_click=emit(ToggleTheme),
+          if model.theme == "dark" {
+            icon("sun")
+          } else {
+            icon("moon")
+          },
+        ),
+      ]),
     ]),
   ])
 }
-
 ///|
 fn request_state_view(
   request : RequestState,
